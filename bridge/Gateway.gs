@@ -131,7 +131,8 @@ function bridgeWritePolicy_(path, op) {
   if (/^(US|HK)\/BASE\//.test(path)) throw new Error('BASE_SEALED');
   if (/^(US|HK)\/DAILY\//.test(path) && op !== 'append')
     throw new Error('DAILY_APPEND_ONLY');
-  if (op === 'append' && !/^(US|HK)\/(DAILY|REPAIR_PATCH|CORPORATE_ACTIONS)\//.test(path))
+  if (op === 'append' && !(/^(US|HK)\/(DAILY|REPAIR_PATCH|CORPORATE_ACTIONS)\//.test(path) ||
+                           /^_BRIDGE_TEST\/DAILY\//.test(path)))
     throw new Error('APPEND_PATH_DENIED');
 }
 function bridgePut_(root, path, body, op) {

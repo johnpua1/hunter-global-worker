@@ -523,6 +523,15 @@ def probe(drive: Drive | None, markets: tuple[str, ...] = MARKETS):
 def run_mini(drive: Drive, markets: tuple[str, ...]):
     """One real security per market, isolated from production checkpoints."""
     for market in markets:
+        for protected, expected in ((f"{market}/BASE/batch-0001.ndjson.gz", "BASE_SEALED"),
+                                    (f"{market}/DAILY/2099-01-01/probe.ndjson.gz", "DAILY_APPEND_ONLY")):
+            try:
+                drive._call("put", path=protected, sha256="0" * 64, data_base64="")
+            except RuntimeError as exc:
+                if "BRIDGE_" + expected not in str(exc):
+                    raise
+            else:
+                raise RuntimeError("PATH_GUARD_FAILED:" + protected)
         state = load_market(drive, market)
         security = state.securities[0]
         rows, flags, splits, reason = fetch_security(
@@ -533,6 +542,15 @@ def run_mini(drive: Drive, markets: tuple[str, ...]):
         stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         path = f"_BRIDGE_TEST/{market}/mini-{stamp}.ndjson.gz"
         drive.put(path, payload, "application/x-gzip", immutable=True)
+        segment = f"_BRIDGE_TEST/DAILY/{market}/mini-{stamp}.ndjson.gz"
+        drive.append(segment, payload, "application/x-gzip")
+        try:
+            drive.append(segment, payload, "application/x-gzip")
+        except RuntimeError as exc:
+            if "BRIDGE_APPEND_CONFLICT" not in str(exc):
+                raise
+        else:
+            raise RuntimeError("APPEND_GUARD_FAILED:" + market)
         LOG.info("mini market=%s security=%s rows=%d sha256=%s flags=%s split_count=%d",
                  market, security["security_id"], len(rows), digest(payload), flags, len(splits))
 

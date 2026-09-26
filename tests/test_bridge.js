@@ -8,4 +8,5 @@ assert.throws(() => context.bridgeWritePolicy_('US/BASE/batch-0001.ndjson.gz', '
 assert.throws(() => context.bridgeWritePolicy_('HK/BASE/batch-0001.ndjson.gz', 'append'), /BASE_SEALED/);
 assert.throws(() => context.bridgeWritePolicy_('HK/DAILY/2026-09-27/part-0001.ndjson.gz', 'put'), /DAILY_APPEND_ONLY/);
 assert.doesNotThrow(() => context.bridgeWritePolicy_('HK/DAILY/2026-09-27/part-0001.ndjson.gz', 'append'));
+assert.doesNotThrow(() => context.bridgeWritePolicy_('_BRIDGE_TEST/DAILY/US/mini.ndjson.gz', 'append'));
 console.log('bridge path guards PASS');

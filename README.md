@@ -19,30 +19,28 @@ disabled by GitHub after 60 days without repository activity. The daily
 it contains no data. This lowers the inactivity risk but cannot recover from
 an already disabled or dropped schedule. Monitor the last successful run.
 
-## Google authorization and safe handoff
+## Apps Script bridge cutover
 
-The live Apps Script project has `hunterUSWorker` and `hunterHKWorker` triggers.
-Keep them enabled until a GitHub **probe** can read Drive and Yahoo. The Google
-Drive connector authorization available to ChatGPT Work cannot be transferred
-to GitHub. The Drive owner must complete a one-time Google OAuth offline
-consent flow. Add these values through GitHub Actions **Secrets**, never in a
-commit, issue, or chat message:
+The existing Apps Script project is named `HUNTER_GLOBAL_BRIDGE`. Its `Gateway.gs`
+handles authenticated file operations only; GitHub runs the US/HK fetcher.
+The script property `HUNTER_GLOBAL_FOLDER_ID` points at the existing Drive root.
+Run `setupBridgeKey` once in the Apps Script editor; it creates
+`BRIDGE_SHARED_KEY` without printing the value. Deploy a Web app as the owner
+with access that allows GitHub's unattended HTTP requests. Add these two
+repository Actions secrets, keeping the key out of commits and logs:
 
-- `HUNTER_GLOBAL_FOLDER_ID`
-- `GOOGLE_OAUTH_CLIENT_ID`
-- `GOOGLE_OAUTH_CLIENT_SECRET`
-- `GOOGLE_OAUTH_REFRESH_TOKEN`
+- `APPS_SCRIPT_WEBAPP_URL`: the deployed `/exec` URL.
+- `APPS_SCRIPT_SHARED_KEY`: the exact `BRIDGE_SHARED_KEY` property value.
 
-Then dispatch `probe` and verify both markets. Wait for Apps Script's current
-executions to finish, turn off both triggers, and reread checkpoint/receipts.
-Only then add secret `HUNTER_SINGLE_WRITER_CUTOVER=CONFIRMED` and repository
-variable `HUNTER_ACTIONS_CUTOVER=CONFIRMED`. Dispatch `base`; the US and HK
-jobs run independently. Re-dispatch `base` if a job times out. Each scheduled
-run also resumes incomplete base batches automatically; verified batches are
-skipped, and an incomplete unverified batch is rebuilt. Once a market's base
-is complete, its scheduled job appends missed sessions in date order.
-The workflow never runs untrusted pull requests with Drive secrets.
+Dispatch `probe` to check both markets' existing Drive checkpoints and
+the source connection. Dispatch `mini` to write one real security per market
+under `_BRIDGE_TEST`; this does not modify production checkpoints.
+Only after both succeed and existing Apps Script executions finish, disable
+the `hunterUSWorker` and `hunterHKWorker` triggers. Set
+`HUNTER_SINGLE_WRITER_CUTOVER=CONFIRMED` as a repository secret and
+`HUNTER_ACTIONS_CUTOVER=CONFIRMED` as a repository variable. Then dispatch
+`base`. The workflow continues unfinished base batches and scheduled daily
+updates, preserving the current VERIFIED receipts and checkpoints.
 
-For a read-only local probe, use `python runner.py --mode probe --market US` or
-`--market HK`. A job without the three Google OAuth values can test Yahoo
-egress, but does **not** prove Drive read access.
+For a local read-only check use `python runner.py --mode probe --market US`
+or `--market HK`. The bridge accepts only paths under the configured root.

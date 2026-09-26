@@ -79,6 +79,7 @@ function bridgeEqual_(a, b) {
 function bridgePath_(path) {
   if (typeof path !== 'string' || path.length > 240) throw new Error('INVALID_PATH');
   if (!path) return '';
+  if (path === 'REPAIR_QUEUE.json' || path === 'BASE_COMPLETE.json') return path;
   var parts = path.split('/');
   if (!/^(US|HK|_BRIDGE_TEST)$/.test(parts[0]) ||
       parts.length > 8 || parts.some(function (p) {
@@ -102,10 +103,12 @@ function bridgeFolder_(root, path, create) {
   return folder;
 }
 function bridgeFile_(root, path) {
-  if (!path || path.indexOf('/') < 0) throw new Error('INVALID_FILE_PATH');
+  if (!path) throw new Error('INVALID_FILE_PATH');
   var split = path.lastIndexOf('/');
+  if (split < 0 && path !== 'REPAIR_QUEUE.json' && path !== 'BASE_COMPLETE.json')
+    throw new Error('INVALID_FILE_PATH');
   var folder;
-  try { folder = bridgeFolder_(root, path.slice(0, split), false); }
+  try { folder = bridgeFolder_(root, split < 0 ? '' : path.slice(0, split), false); }
   catch (err) { if (String(err.message) === 'FOLDER_NOT_FOUND') return null; throw err; }
   var matches = folder.getFilesByName(path.slice(split + 1));
   if (!matches.hasNext()) return null;
@@ -121,7 +124,8 @@ function bridgeSha_(bytes) {
   return digest.map(function (b) { return ('0' + (b & 255).toString(16)).slice(-2); }).join('');
 }
 function bridgePut_(root, path, body) {
-  if (!path || path.indexOf('/') < 0) throw new Error('INVALID_FILE_PATH');
+  if (!path || (path.indexOf('/') < 0 && path !== 'REPAIR_QUEUE.json' && path !== 'BASE_COMPLETE.json'))
+    throw new Error('INVALID_FILE_PATH');
   if (!/^[a-f0-9]{64}$/.test(body.sha256 || '') ||
       typeof body.data_base64 !== 'string' || body.data_base64.length > 14000000)
     throw new Error('INVALID_PAYLOAD');
@@ -136,9 +140,13 @@ function bridgePut_(root, path, body) {
   var staged = null, old = null, oldName = null;
   try {
     var split = path.lastIndexOf('/');
-    var parent = bridgeFolder_(root, path.slice(0, split), true);
-    var name = path.slice(split + 1);
+    var parent = bridgeFolder_(root, split < 0 ? '' : path.slice(0, split), true);
+    var name = split < 0 ? path : path.slice(split + 1);
     old = bridgeFile_(root, path);
+    if (Object.prototype.hasOwnProperty.call(body, 'expected_sha256')) {
+      var actual = old ? bridgeSha_(old.getBlob().getBytes()) : null;
+      if (actual !== body.expected_sha256) throw new Error('STALE_WRITE');
+    }
     if (old && bridgeSha_(old.getBlob().getBytes()) === body.sha256)
       return bridgeJson_({ok: true, file: bridgeInfo_(old, path), sha256: body.sha256});
     if (old && body.immutable === true) throw new Error('IMMUTABLE_CONFLICT');

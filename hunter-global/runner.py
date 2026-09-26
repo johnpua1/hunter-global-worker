@@ -461,9 +461,27 @@ def probe(drive: Drive | None, markets: tuple[str, ...] = MARKETS):
         LOG.info("probe symbol=%s candles=%d", symbol, len(data.get("timestamp") or []))
 
 
+
+def run_mini(drive: Drive, markets: tuple[str, ...]):
+    """One real security per market, isolated from production checkpoints."""
+    for market in markets:
+        state = load_market(drive, market)
+        security = state.securities[0]
+        rows, flags, splits, reason = fetch_security(
+            security, state.calendar, state.checkpoint["as_of"])
+        if not rows:
+            raise RuntimeError("MINI_FETCH_FAILED:" + market + ":" + str(reason))
+        payload = lines_gz(rows)
+        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        path = f"_BRIDGE_TEST/{market}/mini-{stamp}.ndjson.gz"
+        drive.put(path, payload, "application/x-gzip", immutable=True)
+        LOG.info("mini market=%s security=%s rows=%d sha256=%s flags=%s split_count=%d",
+                 market, security["security_id"], len(rows), digest(payload), flags, len(splits))
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("probe", "base", "daily", "auto"), default="probe")
+    parser.add_argument("--mode", choices=("probe", "mini", "base", "daily", "auto"), default="probe")
     parser.add_argument("--market", choices=MARKETS, help="Run one market in an independent job")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -475,6 +493,9 @@ def main():
         return
     if not authenticated:
         raise RuntimeError("BRIDGE_AUTH_MISSING")
+    if args.mode == "mini":
+        run_mini(drive, markets)
+        return
     if os.getenv("HUNTER_SINGLE_WRITER_CUTOVER") != "CONFIRMED":
         raise RuntimeError("SINGLE_WRITER_NOT_CONFIRMED: disable Apps Script triggers first")
     workers = max(1, min(10, int(os.getenv("FETCH_WORKERS", "6"))))

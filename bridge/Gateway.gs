@@ -98,7 +98,9 @@ function bridgeFolder_(root, path, create) {
 function bridgeFile_(root, path) {
   if (!path || path.indexOf('/') < 0) throw new Error('INVALID_FILE_PATH');
   var split = path.lastIndexOf('/');
-  var folder = bridgeFolder_(root, path.slice(0, split), false);
+  var folder;
+  try { folder = bridgeFolder_(root, path.slice(0, split), false); }
+  catch (err) { if (String(err.message) === 'FOLDER_NOT_FOUND') return null; throw err; }
   var matches = folder.getFilesByName(path.slice(split + 1));
   if (!matches.hasNext()) return null;
   var file = matches.next();

@@ -175,11 +175,12 @@ def append_daily_date(drive: Drive, market: str, date: str, securities: list[dic
         # before the call and cannot replace an existing segment.
         drive.append(path, lines_gz(rows), "application/x-gzip")
     if events:
-        action_path = f"{market}/CORPORATE_ACTIONS/{date}.json"
         unique = { (e["security_id"], e["effective_date"], e["factor"]): e
                    for e in events }
+        payload = compact(list(unique.values()))
+        action_path = f"{market}/CORPORATE_ACTIONS/{date}-{digest(payload)[:16]}.json"
         if not drive.file(action_path):
-            drive.append(action_path, compact(list(unique.values())))
+            drive.append(action_path, payload)
     run = {"market": market, "trade_date": date, "status": "COMPLETE",
            "active": len(active), "available": available_today,
            "written": len(rows), "repairs": len(repairs), "updated_at_myt": now_myt()}

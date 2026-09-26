@@ -84,6 +84,8 @@ def run_repair(drive: Drive, market: str, limit: int = 20) -> dict:
     raw = drive.read("REPAIR_QUEUE.json")
     doc = json.loads(raw)
     resolved = 0
+    updates = {}
+    accepted_count = 0
     for item in doc["items"]:
         if item.get("market") != market or item.get("status", "OPEN") != "OPEN":
             continue
@@ -93,9 +95,11 @@ def run_repair(drive: Drive, market: str, limit: int = 20) -> dict:
         if sid not in securities:
             item.update(status="UNRESOLVED", reason="SECURITY_ID_MISSING")
             resolved += 1
+            updates[(sid, item.get("category"), item.get("trade_date"), item.get("batch"))] = dict(item)
             continue
         answer = decide(drive, item, securities[sid])
         if answer["accepted"]:
+            accepted_count += 1
             identity = digest(compact({"market": market, "security_id": sid,
                                        "category": item["category"],
                                        "trade_date": item.get("trade_date")}))[:24]
@@ -114,6 +118,28 @@ def run_repair(drive: Drive, market: str, limit: int = 20) -> dict:
         item["verified_at_myt"] = answer["verified_at_myt"]
         item["reason"] = answer.get("reason")
         resolved += 1
+        updates[(sid, item.get("category"), item.get("trade_date"), item.get("batch"))] = dict(item)
     if resolved:
-        drive.put("REPAIR_QUEUE.json", compact(doc), expected_sha=digest(raw))
+        for _ in range(5):
+            latest = json.loads(raw)
+            for item in latest["items"]:
+                key = (item.get("security_id"), item.get("category"),
+                       item.get("trade_date"), item.get("batch"))
+                if item.get("market") == market and key in updates:
+                    item.update(updates[key])
+            try:
+                drive.put("REPAIR_QUEUE.json", compact(latest), expected_sha=digest(raw))
+                break
+            except RuntimeError as exc:
+                if "BRIDGE_STALE_WRITE" not in str(exc):
+                    raise
+                raw = drive.read("REPAIR_QUEUE.json")
+        else:
+            raise RuntimeError("REPAIR_QUEUE_CAS_EXHAUSTED")
+    if accepted_count:
+        from derived import build
+        checkpoint = f"{market}/CONTROL/DAILY_CHECKPOINT.json"
+        as_of = drive.json(checkpoint)["last_completed_date"] if drive.file(checkpoint) else load_market(
+            drive, market).checkpoint["as_of"]
+        build(drive, market, as_of)
     return {"market": market, "processed": resolved}

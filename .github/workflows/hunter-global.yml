@@ -44,7 +44,7 @@ jobs:
         env:
           APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
           APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
-          HUNTER_SINGLE_WRITER_CUTOVER: ${{ secrets.HUNTER_SINGLE_WRITER_CUTOVER }}
+          HUNTER_ACTIONS_CUTOVER: ${{ vars.HUNTER_ACTIONS_CUTOVER }}
           FETCH_WORKERS: '6'
           HUNTER_MODE: ${{ github.event_name == 'schedule' && 'auto' || inputs.mode }}
           HUNTER_MARKET: ${{ matrix.market }}

@@ -1,4 +1,10 @@
 /** HUNTER_GLOBAL Drive bridge. All paths resolve below the configured root. */
+function setupBridgeKey() {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('BRIDGE_SHARED_KEY')) throw new Error('KEY_ALREADY_CONFIGURED');
+  props.setProperty('BRIDGE_SHARED_KEY', Utilities.getUuid() + Utilities.getUuid());
+  return 'KEY_CREATED';
+}
 function doGet() {
   return bridgeJson_({ok: true, service: 'HUNTER_GLOBAL_BRIDGE'});
 }

@@ -37,9 +37,10 @@ Then dispatch `probe` and verify both markets. Wait for Apps Script's current
 executions to finish, turn off both triggers, and reread checkpoint/receipts.
 Only then add secret `HUNTER_SINGLE_WRITER_CUTOVER=CONFIRMED` and repository
 variable `HUNTER_ACTIONS_CUTOVER=CONFIRMED`. Dispatch `base`; the US and HK
-jobs run independently. Re-dispatch `base` if a job times out: verified batches
-are skipped, and an incomplete unverified batch is rebuilt. Once both markets
-are complete, the daily schedule will append missed sessions in date order.
+jobs run independently. Re-dispatch `base` if a job times out. Each scheduled
+run also resumes incomplete base batches automatically; verified batches are
+skipped, and an incomplete unverified batch is rebuilt. Once a market's base
+is complete, its scheduled job appends missed sessions in date order.
 The workflow never runs untrusted pull requests with Drive secrets.
 
 For a read-only local probe, use `python runner.py --mode probe --market US` or

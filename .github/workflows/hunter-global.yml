@@ -10,6 +10,7 @@ on:
         options:
           - probe
           - mini
+          - auto
           - base
           - daily
           - keepalive
@@ -22,7 +23,7 @@ permissions:
 
 jobs:
   market:
-    if: ${{ inputs.mode != 'keepalive' && ((github.event_name == 'workflow_dispatch' && (inputs.mode == 'probe' || inputs.mode == 'mini')) || vars.HUNTER_ACTIONS_CUTOVER == 'CONFIRMED') }}
+    if: ${{ inputs.mode != 'keepalive' && ((github.event_name == 'workflow_dispatch' && (inputs.mode == 'probe' || inputs.mode == 'mini' || inputs.mode == 'auto')) || vars.HUNTER_ACTIONS_CUTOVER == 'CONFIRMED') }}
     strategy:
       fail-fast: false
       matrix:

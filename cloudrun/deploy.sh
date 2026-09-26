@@ -28,7 +28,7 @@ if ! gcloud artifacts repositories describe hunter-worker --location "$REGION" \
 fi
 gcloud artifacts repositories set-cleanup-policies hunter-worker \
   --location "$REGION" --project "$GCP_PROJECT_ID" \
-  --policy="$ROOT/cloudrun/artifact-cleanup.json"
+  --policy="$ROOT/cloudrun/artifact-cleanup.json" --no-dry-run
 
 SA="hunter-jobs@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 if ! gcloud iam service-accounts describe "$SA" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then

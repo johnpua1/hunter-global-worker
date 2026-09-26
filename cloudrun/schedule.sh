@@ -8,6 +8,14 @@ test "$CLOUD_RUN_US_PASS" = YES
 test "$CLOUD_RUN_HK_PASS" = YES
 REGION=us-central1
 SA="hunter-scheduler@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+# Three schedules are the full project allowance for this deployment.
+# Abort if another schedule already occupies a slot.
+existing="$(gcloud scheduler jobs list --location "$REGION" --project "$GCP_PROJECT_ID" \
+  --format='value(name)')"
+if [[ -n "$existing" ]]; then
+  echo 'Inspect existing Scheduler jobs before creating the three Hunter schedules.' >&2
+  exit 1
+fi
 if ! gcloud iam service-accounts describe "$SA" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
   gcloud iam service-accounts create hunter-scheduler --project "$GCP_PROJECT_ID"
 fi

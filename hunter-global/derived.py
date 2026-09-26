@@ -76,19 +76,31 @@ def build(drive: Drive, market: str, date: str):
             indicator = indicators(adjusted)
             indicator["mae_mfe"] = calculate_anchors(adjusted, anchors[sid])
             derived.append(indicator)
+    # Cross-sectional relative strength uses the current universe itself.
+    # It does not create or imply a benchmark before one is specified.
+    returns = sorted(row["return_20d"] for row in derived if row["return_20d"] is not None)
     for row in derived:
+        if row["return_20d"] is not None and len(returns) > 1:
+            import bisect
+            row["relative_strength_20d"] = bisect.bisect_right(returns, row["return_20d"]) / len(returns)
+        row["filter_pass"] = (row["ma"][20] is not None and
+                              row["dollar_volume_20d"] is not None and
+                              row["trade_date"] == date)
+        row["filter_reason"] = None if row["filter_pass"] else "SHORT_OR_STALE_HISTORY"
         liquidity = row["dollar_volume_20d"] or 0
         row["rank_score"] = (int(row["alignment"] == "BULL") * 2 +
                              int(row["bottom_confirmation"]) +
-                             min(liquidity / 1_000_000, 1))
+                             min(liquidity / 1_000_000, 1) +
+                             (row["relative_strength_20d"] or 0)) if row["filter_pass"] else None
         row["rank_role"] = "RESEARCH_ONLY"
         row["mae_mfe_reason"] = None if row["mae_mfe"] else "SIGNAL_OR_ENTRY_ANCHOR_REQUIRED"
-    derived.sort(key=lambda r: (-r["rank_score"], r["security_id"]))
+    derived.sort(key=lambda r: (r["rank_score"] is None,
+                                -(r["rank_score"] or 0), r["security_id"]))
     # No benchmark is built or assumed. Relative strength stays null until
     # the user supplies an explicit benchmark list.
     path = f"{market}/DERIVED/{date}/RANK.json"
     payload = compact({"market": market, "as_of": date, "rows": derived,
-                       "filters": {"minimum_history_20d": True},
+                       "filters": {"minimum_history_20d": True, "current_date": date},
                        "benchmark": None, "mae_mfe_anchor": None})
     if not drive.file(path) or digest(drive.read(path)) != digest(payload):
         drive.put(path, payload)

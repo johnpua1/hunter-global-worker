@@ -10,15 +10,20 @@ from runner import compact, parse_lines_gz, lines_gz
 
 def compose(base: list[dict], patches: list[dict], daily: list[dict]) -> list[dict]:
     rows = {(r["security_id"], r.get("trade_date", r["date"])): dict(r) for r in base}
+    base_keys = set(rows)
+    repaired = set()
     for patch in patches:
         if patch.get("accepted") is True and patch.get("result") in ("RESOLVED", "IDENTITY_FIXED"):
             for row in patch.get("rows", []):
-                rows[row["security_id"], row.get("trade_date", row["date"])] = dict(row)
+                key = row["security_id"], row.get("trade_date", row["date"])
+                rows[key] = dict(row)
+                repaired.add(key)
     for row in daily:
         key = row["security_id"], row.get("trade_date", row["date"])
-        if key in rows:
+        if key in base_keys:
             raise ValueError("BASE_DAILY_OVERLAP:" + str(key))
-        rows[key] = dict(row)
+        if key not in repaired:
+            rows[key] = dict(row)
     return sorted(rows.values(), key=lambda r: (r["security_id"], r.get("trade_date", r["date"])))
 
 
@@ -127,6 +132,8 @@ def indicators(rows: list[dict], benchmark: list[dict] | None = None) -> dict:
         "rsi14": rsi(close), "macd": macd,
         "macd_signal": signal, "macd_histogram": macd - signal if signal is not None else None,
         "relative_strength_20d": relative, "rank_score": None,
+        "return_20d": change(20, close), "return_60d": change(60, close),
+        "return_252d": change(252, close),
     }
 
 

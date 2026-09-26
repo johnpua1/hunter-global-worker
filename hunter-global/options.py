@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
 import requests
@@ -34,10 +35,13 @@ def monthly(drive: Drive, market: str):
     path = f"{market}/OPTIONS_METADATA/{month}.json"
     if drive.file(path):
         return 0
-    values = [{"security_id": s["security_id"], "status": label(s["ticker"], market),
-               "checked_at_myt": now_myt(), "vertical_usable": "UNKNOWN",
-               "vertical_requires": ["expiry", "strike", "bid_ask"]}
-              for s in current_universe(drive, market)]
+    securities = current_universe(drive, market)
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        statuses = pool.map(lambda s: label(s["ticker"], market), securities)
+        values = [{"security_id": s["security_id"], "status": status,
+                   "checked_at_myt": now_myt(), "vertical_usable": "UNKNOWN",
+                   "vertical_requires": ["expiry", "strike", "bid_ask"]}
+                  for s, status in zip(securities, statuses)]
     drive.put(path, compact({"market": market, "month": month, "items": values}), immutable=True)
     return len(values)
 

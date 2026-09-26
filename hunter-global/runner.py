@@ -522,16 +522,24 @@ def probe(drive: Drive | None, markets: tuple[str, ...] = MARKETS):
 
 def run_mini(drive: Drive, markets: tuple[str, ...]):
     """One real security per market, isolated from production checkpoints."""
+    import base64
     for market in markets:
-        for protected, expected in ((f"{market}/BASE/batch-0001.ndjson.gz", "BASE_SEALED"),
+        base_path = f"{market}/BASE/batch-0001.ndjson.gz"
+        before = digest(drive.read(base_path))
+        probe = b"HUNTER_BRIDGE_WRITE_GUARD_PROBE"
+        for protected, expected in ((base_path, "BASE_SEALED"),
                                     (f"{market}/DAILY/2099-01-01/probe.ndjson.gz", "DAILY_APPEND_ONLY")):
             try:
-                drive._call("put", path=protected, sha256="0" * 64, data_base64="")
+                drive._call("put", path=protected, sha256=digest(probe),
+                            data_base64=base64.b64encode(probe).decode("ascii"),
+                            mime="application/octet-stream")
             except RuntimeError as exc:
                 if "BRIDGE_" + expected not in str(exc):
                     raise
             else:
                 raise RuntimeError("PATH_GUARD_FAILED:" + protected)
+        if digest(drive.read(base_path)) != before:
+            raise RuntimeError("BASE_CHANGED_AFTER_REJECT:" + market)
         state = load_market(drive, market)
         security = state.securities[0]
         rows, flags, splits, reason = fetch_security(

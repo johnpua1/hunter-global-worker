@@ -119,7 +119,13 @@ def refresh(drive: Drive, market: str):
                                "category": "IDENTITY_REVIEW", "problem": "NAME_CHANGED",
                                "status": "OPEN", "recorded_at_myt": now_myt()})
                 continue
-            sec.update({**entry, "listing_status": "ACTIVE"})
+            sec.update({**entry, "listing_status": "ACTIVE", "identity_review": False,
+                        "official_listing_evidence": {
+                            "source_hash": digest(sources["ListOfSecurities.xlsx" if market == "HK"
+                                                         else "nasdaqlisted.txt" if entry["exchange"] == "NASDAQ"
+                                                         else "otherlisted.txt"]),
+                            "ticker": entry["ticker"], "exchange": entry["exchange"],
+                            "isin": entry.get("isin")}})
         else:
             by_isin = known_isin.get(entry.get("isin"), []) if market == "HK" else []
             if entry.get("isin") and len(by_isin) == 1 and symbol_key(by_isin[0]) in missing:

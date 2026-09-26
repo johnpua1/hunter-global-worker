@@ -59,9 +59,9 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(decide(MemoryDrive(), item, security)["result"], "IDENTITY_FIXED")
         security["identity_proof"]["isin"] = "DIFFERENT"
         # Without matching proof the worker cannot assert identity.
-        with patch("repair.load_market", side_effect=RuntimeError("no source")):
-            with self.assertRaises(RuntimeError):
-                decide(MemoryDrive(), item, security)
+        answer = decide(MemoryDrive(), item, security)
+        self.assertEqual(answer["result"], "UNRESOLVED")
+        self.assertFalse(answer["accepted"])
 
     def test_options_status_stales_after_missed_monthly_refresh(self):
         self.assertEqual(current_status({"status": "TRUE", "checked_at_myt": "2026-08-01T09:00:00+08:00"},
@@ -82,6 +82,13 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(result["5D"]["days_to_MFE"], 5)
         self.assertAlmostEqual(result["5D"]["final_return"], .05)
         self.assertEqual(result["instrument"], "UNDERLYING")
+
+    def test_accepted_daily_repair_wins_without_modifying_daily(self):
+        bad = row("2026-01-02", 40)
+        good = row("2026-01-02", 50)
+        patch = [{"accepted": True, "result": "RESOLVED", "rows": [good]}]
+        self.assertEqual(compose([row("2026-01-01", 100)], patch, [bad])[-1]["close"], 50)
+        self.assertEqual(bad["close"], 40)
 
     def test_bottom_confirmation_requires_two_closes_and_ma20(self):
         rows = [row((dt.date(2026, 1, 1) + dt.timedelta(days=i)).isoformat(),

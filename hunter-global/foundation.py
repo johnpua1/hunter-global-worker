@@ -89,7 +89,8 @@ def flag_five_day_failures(drive: Drive, market: str, date: str,
     queue = drive.json("REPAIR_QUEUE.json")["items"]
     failures = defaultdict(set)
     for item in queue:
-        if item.get("market") == market and item.get("category") == "FETCH_FAILED":
+        if (item.get("market") == market and item.get("category") == "FETCH_FAILED" and
+                item.get("status", "OPEN") == "OPEN"):
             failures[item.get("security_id")].add(item.get("trade_date"))
     suspects = {sid for sid, days in failures.items() if set(valid_days) <= days}
     if not suspects:
@@ -120,8 +121,11 @@ def append_daily_date(drive: Drive, market: str, date: str, securities: list[dic
     target = [s for s in active if last[s["security_id"]] is None or
               last[s["security_id"]] < date]
     from concurrent.futures import ThreadPoolExecutor
-    calendar = closed_dates_since(market, min((last[s["security_id"]] or
-                                             base_calendar[0]) for s in target)) if target else []
+    def history_start(security):
+        return (last[security["security_id"]] or
+                (security.get("listing_date") if security.get("listing_date_verified") else None) or
+                "1970-01-01")
+    calendar = closed_dates_since(market, min(map(history_start, target))) if target else []
     calendar = sorted(set(base_calendar + calendar))
     if date not in calendar:
         calendar.append(date)
@@ -212,9 +216,28 @@ def run_daily(drive: Drive, market: str, workers: int):
         previous["last_completed_date"] = date
         previous["updated_at_myt"] = now_myt()
         drive.put(checkpoint, compact(previous))
+        update_new_listing_history(drive, market, keys)
         from derived import build
         build(drive, market, date)
     return results
+
+
+def update_new_listing_history(drive: Drive, market: str, keys: set):
+    path = f"{market}/CURRENT_UNIVERSE.json"
+    raw = drive.read(path)
+    doc = json.loads(raw)
+    counts = defaultdict(int)
+    for sid, _ in keys:
+        counts[sid] += 1
+    changed = False
+    for security in doc["securities"]:
+        if security.get("security_id_origin") == "NEW_LISTING":
+            status = "SHORT_HISTORY" if counts[security["security_id"]] < 501 else "FULL_HISTORY"
+            if security.get("history_status") != status:
+                security["history_status"] = status
+                changed = True
+    if changed:
+        drive.put(path, compact(doc), expected_sha=digest(raw))
 
 
 def seed_corporate_actions(drive: Drive, market: str):

@@ -14,16 +14,13 @@ on:
           - daily
           - analytics
           - keepalive
-  schedule:
-    # UTC 00:37 = MYT 08:37. Avoid GitHub's busy top of the hour.
-    - cron: '37 0 * * *'
 
 permissions:
   contents: read
 
 jobs:
   market:
-    if: ${{ inputs.mode != 'keepalive' && ((github.event_name == 'workflow_dispatch' && (inputs.mode == 'probe' || inputs.mode == 'mini' || inputs.mode == 'auto' || inputs.mode == 'analytics')) || vars.HUNTER_ACTIONS_CUTOVER == 'CONFIRMED') }}
+    if: ${{ inputs.mode != 'keepalive' && github.event_name == 'workflow_dispatch' && (inputs.mode == 'probe' || inputs.mode == 'mini' || inputs.mode == 'auto' || inputs.mode == 'analytics') }}
     strategy:
       fail-fast: false
       matrix:
@@ -47,14 +44,13 @@ jobs:
           APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
           HUNTER_ACTIONS_CUTOVER: ${{ vars.HUNTER_ACTIONS_CUTOVER }}
           FETCH_WORKERS: '6'
-          HUNTER_MODE: ${{ github.event_name == 'schedule' && 'auto' || inputs.mode }}
+          HUNTER_MODE: ${{ inputs.mode }}
           HUNTER_MARKET: ${{ matrix.market }}
         run: |
           python runner.py --mode "$HUNTER_MODE" --market "$HUNTER_MARKET"
 
   keepalive:
-    # An empty commit records repository activity without storing market data.
-    if: ${{ (github.event_name == 'schedule' && vars.HUNTER_ACTIONS_CUTOVER == 'CONFIRMED') || inputs.mode == 'keepalive' }}
+    if: ${{ inputs.mode == 'keepalive' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -66,10 +62,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: true
-      - name: Keep the scheduled repository active
+      - name: Keep the repository active
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git pull --ff-only origin main
-          git commit --allow-empty -m 'ci: keep scheduled worker active [skip ci]'
+          git commit --allow-empty -m 'ci: manual keepalive [skip ci]'
           git push origin HEAD:main

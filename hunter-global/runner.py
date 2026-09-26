@@ -362,8 +362,8 @@ def commit_batch(drive: Drive, state: MarketState, batch: int, workers: int):
         "manifest_sha256": digest(manifest), "status_sha256": digest(status_bytes),
         "verified_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
-    drive.put(f"{market}/VERIFIED/batch-{batch:04d}.json", compact(receipt), immutable=True)
     drive.append_repairs(market, batch, statuses, reasons)
+    drive.put(f"{market}/VERIFIED/batch-{batch:04d}.json", compact(receipt), immutable=True)
     cp.setdefault("verified_batches", {})[str(batch)] = {
         "sha256": digest(base), "row_count": len(rows),
         "security_count": len(statuses), "worker_id": "hunter-global-actions-v1",

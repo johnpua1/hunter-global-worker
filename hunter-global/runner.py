@@ -543,7 +543,7 @@ def main():
     if args.mode == "mini":
         run_mini(drive, markets)
         return
-    if os.getenv("HUNTER_SINGLE_WRITER_CUTOVER") != "CONFIRMED":
+    if os.getenv("HUNTER_ACTIONS_CUTOVER") != "CONFIRMED":
         raise RuntimeError("SINGLE_WRITER_NOT_CONFIRMED: disable Apps Script triggers first")
     workers = max(1, min(10, int(os.getenv("FETCH_WORKERS", "6"))))
     if args.mode == "base":

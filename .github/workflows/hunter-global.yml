@@ -47,7 +47,7 @@ jobs:
           GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
           HUNTER_SINGLE_WRITER_CUTOVER: ${{ secrets.HUNTER_SINGLE_WRITER_CUTOVER }}
           FETCH_WORKERS: '6'
-          HUNTER_MODE: ${{ github.event_name == 'schedule' && 'daily' || inputs.mode }}
+          HUNTER_MODE: ${{ github.event_name == 'schedule' && 'auto' || inputs.mode }}
           HUNTER_MARKET: ${{ matrix.market }}
         run: python runner.py --mode "$HUNTER_MODE" --market "$HUNTER_MARKET"
 

@@ -14,6 +14,13 @@ repair, catches up weekly official listing refresh, aggregates existing split
 events, and catches up the current month's options labels. An independent
 benchmark remains unset until the user supplies the benchmark definition.
 
+At the planning assumption of 8,466 securities, two seconds per fetch, ten
+internal workers, and 22 trading days, 1 vCPU uses about 37,200 vCPU-seconds
+per month (15.5% of the 240,000 vCPU-second Cloud Run allowance). This is a
+capacity estimate, not proof of RM0 billing; inspect actual free-tier usage,
+memory, network, Cloud Build, Registry storage, and other projects on the same
+billing account.
+
 Manually execute US and HK in Cloud Run, inspect each execution's exit status,
 logs, checkpoint readback, BASE SHA, and Drive sidecar/write receipts. Run each
 twice and confirm the second run adds zero DAILY rows. Execute maintenance on

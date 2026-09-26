@@ -1,0 +1,73 @@
+name: Hunter Global Drive worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Read-only probe, resume base, or append missed daily sessions
+        required: true
+        type: choice
+        options:
+          - probe
+          - base
+          - daily
+  schedule:
+    # UTC 00:37 = MYT 08:37. Avoid GitHub's busy top of the hour.
+    - cron: '37 0 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  market:
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.mode == 'probe') || vars.HUNTER_ACTIONS_CUTOVER == 'CONFIRMED' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        market: [US, HK]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    concurrency:
+      group: hunter-global-${{ matrix.market }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned dependencies
+        run: python -m pip install -r hunter-global/requirements.txt
+      - name: Process market
+        working-directory: hunter-global
+        env:
+          HUNTER_GLOBAL_FOLDER_ID: ${{ secrets.HUNTER_GLOBAL_FOLDER_ID }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+          HUNTER_SINGLE_WRITER_CUTOVER: ${{ secrets.HUNTER_SINGLE_WRITER_CUTOVER }}
+          FETCH_WORKERS: '6'
+          HUNTER_MODE: ${{ github.event_name == 'schedule' && 'daily' || inputs.mode }}
+          HUNTER_MARKET: ${{ matrix.market }}
+        run: python runner.py --mode "$HUNTER_MODE" --market "$HUNTER_MARKET"
+
+  keepalive:
+    # An empty commit records repository activity without storing market data.
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    concurrency:
+      group: hunter-global-keepalive
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Keep the scheduled repository active
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git pull --ff-only origin main
+          git commit --allow-empty -m 'ci: keep scheduled worker active [skip ci]'
+          git push origin HEAD:main

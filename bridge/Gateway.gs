@@ -135,6 +135,30 @@ function bridgeWritePolicy_(path, op) {
                            /^_BRIDGE_TEST\/DAILY\//.test(path)))
     throw new Error('APPEND_PATH_DENIED');
 }
+function bridgeDailyKeys_(path, bytes) {
+  var match = /^(US|HK)\/DAILY\/(\d{4}-\d{2}-\d{2})\/[^/]+\.ndjson\.gz$/.exec(path) ||
+      /^_BRIDGE_TEST\/DAILY\/(US|HK)\/(\d{4}-\d{2}-\d{2})\/[^/]+\/[^/]+\.ndjson\.gz$/.exec(path);
+  if (!match) return null;
+  var market = match[1], date = match[2];
+  var rows;
+  try {
+    rows = Utilities.ungzip(Utilities.newBlob(bytes)).getDataAsString('UTF-8')
+        .split('\n').filter(function (line) { return line.length > 0; })
+        .map(function (line) { return JSON.parse(line); });
+  } catch (err) { throw new Error('DAILY_PAYLOAD_INVALID'); }
+  if (!rows.length) throw new Error('DAILY_PAYLOAD_EMPTY');
+  var keys = {};
+  rows.forEach(function (row) {
+    var sid = row.security_id, tradeDate = row.trade_date || row.date;
+    if (typeof sid !== 'string' || sid.indexOf(market + '-') !== 0 ||
+        tradeDate !== date || row.date !== date)
+      throw new Error('DAILY_ROW_IDENTITY_INVALID');
+    var key = sid + '|' + tradeDate;
+    if (keys[key]) throw new Error('DAILY_DUPLICATE_KEY');
+    keys[key] = true;
+  });
+  return keys;
+}
 function bridgePut_(root, path, body, op) {
   bridgeWritePolicy_(path, op);
   if (!path || (path.indexOf('/') < 0 && path !== 'REPAIR_QUEUE.json' && path !== 'BASE_COMPLETE.json'))
@@ -157,6 +181,21 @@ function bridgePut_(root, path, body, op) {
     var name = split < 0 ? path : path.slice(split + 1);
     old = bridgeFile_(root, path);
     if (op === 'append' && old) throw new Error('APPEND_CONFLICT');
+    if (op === 'append') {
+      var dailyKeys = bridgeDailyKeys_(path, bytes);
+      if (dailyKeys) {
+        var peers = parent.getFiles();
+        while (peers.hasNext()) {
+          var peer = peers.next();
+          if (!/\.ndjson\.gz$/.test(peer.getName())) continue;
+          var storedKeys = bridgeDailyKeys_(path.slice(0, split + 1) + peer.getName(),
+                                            peer.getBlob().getBytes());
+          Object.keys(dailyKeys).forEach(function (key) {
+            if (storedKeys[key]) throw new Error('DAILY_DUPLICATE_KEY');
+          });
+        }
+      }
+    }
     if (Object.prototype.hasOwnProperty.call(body, 'expected_sha256')) {
       var actual = old ? bridgeSha_(old.getBlob().getBytes()) : null;
       if (actual !== body.expected_sha256) throw new Error('STALE_WRITE');

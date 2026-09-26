@@ -35,12 +35,13 @@ repository Actions secrets, keeping the key out of commits and logs:
 Dispatch `probe` to check both markets' existing Drive checkpoints and
 the source connection. Dispatch `mini` to write one real security per market
 under `_BRIDGE_TEST`; this does not modify production checkpoints.
-Only after both succeed and existing Apps Script executions finish, disable
-the `hunterUSWorker` and `hunterHKWorker` triggers. Set
-`HUNTER_SINGLE_WRITER_CUTOVER=CONFIRMED` as a repository secret and
-`HUNTER_ACTIONS_CUTOVER=CONFIRMED` as a repository variable. Then dispatch
-`base`. The workflow continues unfinished base batches and scheduled daily
-updates, preserving the current VERIFIED receipts and checkpoints.
+The old Apps Script Hunter handlers are inert. The repository variable
+`HUNTER_ACTIONS_CUTOVER=CONFIRMED` enables production jobs. Dispatch `base`
+to resume existing batches. Scheduled runs remain in BASE mode until both
+markets finish, then write `BASE_COMPLETE.json` and append closed trading
+sessions on subsequent schedules. The shared `REPAIR_QUEUE.json` is preserved
+and appended with conditional writes. VERIFIED receipts and checkpoints remain
+the authority.
 
 For a local read-only check use `python runner.py --mode probe --market US`
 or `--market HK`. The bridge accepts only paths under the configured root.

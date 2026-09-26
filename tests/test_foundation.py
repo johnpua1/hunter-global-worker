@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hunter-global"))
 from analytics import compose, excursions, indicators, split_adjust
 from foundation import append_daily_date
 from options import current_status
+from repair import decide
 from runner import compact, parse_lines_gz
 
 
@@ -48,6 +49,20 @@ def row(date, close, sid="US-000001", anchor="2026-01-01"):
 
 
 class FoundationTests(unittest.TestCase):
+    def test_hk_identity_fix_requires_official_isin_proof(self):
+        item = {"market": "HK", "security_id": "HK-000001", "category": "IDENTITY_REVIEW",
+                "problem": "OFFICIAL_ISIN_SAME_NEW_TICKER"}
+        security = {"ticker": "0002.HK", "exchange": "HKEX", "isin": "HK123",
+                    "identity_proof": {"kind": "HK_ISIN_MATCH", "isin": "HK123",
+                                       "old_ticker": "0001.HK", "new_ticker": "0002.HK",
+                                       "source_hash": "abc"}}
+        self.assertEqual(decide(MemoryDrive(), item, security)["result"], "IDENTITY_FIXED")
+        security["identity_proof"]["isin"] = "DIFFERENT"
+        # Without matching proof the worker cannot assert identity.
+        with patch("repair.load_market", side_effect=RuntimeError("no source")):
+            with self.assertRaises(RuntimeError):
+                decide(MemoryDrive(), item, security)
+
     def test_options_status_stales_after_missed_monthly_refresh(self):
         self.assertEqual(current_status({"status": "TRUE", "checked_at_myt": "2026-08-01T09:00:00+08:00"},
                                         "2026-09"), "STALE")

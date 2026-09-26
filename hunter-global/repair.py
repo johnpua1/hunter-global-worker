@@ -31,6 +31,14 @@ def decide(drive: Drive, item: dict, security: dict) -> dict:
     result = {"market": market, "security_id": sid,
               "category": item["category"], "accepted": False,
               "verified_at_myt": now_myt(), "evidence": evidence, "rows": []}
+    proof = security.get("identity_proof")
+    if (item["category"] == "IDENTITY_REVIEW" and
+            item.get("problem") == "OFFICIAL_ISIN_SAME_NEW_TICKER" and
+            market == "HK" and proof and proof.get("kind") == "HK_ISIN_MATCH" and
+            proof.get("isin") == security.get("isin") and
+            proof.get("new_ticker") == security["ticker"] and proof.get("source_hash")):
+        return {**result, "result": "IDENTITY_FIXED", "accepted": True,
+                "evidence": {**evidence, "official_identity_proof": proof}}
     date = item.get("trade_date")
     if date:
         outage = f"{market}/CONTROL/DAILY_RUN_{date}.json"

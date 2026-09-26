@@ -99,8 +99,11 @@ def refresh(drive: Drive, market: str):
                   mime="application/octet-stream", immutable=True)
     max_id = max(int(s["security_id"].rsplit("-", 1)[1]) for s in doc["securities"])
     known = defaultdict(list)
+    known_isin = defaultdict(list)
     for sec in doc["securities"]:
         known[symbol_key(sec)].append(sec)
+        if market == "HK" and sec.get("isin"):
+            known_isin[sec["isin"]].append(sec)
     changed, review = 0, []
     for symbol, entry in observed.items():
         matches = known.get(symbol, [])
@@ -118,6 +121,22 @@ def refresh(drive: Drive, market: str):
                 continue
             sec.update({**entry, "listing_status": "ACTIVE"})
         else:
+            by_isin = known_isin.get(entry.get("isin"), []) if market == "HK" else []
+            if entry.get("isin") and len(by_isin) == 1 and symbol_key(by_isin[0]) in missing:
+                sec = by_isin[0]
+                old_ticker = sec["ticker"]
+                old_key = symbol_key(sec)
+                sec.update({**entry, "listing_status": "ACTIVE",
+                            "identity_proof": {"kind": "HK_ISIN_MATCH",
+                                               "isin": entry["isin"],
+                                               "old_ticker": old_ticker,
+                                               "new_ticker": entry["ticker"],
+                                               "source_hash": digest(sources["ListOfSecurities.xlsx"])}})
+                review.append({"market": market, "security_id": sec["security_id"],
+                               "category": "IDENTITY_REVIEW", "problem": "OFFICIAL_ISIN_SAME_NEW_TICKER",
+                               "status": "OPEN", "recorded_at_myt": now_myt()})
+                missing.remove(old_key)
+                continue
             max_id += 1
             doc["securities"].append({**entry, "market": market,
                                        "currency": "USD" if market == "US" else "HKD",

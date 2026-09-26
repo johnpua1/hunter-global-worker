@@ -7,17 +7,13 @@ on:
         required: true
         type: choice
         options: [repair, universe, options]
-  schedule:
-    - cron: '19 1 * * 1'  # Weekly listing refresh, MYT Monday 09:19
-    - cron: '43 1 1 * *'  # Monthly options refresh, MYT first day 09:43
-    - cron: '11 3 * * *'  # Independent repair pass, MYT 11:11
 
 permissions:
   contents: read
 
 jobs:
   market:
-    if: ${{ vars.HUNTER_FOUNDATION_CUTOVER == 'CONFIRMED' }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 330
     strategy:
@@ -39,6 +35,6 @@ jobs:
           APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
           APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
           HUNTER_ACTIONS_CUTOVER: ${{ vars.HUNTER_ACTIONS_CUTOVER }}
-          HUNTER_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (github.event.schedule == '19 1 * * 1' && 'universe' || (github.event.schedule == '43 1 1 * *' && 'options' || 'repair')) }}
+          HUNTER_MODE: ${{ inputs.mode }}
           HUNTER_MARKET: ${{ matrix.market }}
         run: python runner.py --mode "$HUNTER_MODE" --market "$HUNTER_MARKET"

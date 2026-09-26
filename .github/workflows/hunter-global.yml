@@ -53,7 +53,7 @@ jobs:
 
   keepalive:
     # An empty commit records repository activity without storing market data.
-    if: ${{ github.event_name == 'schedule' || inputs.mode == 'keepalive' }}
+    if: ${{ (github.event_name == 'schedule' && vars.HUNTER_ACTIONS_CUTOVER == 'CONFIRMED') || inputs.mode == 'keepalive' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

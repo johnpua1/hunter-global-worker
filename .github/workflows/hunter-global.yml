@@ -41,10 +41,8 @@ jobs:
       - name: Process market
         working-directory: hunter-global
         env:
-          HUNTER_GLOBAL_FOLDER_ID: ${{ secrets.HUNTER_GLOBAL_FOLDER_ID }}
-          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
-          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
-          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
           HUNTER_SINGLE_WRITER_CUTOVER: ${{ secrets.HUNTER_SINGLE_WRITER_CUTOVER }}
           FETCH_WORKERS: '6'
           HUNTER_MODE: ${{ github.event_name == 'schedule' && 'auto' || inputs.mode }}

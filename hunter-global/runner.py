@@ -22,8 +22,6 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import requests
-from google.auth.transport.requests import AuthorizedSession
-from google.oauth2.credentials import Credentials
 
 
 ROOT = "https://www.googleapis.com/drive/v3/files"
@@ -71,131 +69,72 @@ def retry_http(session, method: str, url: str, **kwargs):
 
 
 class Drive:
-    def __init__(self, root_id: str):
-        needed = (
-            "GOOGLE_OAUTH_CLIENT_ID",
-            "GOOGLE_OAUTH_CLIENT_SECRET",
-            "GOOGLE_OAUTH_REFRESH_TOKEN",
-        )
+    """Restricted Apps Script transport for this Hunter worker."""
+
+    def __init__(self):
+        needed = ("APPS_SCRIPT_WEBAPP_URL", "APPS_SCRIPT_SHARED_KEY")
         missing = [key for key in needed if not os.environ.get(key)]
         if missing:
-            raise RuntimeError("DRIVE_AUTH_MISSING:" + ",".join(missing))
-        credentials = Credentials(
-            token=None,
-            refresh_token=os.environ["GOOGLE_OAUTH_REFRESH_TOKEN"],
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=os.environ["GOOGLE_OAUTH_CLIENT_ID"],
-            client_secret=os.environ["GOOGLE_OAUTH_CLIENT_SECRET"],
-            scopes=["https://www.googleapis.com/auth/drive"],
-        )
-        self.http = AuthorizedSession(credentials)
-        self.root_id = root_id
-        self.folders: dict[str, str] = {"": root_id}
+            raise RuntimeError("BRIDGE_AUTH_MISSING:" + ",".join(missing))
+        self.url = os.environ["APPS_SCRIPT_WEBAPP_URL"]
+        if not (self.url.startswith("https://script.google.com/macros/s/") and self.url.endswith("/exec")):
+            raise RuntimeError("BRIDGE_URL_INVALID")
+        self.key = os.environ["APPS_SCRIPT_SHARED_KEY"]
+        self.http = requests.Session()
+        self.folders: dict[str, str] = {"": ""}
+
+    def _call(self, op: str, **fields) -> dict:
+        request = {"op": op, "key": self.key, **fields}
+        for attempt in range(5):
+            try:
+                response = self.http.post(self.url, json=request, timeout=120)
+                response.raise_for_status()
+                result = response.json()
+                if not result.get("ok"):
+                    raise RuntimeError("BRIDGE_" + str(result.get("error", "UNKNOWN")))
+                return result
+            except (requests.RequestException, ValueError):
+                if attempt == 4:
+                    raise
+                time.sleep(min(30, 2 ** attempt + random.random()))
+        raise AssertionError("unreachable")
 
     def list(self, parent_id: str, name: str | None = None) -> list[dict]:
-        query = f"'{parent_id}' in parents and trashed = false"
-        if name is not None:
-            query += " and name = '" + name.replace("\\", "\\\\").replace("'", "\\'") + "'"
-        results, token = [], None
-        while True:
-            params = {
-                "q": query,
-                "fields": "nextPageToken,files(id,name,mimeType,size,md5Checksum)",
-                "pageSize": 1000,
-                "supportsAllDrives": "true",
-                "includeItemsFromAllDrives": "true",
-            }
-            if token:
-                params["pageToken"] = token
-            response = retry_http(self.http, "GET", ROOT, params=params).json()
-            results.extend(response.get("files", []))
-            token = response.get("nextPageToken")
-            if not token:
-                return results
+        return self._call("list", path=parent_id, name=name)["files"]
 
     def folder(self, path: str, create: bool = False) -> str:
         path = path.strip("/")
         if path in self.folders:
-            return self.folders[path]
-        parent, _, name = path.rpartition("/")
-        parent_id = self.folder(parent, create=create)
-        matches = self.list(parent_id, name)
-        if len(matches) > 1:
-            raise RuntimeError("DUPLICATE_FOLDER:" + path)
-        if not matches:
-            if not create:
-                raise FileNotFoundError(path)
-            metadata = {"name": name, "mimeType": "application/vnd.google-apps.folder", "parents": [parent_id]}
-            item = retry_http(self.http, "POST", ROOT, json=metadata, params={"fields": "id"}).json()
-        else:
-            item = matches[0]
-            if item["mimeType"] != "application/vnd.google-apps.folder":
-                raise RuntimeError("NOT_FOLDER:" + path)
-        self.folders[path] = item["id"]
-        return item["id"]
+            return path
+        self._call("folder", path=path, create=create)
+        self.folders[path] = path
+        return path
 
     def file(self, path: str) -> dict | None:
-        directory, _, name = path.strip("/").rpartition("/")
-        parent = self.folder(directory)
-        matches = self.list(parent, name)
-        if len(matches) > 1:
-            raise RuntimeError("DUPLICATE_FILE:" + path)
-        return matches[0] if matches else None
+        return self._call("file", path=path.strip("/")).get("file")
 
     def read(self, path: str) -> bytes:
-        item = self.file(path)
-        if not item:
-            raise FileNotFoundError(path)
-        return retry_http(self.http, "GET", ROOT + "/" + item["id"], params={"alt": "media"}).content
+        import base64
+        result = self._call("read", path=path.strip("/"))
+        data = base64.b64decode(result["data_base64"], validate=True)
+        if digest(data) != result["sha256"]:
+            raise RuntimeError("BRIDGE_READ_SHA_MISMATCH:" + path)
+        return data
 
     def json(self, path: str) -> Any:
         return json.loads(self.read(path))
 
     def put(self, path: str, content: bytes, mime: str = "application/json", immutable=False):
-        directory, _, name = path.strip("/").rpartition("/")
-        parent = self.folder(directory, create=True)
-        existing = self.file(path)
-        if existing and immutable:
-            if digest(self.read(path)) == digest(content):
-                return existing
-            raise RuntimeError("IMMUTABLE_CONFLICT:" + path)
-        if existing:
-            response = retry_http(
-                self.http, "PATCH", UPLOAD + "/" + existing["id"],
-                params={"uploadType": "media", "fields": "id,name,size"},
-                data=content, headers={"Content-Type": mime},
-            )
-        else:
-            boundary = "hunter-" + hashlib.sha256(content).hexdigest()[:16]
-            metadata = compact({"name": name, "parents": [parent]})
-            body = (
-                b"--" + boundary.encode() + b"\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"
-                + metadata + b"\r\n--" + boundary.encode() + b"\r\nContent-Type: "
-                + mime.encode() + b"\r\n\r\n" + content + b"\r\n--" + boundary.encode() + b"--\r\n"
-            )
-            # A timed-out create may already have succeeded. Resolve by name
-            # before a retry so an ambiguous response cannot duplicate a file.
-            for attempt in range(3):
-                try:
-                    response = self.http.post(
-                        UPLOAD, params={"uploadType": "multipart", "fields": "id,name,size"},
-                        data=body, headers={"Content-Type": "multipart/related; boundary=" + boundary},
-                        timeout=90,
-                    )
-                    response.raise_for_status()
-                    break
-                except requests.RequestException:
-                    found = self.file(path)
-                    if found:
-                        if digest(self.read(path)) != digest(content):
-                            raise RuntimeError("CREATE_AMBIGUOUS_CONFLICT:" + path)
-                        return found
-                    if attempt == 2:
-                        raise
-                    time.sleep(2 ** attempt)
+        import base64
+        result = self._call(
+            "put", path=path.strip("/"), data_base64=base64.b64encode(content).decode("ascii"),
+            sha256=digest(content), mime=mime, immutable=immutable,
+        )
+        if result["sha256"] != digest(content):
+            raise RuntimeError("BRIDGE_WRITE_SHA_MISMATCH:" + path)
         if digest(self.read(path)) != digest(content):
             raise RuntimeError("DRIVE_READBACK_MISMATCH:" + path)
-        return response.json()
+        return result["file"]
 
 
 def yahoo_chart(symbol: str, start_date: str, end_date: str) -> dict:
@@ -528,18 +467,14 @@ def main():
     parser.add_argument("--market", choices=MARKETS, help="Run one market in an independent job")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    root_id = os.getenv("HUNTER_GLOBAL_FOLDER_ID")
-    if not root_id and args.mode != "probe":
-        raise RuntimeError("HUNTER_GLOBAL_FOLDER_ID_MISSING")
-    authenticated = all(os.getenv(v) for v in
-                        ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET", "GOOGLE_OAUTH_REFRESH_TOKEN"))
-    drive = Drive(root_id) if authenticated and root_id else None
+    authenticated = all(os.getenv(v) for v in ("APPS_SCRIPT_WEBAPP_URL", "APPS_SCRIPT_SHARED_KEY"))
+    drive = Drive() if authenticated else None
     markets = (args.market,) if args.market else MARKETS
     if args.mode == "probe":
         probe(drive, markets)
         return
     if not authenticated:
-        raise RuntimeError("DRIVE_AUTH_MISSING: one-time Google offline OAuth required")
+        raise RuntimeError("BRIDGE_AUTH_MISSING")
     if os.getenv("HUNTER_SINGLE_WRITER_CUTOVER") != "CONFIRMED":
         raise RuntimeError("SINGLE_WRITER_NOT_CONFIRMED: disable Apps Script triggers first")
     workers = max(1, min(10, int(os.getenv("FETCH_WORKERS", "6"))))

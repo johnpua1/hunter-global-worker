@@ -11,6 +11,7 @@ on:
           - probe
           - base
           - daily
+          - keepalive
   schedule:
     # UTC 00:37 = MYT 08:37. Avoid GitHub's busy top of the hour.
     - cron: '37 0 * * *'
@@ -20,7 +21,7 @@ permissions:
 
 jobs:
   market:
-    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.mode == 'probe') || vars.HUNTER_ACTIONS_CUTOVER == 'CONFIRMED' }}
+    if: ${{ inputs.mode != 'keepalive' && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'probe') || vars.HUNTER_ACTIONS_CUTOVER == 'CONFIRMED') }}
     strategy:
       fail-fast: false
       matrix:
@@ -52,7 +53,7 @@ jobs:
 
   keepalive:
     # An empty commit records repository activity without storing market data.
-    if: ${{ github.event_name == 'schedule' }}
+    if: ${{ github.event_name == 'schedule' || inputs.mode == 'keepalive' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

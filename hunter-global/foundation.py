@@ -213,12 +213,14 @@ def run_daily(drive: Drive, market: str, workers: int):
         results.append(result)
         if result["status"] != "COMPLETE":
             break
-        previous["last_completed_date"] = date
-        previous["updated_at_myt"] = now_myt()
-        drive.put(checkpoint, compact(previous))
+        # A retry after an interrupted derived build can safely re-read the
+        # appended rows; only advance the checkpoint after all work succeeds.
         update_new_listing_history(drive, market, keys)
         from derived import build
         build(drive, market, date)
+        previous["last_completed_date"] = date
+        previous["updated_at_myt"] = now_myt()
+        drive.put(checkpoint, compact(previous))
     return results
 
 

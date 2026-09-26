@@ -424,17 +424,24 @@ def run_base(drive: Drive, workers: int, markets: tuple[str, ...] = MARKETS):
                  len(state.checkpoint["verified_batches"]), state.checkpoint["total_batches"])
 
 
+def session_closed(day: dt.date, local_now: dt.datetime) -> bool:
+    return day < local_now.date() or (day == local_now.date() and
+                                      local_now.time() >= dt.time(17, 30))
+
+
 def closed_dates_since(market: str, after_date: str) -> list[str]:
     symbol = "^GSPC" if market == "US" else "^HSI"
-    today = dt.datetime.now(TZ).date()
+    zone = ZoneInfo("America/New_York" if market == "US" else "Asia/Hong_Kong")
+    local_now = dt.datetime.now(zone)
+    today = local_now.date()
     result = yahoo_chart(symbol, after_date, today.isoformat())
     offset = int((result.get("meta") or {}).get("gmtoffset") or (8 * 3600 if market == "HK" else -4 * 3600))
     dates = [dt.datetime.fromtimestamp(ts + offset, dt.timezone.utc).date()
              for ts in result.get("timestamp") or []]
-    # At 08:37 MYT both markets' prior trading sessions have closed. Keep
-    # every missed session since the last fully committed daily checkpoint.
+    # Schedulers fire at 17:30 in each market's own timezone. The current
+    # session is eligible only after that local time and only if Yahoo has a bar.
     completed = sorted({day.isoformat() for day in dates
-                        if after_date < day.isoformat() and day < today})
+                        if after_date < day.isoformat() and session_closed(day, local_now)})
     return completed
 
 
@@ -611,7 +618,9 @@ def main():
     from foundation import run_daily as run_foundation_daily, seed_corporate_actions
     for market in markets:
         seed_corporate_actions(drive, market)
-        run_foundation_daily(drive, market, workers)
+        result = run_foundation_daily(drive, market, workers)
+        LOG.info("daily market=%s sessions=%d written=%d", market, len(result),
+                 sum(item.get("written", 0) for item in result))
 
 
 if __name__ == "__main__":

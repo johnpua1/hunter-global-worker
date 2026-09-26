@@ -1,0 +1,7 @@
+.git
+.github
+tests
+bridge
+*.pyc
+__pycache__
+.env*

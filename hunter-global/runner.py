@@ -524,7 +524,7 @@ def probe(drive: Drive | None, markets: tuple[str, ...] = MARKETS):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("probe", "base", "daily"), default="probe")
+    parser.add_argument("--mode", choices=("probe", "base", "daily", "auto"), default="probe")
     parser.add_argument("--market", choices=MARKETS, help="Run one market in an independent job")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -545,7 +545,10 @@ def main():
     workers = max(1, min(10, int(os.getenv("FETCH_WORKERS", "6"))))
     if args.mode == "base":
         run_base(drive, workers, markets)
+    elif args.mode == "daily":
+        run_daily(drive, workers, markets)
     else:
+        run_base(drive, workers, markets)
         run_daily(drive, workers, markets)
 
 

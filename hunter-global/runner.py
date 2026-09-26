@@ -83,6 +83,14 @@ class Drive:
         self.http = requests.Session()
         self.folders: dict[str, str] = {"": ""}
 
+    def health(self):
+        response = self.http.get(self.url, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+        if result != {"ok": True, "service": "HUNTER_GLOBAL_BRIDGE"}:
+            raise RuntimeError("BRIDGE_HEALTH_FAILED")
+        LOG.info("bridge health ok")
+
     def _call(self, op: str, **fields) -> dict:
         request = {"op": op, "key": self.key, **fields}
         for attempt in range(5):
@@ -448,6 +456,7 @@ def probe(drive: Drive | None, markets: tuple[str, ...] = MARKETS):
     if drive is None:
         LOG.info("probe mode=source-only; Drive OAuth unavailable")
     else:
+        drive.health()
         for market in markets:
             state = load_market(drive, market)
             receipt_count = len(drive.list(drive.folder(market + "/VERIFIED")))

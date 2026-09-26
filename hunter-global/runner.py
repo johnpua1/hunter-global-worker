@@ -100,6 +100,10 @@ class Drive:
                 result = response.json()
                 if not result.get("ok"):
                     raise RuntimeError("BRIDGE_" + str(result.get("error", "UNKNOWN")))
+                required = {"read": ("data_base64", "sha256"), "put": ("file", "sha256"),
+                            "list": ("files",), "file": ("file",), "folder": ("folder",)}
+                if not all(field in result for field in required[op]):
+                    raise ValueError("BRIDGE_RESPONSE_SHAPE:" + op + ":" + ",".join(sorted(result)))
                 return result
             except (requests.RequestException, ValueError):
                 if attempt == 4:

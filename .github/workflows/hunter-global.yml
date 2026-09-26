@@ -48,7 +48,11 @@ jobs:
           FETCH_WORKERS: '6'
           HUNTER_MODE: ${{ github.event_name == 'schedule' && 'auto' || inputs.mode }}
           HUNTER_MARKET: ${{ matrix.market }}
-        run: python runner.py --mode "$HUNTER_MODE" --market "$HUNTER_MARKET"
+        run: |
+          until python runner.py --mode "$HUNTER_MODE" --market "$HUNTER_MARKET"; do
+            echo "Worker retry from Drive checkpoint in 60 seconds"
+            sleep 60
+          done
 
   keepalive:
     # An empty commit records repository activity without storing market data.

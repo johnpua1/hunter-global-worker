@@ -136,17 +136,50 @@ class Drive:
     def json(self, path: str) -> Any:
         return json.loads(self.read(path))
 
-    def put(self, path: str, content: bytes, mime: str = "application/json", immutable=False):
+    def put(self, path: str, content: bytes, mime: str = "application/json", immutable=False, expected_sha=None):
         import base64
-        result = self._call(
-            "put", path=path.strip("/"), data_base64=base64.b64encode(content).decode("ascii"),
-            sha256=digest(content), mime=mime, immutable=immutable,
-        )
+        fields = {"path": path.strip("/"), "data_base64": base64.b64encode(content).decode("ascii"),
+                  "sha256": digest(content), "mime": mime, "immutable": immutable}
+        if expected_sha is not None:
+            fields["expected_sha256"] = expected_sha
+        result = self._call("put", **fields)
         if result["sha256"] != digest(content):
             raise RuntimeError("BRIDGE_WRITE_SHA_MISMATCH:" + path)
         if digest(self.read(path)) != digest(content):
             raise RuntimeError("DRIVE_READBACK_MISMATCH:" + path)
         return result["file"]
+
+
+    def append_repairs(self, market: str, batch: int, statuses: list[dict], reasons: dict):
+        flags = {"FETCH_FAILED", "DATA_SUSPECT", "IDENTITY_REVIEW"}
+        additions = [
+            {"category": flag, "market": market, "security_id": entry["security_id"],
+             "batch": batch, "problem": reasons.get(entry["security_id"], flag) if flag == "FETCH_FAILED" else flag,
+             "attempted_fixes": [], "recorded_at_myt": now_myt()}
+            for entry in statuses for flag in entry["status"] if flag in flags
+        ]
+        if not additions:
+            return
+        path = "REPAIR_QUEUE.json"
+        while True:
+            raw = self.read(path)
+            document = json.loads(raw)
+            if not isinstance(document, dict) or not isinstance(document.get("items"), list):
+                raise RuntimeError("REPAIR_QUEUE_INVALID")
+            existing = {(x.get("market"), x.get("security_id"), x.get("batch"), x.get("category"))
+                        for x in document["items"] if isinstance(x, dict)}
+            new = [x for x in additions if (x["market"], x["security_id"], x["batch"], x["category"]) not in existing]
+            if not new:
+                return
+            document["items"].extend(new)
+            try:
+                self.put(path, compact(document), expected_sha=digest(raw))
+                LOG.info("repair queue market=%s batch=%04d added=%d", market, batch, len(new))
+                return
+            except RuntimeError as exc:
+                if "BRIDGE_STALE_WRITE" not in str(exc):
+                    raise
+                time.sleep(1 + random.random())
 
 
 def yahoo_chart(symbol: str, start_date: str, end_date: str) -> dict:
@@ -330,6 +363,7 @@ def commit_batch(drive: Drive, state: MarketState, batch: int, workers: int):
         "verified_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
     drive.put(f"{market}/VERIFIED/batch-{batch:04d}.json", compact(receipt), immutable=True)
+    drive.append_repairs(market, batch, statuses, reasons)
     cp.setdefault("verified_batches", {})[str(batch)] = {
         "sha256": digest(base), "row_count": len(rows),
         "security_count": len(statuses), "worker_id": "hunter-global-actions-v1",
@@ -517,7 +551,19 @@ def main():
     elif args.mode == "daily":
         run_daily(drive, workers, markets)
     else:
-        run_base(drive, workers, markets)
+        # Both markets must complete BASE before either enters DAILY. The
+        # completion marker is stable and subsequent schedules append sessions.
+        def complete(market):
+            cp = drive.json(f"{market}/CHECKPOINT.json")
+            return len(cp.get("verified_batches", {})) == cp["total_batches"]
+        if not all(complete(market) for market in MARKETS):
+            run_base(drive, workers, markets)
+            if all(complete(market) for market in MARKETS):
+                marker = compact({"base_complete": True, "US": 5706, "HK": 2760})
+                drive.put("BASE_COMPLETE.json", marker, immutable=True)
+            return
+        marker = compact({"base_complete": True, "US": 5706, "HK": 2760})
+        drive.put("BASE_COMPLETE.json", marker, immutable=True)
         run_daily(drive, workers, markets)
 
 

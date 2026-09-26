@@ -1,0 +1,11 @@
+const fs = require('node:fs');
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const source = fs.readFileSync('bridge/Gateway.gs', 'utf8');
+const context = vm.createContext({});
+vm.runInContext(source, context);
+assert.throws(() => context.bridgeWritePolicy_('US/BASE/batch-0001.ndjson.gz', 'put'), /BASE_SEALED/);
+assert.throws(() => context.bridgeWritePolicy_('HK/BASE/batch-0001.ndjson.gz', 'append'), /BASE_SEALED/);
+assert.throws(() => context.bridgeWritePolicy_('HK/DAILY/2026-09-27/part-0001.ndjson.gz', 'put'), /DAILY_APPEND_ONLY/);
+assert.doesNotThrow(() => context.bridgeWritePolicy_('HK/DAILY/2026-09-27/part-0001.ndjson.gz', 'append'));
+console.log('bridge path guards PASS');

@@ -23,6 +23,8 @@ function doPost(e) {
     var op = String(body.op || '');
     var path = bridgePath_(body.path || '');
     if (op === 'folder') {
+      if (body.create === true && /^(US|HK)\/BASE(?:\/|$)/.test(path))
+        throw new Error('BASE_SEALED');
       var folder = bridgeFolder_(root, path, body.create === true);
       return bridgeJson_({ok: true, folder: {id: path, name: folder.getName()}});
     }
@@ -59,7 +61,7 @@ function doPost(e) {
       return bridgeJson_({ok: true, sha256: bridgeSha_(raw),
                           data_base64: Utilities.base64Encode(raw)});
     }
-    if (op === 'put') return bridgePut_(root, path, body);
+    if (op === 'put' || op === 'append') return bridgePut_(root, path, body, op);
     throw new Error('UNKNOWN_OP');
   } catch (err) {
     return bridgeJson_({ok: false, error: String(err.message || err).slice(0, 160)});
@@ -123,7 +125,17 @@ function bridgeSha_(bytes) {
   var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes);
   return digest.map(function (b) { return ('0' + (b & 255).toString(16)).slice(-2); }).join('');
 }
-function bridgePut_(root, path, body) {
+function bridgeWritePolicy_(path, op) {
+  // Check the path before creating folders, staging a blob, or accepting an
+  // identical-byte no-op. BASE is sealed even against an idempotent write.
+  if (/^(US|HK)\/BASE\//.test(path)) throw new Error('BASE_SEALED');
+  if (/^(US|HK)\/DAILY\//.test(path) && op !== 'append')
+    throw new Error('DAILY_APPEND_ONLY');
+  if (op === 'append' && !/^(US|HK)\/(DAILY|REPAIR_PATCH|CORPORATE_ACTIONS)\//.test(path))
+    throw new Error('APPEND_PATH_DENIED');
+}
+function bridgePut_(root, path, body, op) {
+  bridgeWritePolicy_(path, op);
   if (!path || (path.indexOf('/') < 0 && path !== 'REPAIR_QUEUE.json' && path !== 'BASE_COMPLETE.json'))
     throw new Error('INVALID_FILE_PATH');
   if (!/^[a-f0-9]{64}$/.test(body.sha256 || '') ||
@@ -143,6 +155,7 @@ function bridgePut_(root, path, body) {
     var parent = bridgeFolder_(root, split < 0 ? '' : path.slice(0, split), true);
     var name = split < 0 ? path : path.slice(split + 1);
     old = bridgeFile_(root, path);
+    if (op === 'append' && old) throw new Error('APPEND_CONFLICT');
     if (Object.prototype.hasOwnProperty.call(body, 'expected_sha256')) {
       var actual = old ? bridgeSha_(old.getBlob().getBytes()) : null;
       if (actual !== body.expected_sha256) throw new Error('STALE_WRITE');

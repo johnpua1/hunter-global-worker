@@ -101,6 +101,7 @@ class Drive:
                 if not result.get("ok"):
                     raise RuntimeError("BRIDGE_" + str(result.get("error", "UNKNOWN")))
                 required = {"read": ("data_base64", "sha256"), "put": ("file", "sha256"),
+                            "append": ("file", "sha256"),
                             "list": ("files",), "file": ("file",), "folder": ("folder",)}
                 if not all(field in result for field in required[op]):
                     raise ValueError("BRIDGE_RESPONSE_SHAPE:" + op + ":" + ",".join(sorted(result)))
@@ -147,6 +148,16 @@ class Drive:
             raise RuntimeError("BRIDGE_WRITE_SHA_MISMATCH:" + path)
         if digest(self.read(path)) != digest(content):
             raise RuntimeError("DRIVE_READBACK_MISMATCH:" + path)
+        return result["file"]
+
+    def append(self, path: str, content: bytes, mime: str = "application/json"):
+        """Create a segment once; the bridge rejects equal-byte rewrites too."""
+        import base64
+        result = self._call("append", path=path.strip("/"),
+                            data_base64=base64.b64encode(content).decode("ascii"),
+                            sha256=digest(content), mime=mime)
+        if result["sha256"] != digest(content) or digest(self.read(path)) != digest(content):
+            raise RuntimeError("APPEND_READBACK_MISMATCH:" + path)
         return result["file"]
 
 
@@ -528,7 +539,8 @@ def run_mini(drive: Drive, markets: tuple[str, ...]):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("probe", "mini", "base", "daily", "auto"), default="probe")
+    parser.add_argument("--mode", choices=("probe", "mini", "base", "daily", "auto",
+                                           "repair", "universe", "options", "analytics"), default="probe")
     parser.add_argument("--market", choices=MARKETS, help="Run one market in an independent job")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -547,24 +559,33 @@ def main():
         raise RuntimeError("SINGLE_WRITER_NOT_CONFIRMED: disable Apps Script triggers first")
     workers = max(1, min(10, int(os.getenv("FETCH_WORKERS", "6"))))
     if args.mode == "base":
-        run_base(drive, workers, markets)
-    elif args.mode == "daily":
-        run_daily(drive, workers, markets)
-    else:
-        # Both markets must complete BASE before either enters DAILY. The
-        # completion marker is stable and subsequent schedules append sessions.
-        def complete(market):
-            cp = drive.json(f"{market}/CHECKPOINT.json")
-            return len(cp.get("verified_batches", {})) == cp["total_batches"]
-        if not all(complete(market) for market in MARKETS):
-            run_base(drive, workers, markets)
-            if all(complete(market) for market in MARKETS):
-                marker = compact({"base_complete": True, "US": 5706, "HK": 2760})
-                drive.put("BASE_COMPLETE.json", marker, immutable=True)
-            return
-        marker = compact({"base_complete": True, "US": 5706, "HK": 2760})
-        drive.put("BASE_COMPLETE.json", marker, immutable=True)
-        run_daily(drive, workers, markets)
+        raise RuntimeError("BASE_SEALED")
+    if args.mode == "repair":
+        from repair import run_repair
+        for market in markets:
+            LOG.info("repair result=%s", run_repair(drive, market))
+        return
+    if args.mode == "universe":
+        from universe import refresh
+        for market in markets:
+            LOG.info("universe result=%s", refresh(drive, market))
+        return
+    if args.mode == "options":
+        from options import monthly
+        for market in markets:
+            LOG.info("options market=%s rows=%d", market, monthly(drive, market))
+        return
+    if args.mode == "analytics":
+        from derived import build
+        for market in markets:
+            path = f"{market}/CONTROL/DAILY_CHECKPOINT.json"
+            date = drive.json(path)["last_completed_date"]
+            LOG.info("derived market=%s date=%s rows=%d", market, date, build(drive, market, date))
+        return
+    from foundation import run_daily as run_foundation_daily, seed_corporate_actions
+    for market in markets:
+        seed_corporate_actions(drive, market)
+        run_foundation_daily(drive, market, workers)
 
 
 if __name__ == "__main__":

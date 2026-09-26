@@ -59,6 +59,15 @@ def execute(market: str) -> None:
         raise RuntimeError(f"{market} repair execution failed; queue remains resumable")
 
 
+def execute_maintenance() -> None:
+    result = subprocess.run([
+        "gcloud", "run", "jobs", "execute", "hunter-maintenance",
+        f"--project={PROJECT}", f"--region={REGION}", "--wait",
+    ], check=False)
+    if result.returncode:
+        raise RuntimeError("Maintenance execution failed; completed repairs remain saved")
+
+
 def main() -> None:
     url = secret("APPS_SCRIPT_WEBAPP_URL")
     key = secret("APPS_SCRIPT_SHARED_KEY")
@@ -80,6 +89,8 @@ def main() -> None:
         if counts[market]:
             raise RuntimeError(f"{market} queue still open after bounded executions")
     print("REPAIR_QUEUE_OPEN=0", flush=True)
+    execute_maintenance()
+    print("MAINTENANCE_EXECUTION=COMPLETE", flush=True)
 
 
 if __name__ == "__main__":

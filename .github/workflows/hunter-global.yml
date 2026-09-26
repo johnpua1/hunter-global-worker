@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Read-only probe, resume base, or append missed daily sessions
+        description: Probe or append missed daily sessions (BASE sealed)
         required: true
         type: choice
         options:
           - probe
           - mini
           - auto
-          - base
           - daily
+          - analytics
           - keepalive
   schedule:
     # UTC 00:37 = MYT 08:37. Avoid GitHub's busy top of the hour.
@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   market:
-    if: ${{ inputs.mode != 'keepalive' && ((github.event_name == 'workflow_dispatch' && (inputs.mode == 'probe' || inputs.mode == 'mini' || inputs.mode == 'auto')) || vars.HUNTER_ACTIONS_CUTOVER == 'CONFIRMED') }}
+    if: ${{ inputs.mode != 'keepalive' && ((github.event_name == 'workflow_dispatch' && (inputs.mode == 'probe' || inputs.mode == 'mini' || inputs.mode == 'auto' || inputs.mode == 'analytics')) || vars.HUNTER_ACTIONS_CUTOVER == 'CONFIRMED') }}
     strategy:
       fail-fast: false
       matrix:
@@ -50,10 +50,7 @@ jobs:
           HUNTER_MODE: ${{ github.event_name == 'schedule' && 'auto' || inputs.mode }}
           HUNTER_MARKET: ${{ matrix.market }}
         run: |
-          until python runner.py --mode "$HUNTER_MODE" --market "$HUNTER_MARKET"; do
-            echo "Worker retry from Drive checkpoint in 60 seconds"
-            sleep 60
-          done
+          python runner.py --mode "$HUNTER_MODE" --market "$HUNTER_MARKET"
 
   keepalive:
     # An empty commit records repository activity without storing market data.

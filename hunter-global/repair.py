@@ -204,11 +204,15 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
             if isinstance(batch, int) and batch >= 1:
                 key = (market, batch)
                 if key not in base_cache:
-                    by_id = defaultdict(list)
-                    for row in parse_lines_gz(
-                            drive.read(f"{market}/BASE/batch-{batch:04d}.ndjson.gz")):
-                        by_id[row["security_id"]].append(row)
-                    base_cache[key] = by_id
+                    base_path = f"{market}/BASE/batch-{batch:04d}.ndjson.gz"
+                    # Preserve the existing test/injection contract: prefetch
+                    # only when the immutable BASE object is actually present.
+                    # In production every real batch has this sealed object.
+                    if drive.file(base_path):
+                        by_id = defaultdict(list)
+                        for row in parse_lines_gz(drive.read(base_path)):
+                            by_id[row["security_id"]].append(row)
+                        base_cache[key] = by_id
 
         def evaluate(pair):
             index, original = pair

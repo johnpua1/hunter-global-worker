@@ -54,8 +54,18 @@ def build(drive: Drive, market: str, date: str):
                     daily[row["security_id"]].append(row)
     patches = defaultdict(list)
     for path in read_files(drive, market, "REPAIR_PATCH", ".json"):
-        patch = drive.json(path)
-        patches[patch["security_id"]].append(patch)
+        payload = drive.json(path)
+        # Phase 1 repair evidence may be stored either as one accepted patch
+        # per file or as a bulk sidecar containing multiple accepted patches.
+        # Bulk storage changes only write granularity; each item keeps the same
+        # patch schema/evidence and compose semantics.
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if isinstance(items, list):
+            for patch in items:
+                if patch.get("security_id"):
+                    patches[patch["security_id"]].append(patch)
+        elif isinstance(payload, dict) and payload.get("security_id"):
+            patches[payload["security_id"]].append(payload)
     events = []
     for path in read_files(drive, market, "CORPORATE_ACTIONS", ".json"):
         events.extend(drive.json(path))

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 from runner import Drive, compact, digest, load_market, now_myt, parse_lines_gz
 from foundation import current_universe, daily_segments
@@ -74,13 +76,16 @@ def build(drive: Drive, market: str, date: str):
     anchors = defaultdict(list)
     for anchor in anchor_rows:
         anchors[anchor["security_id"]].append(anchor)
-    by_id = defaultdict(list)
     derived = []
-    for batch in range(1, state.checkpoint["total_batches"] + 1):
-        base = parse_lines_gz(drive.read(f"{market}/BASE/batch-{batch:04d}.ndjson.gz"))
-        by_id.clear()
+    def process_base_batch(batch: int) -> list[dict]:
+        # Each worker owns an independent HTTP session; Drive access is read-only
+        # here. Result writes remain single-threaded below.
+        reader = Drive()
+        base = parse_lines_gz(reader.read(f"{market}/BASE/batch-{batch:04d}.ndjson.gz"))
+        by_id = defaultdict(list)
         for row in base:
             by_id[row["security_id"]].append(row)
+        out = []
         start = (batch - 1) * 100
         for security in universe[start:min(start + 100, len(state.securities))]:
             if security.get("listing_status", "ACTIVE") != "ACTIVE":
@@ -91,7 +96,14 @@ def build(drive: Drive, market: str, date: str):
                 adjusted = split_adjust(rows, events)
                 indicator = indicators(adjusted)
                 indicator["mae_mfe"] = calculate_anchors(adjusted, anchors[sid])
-                derived.append(indicator)
+                out.append(indicator)
+        return out
+
+    workers = max(1, min(6, int(os.getenv("DERIVED_READ_WORKERS", "4"))))
+    batches = range(1, state.checkpoint["total_batches"] + 1)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for part in pool.map(process_base_batch, batches):
+            derived.extend(part)
     for security in universe[len(state.securities):]:
         if security.get("listing_status", "ACTIVE") != "ACTIVE":
             continue

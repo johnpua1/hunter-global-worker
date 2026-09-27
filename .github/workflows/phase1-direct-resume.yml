@@ -1,0 +1,145 @@
+name: Hunter Phase 1 direct resume
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/phase1-direct-resume.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hunter-phase1-finalize-once
+  cancel-in-progress: true
+
+env:
+  HUNTER_ACTIONS_CUTOVER: CONFIRMED
+  FETCH_WORKERS: '6'
+  REPAIR_WORKERS: '8'
+  PHASE1_AS_OF: '2026-09-25'
+
+jobs:
+  repair-us:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Direct drain US queue
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import time
+          from runner import Drive
+          from repair import run_repair
+
+          drive = Drive()
+          hard = time.monotonic() + 17400
+          while True:
+              q = drive.json("REPAIR_QUEUE.json")["items"]
+              n = sum(x.get("market") == "US" and x.get("status", "OPEN") == "OPEN" for x in q)
+              print(f"US OPEN={n}", flush=True)
+              if n == 0:
+                  break
+              result = run_repair(drive, "US", deadline=min(hard, time.monotonic()+3300), chunk_size=8)
+              print(result, flush=True)
+              if result["processed"] == 0 and result["open"] > 0:
+                  raise RuntimeError(f"US_REPAIR_NO_PROGRESS_OPEN_{result['open']}")
+              if time.monotonic() >= hard - 600 and result["open"] > 0:
+                  raise RuntimeError(f"US_REPAIR_TIMEOUT_OPEN_{result['open']}")
+          PY
+
+  repair-hk:
+    needs: repair-us
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Direct drain HK queue
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import time
+          from runner import Drive
+          from repair import run_repair
+
+          drive = Drive()
+          hard = time.monotonic() + 17400
+          while True:
+              q = drive.json("REPAIR_QUEUE.json")["items"]
+              n = sum(x.get("market") == "HK" and x.get("status", "OPEN") == "OPEN" for x in q)
+              print(f"HK OPEN={n}", flush=True)
+              if n == 0:
+                  break
+              result = run_repair(drive, "HK", deadline=min(hard, time.monotonic()+3300), chunk_size=8)
+              print(result, flush=True)
+              if result["processed"] == 0 and result["open"] > 0:
+                  raise RuntimeError(f"HK_REPAIR_NO_PROGRESS_OPEN_{result['open']}")
+              if time.monotonic() >= hard - 600 and result["open"] > 0:
+                  raise RuntimeError(f"HK_REPAIR_TIMEOUT_OPEN_{result['open']}")
+          PY
+
+  finalize:
+    needs: repair-hk
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Build Phase 1 derived
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python runner.py --mode analytics --market US --as-of "$PHASE1_AS_OF"
+          python runner.py --mode analytics --market HK --as-of "$PHASE1_AS_OF"
+      - name: Write Phase 1 final receipts
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import os
+          from collections import Counter
+          from runner import Drive, compact, now_myt
+
+          drive = Drive()
+          queue = drive.json("REPAIR_QUEUE.json")["items"]
+          open_count = sum(x.get("status", "OPEN") == "OPEN" for x in queue)
+          if open_count:
+              raise RuntimeError(f"REPAIR_OPEN={open_count}")
+          counts = Counter(x.get("status", "OPEN") for x in queue)
+          receipt = {
+              "phase":"PHASE1","status":"COMPLETE","as_of":"2026-09-25",
+              "execution_channel":"GITHUB_ACTIONS_DIRECT_RESUME",
+              "execution_sha":os.environ.get("GITHUB_SHA"),
+              "repair_total":len(queue),"repair_open":0,
+              "repair_counts":dict(counts),
+              "base_rebuilt":False,"verified_rerun":False,
+              "phase2_started":False,"completed_at_myt":now_myt()
+          }
+          for market in ("US","HK"):
+              drive.put(f"{market}/CONTROL/PHASE1_FINAL.json",
+                        compact({**receipt,"market":market}))
+          print(receipt, flush=True)
+          PY

@@ -1,0 +1,45 @@
+name: Hunter DAILY release verify once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/daily-release-verify-once.yml
+      - hunter-global/runner.py
+      - hunter-global/phase2_runtime.py
+      - bridge/Gateway.gs
+      - bridge/appsscript.json
+      - cloudrun/update-daily-images.sh
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Python syntax
+        run: python -m py_compile hunter-global/*.py
+      - name: Apps Script JavaScript syntax
+        run: cp bridge/Gateway.gs /tmp/Gateway.js && node --check /tmp/Gateway.js
+      - name: Daily contract markers
+        run: |
+          grep -q 'NO_NEW_SESSION' hunter-global/runner.py
+          grep -q 'run_phase2_daily' hunter-global/runner.py
+          grep -q "eps_refresh_pending.*True" hunter-global/phase2_runtime.py
+          grep -q "full=today.weekday()==0" hunter-global/phase2_runtime.py
+          grep -q 'function runUS()' bridge/Gateway.gs
+          grep -q 'function runHK()' bridge/Gateway.gs
+          grep -q 'function status(job)' bridge/Gateway.gs
+          grep -q "newTrigger('dailyUS')" bridge/Gateway.gs
+          grep -q "newTrigger('dailyHK')" bridge/Gateway.gs
+          python -m json.tool bridge/appsscript.json >/dev/null
+      - name: Existing foundation unit tests
+        run: |
+          python -m pip install -q -r hunter-global/requirements.txt pytest
+          pytest -q tests/test_foundation.py tests/test_market_close.py

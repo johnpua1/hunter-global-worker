@@ -192,7 +192,8 @@ def decide(drive: Drive, item: dict, security: dict, state=None, base_cache=None
 
 
 def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
-               chunk_size: int = 25) -> dict:
+               chunk_size: int = 25, shard_index: int | None = None,
+               shard_count: int | None = None) -> dict:
     """Persist each chunk before the Cloud Run deadline; restarts skip terminal rows."""
     if deadline is None:
         deadline = time.monotonic() + int(os.getenv("REPAIR_TIME_BUDGET_SECONDS", "3300"))
@@ -205,7 +206,10 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
         raw = drive.read("REPAIR_QUEUE.json")
         doc = json.loads(raw)
         candidates = [(i, x) for i, x in enumerate(doc["items"])
-                      if x.get("market") == market and x.get("status", "OPEN") == "OPEN"]
+                      if x.get("market") == market
+                      and x.get("status", "OPEN") == "OPEN"
+                      and (shard_count is None or shard_index is None
+                           or i % shard_count == shard_index)]
         if not candidates:
             break
         batch_candidates = candidates[:chunk_size]
@@ -294,7 +298,7 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
             updates[index] = item
         if not updates:
             break
-        for _ in range(5):
+        for _ in range(12):
             latest = json.loads(raw)
             for index, item in updates.items():
                 if latest["items"][index].get("status", "OPEN") == "OPEN":
@@ -311,7 +315,11 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
         else:
             raise RuntimeError("REPAIR_QUEUE_CAS_EXHAUSTED")
         processed += len(updates)
-    remaining = sum(x.get("market") == market and x.get("status", "OPEN") == "OPEN"
-                    for x in drive.json("REPAIR_QUEUE.json")["items"])
+    final_items = drive.json("REPAIR_QUEUE.json")["items"]
+    remaining = sum(
+        x.get("market") == market and x.get("status", "OPEN") == "OPEN"
+        and (shard_count is None or shard_index is None or i % shard_count == shard_index)
+        for i, x in enumerate(final_items))
     return {"market": market, "processed": processed, "accepted": accepted_count,
-            "open": remaining, "timed_out": remaining > 0 and time.monotonic() >= deadline - 300}
+            "open": remaining, "shard_index": shard_index, "shard_count": shard_count,
+            "timed_out": remaining > 0 and time.monotonic() >= deadline - 300}

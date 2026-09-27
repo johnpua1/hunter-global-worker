@@ -192,6 +192,40 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
         if state is None and any(x.get("security_id") in securities for _, x in batch_candidates):
             state = load_market(drive, market)
 
+        # BASE is immutable/sealed. Prefetch only the distinct shards needed by
+        # this chunk, using independent read-only Bridge sessions. This avoids
+        # serial Apps Script round-trips while keeping all queue/patch writes on
+        # the single main Drive writer.
+        missing_batches = []
+        for _, original in batch_candidates:
+            batch = original.get("batch")
+            if isinstance(batch, int) and batch >= 1:
+                key = (market, batch)
+                if key in base_cache:
+                    continue
+                base_path = f"{market}/BASE/batch-{batch:04d}.ndjson.gz"
+                if drive.file(base_path):
+                    missing_batches.append((key, base_path))
+        # preserve first occurrence only
+        seen_missing = set()
+        missing_batches = [x for x in missing_batches
+                           if not (x[0] in seen_missing or seen_missing.add(x[0]))]
+
+        def read_base(entry):
+            key, path = entry
+            reader = Drive()
+            by_id = defaultdict(list)
+            for row in parse_lines_gz(reader.read(path)):
+                by_id[row["security_id"]].append(row)
+            return key, by_id
+
+        if missing_batches:
+            base_read_workers = max(1, min(4, int(os.getenv("BASE_READ_WORKERS", "4"))))
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=min(base_read_workers, len(missing_batches))) as pool:
+                for key, by_id in pool.map(read_base, missing_batches):
+                    base_cache[key] = by_id
+
         def evaluate(pair):
             index, original = pair
             item = dict(original)

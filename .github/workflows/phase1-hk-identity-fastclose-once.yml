@@ -62,13 +62,14 @@ jobs:
                   indices.append(index)
 
           if accepted:
-              stamp = now_myt().replace(":", "").replace("-", "")
-              path = f"HK/REPAIR_PATCH/identity-fastclose-{stamp}.json"
               payload = {"market": "HK", "kind": "IDENTITY_FASTCLOSE_BULK",
                          "accepted": True, "count": len(accepted),
                          "verified_at_myt": now_myt(), "items": accepted}
-              drive.append(path, compact(payload))
               patch_sha = digest(compact(payload))
+              # Preserve the existing REPAIR_PATCH one-shard path contract.
+              path = f"HK/REPAIR_PATCH/{patch_sha[:2]}/bulk-{patch_sha[:24]}.json"
+              if not drive.file(path):
+                  drive.append(path, compact(payload))
 
               for index, answer in zip(indices, accepted):
                   item = dict(doc["items"][index])

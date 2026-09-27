@@ -19,11 +19,16 @@ from runner import Drive, compact, digest, fetch_security, load_market, now_myt,
 from foundation import current_universe
 
 
-def second_source_close(ticker: str, market: str) -> dict[str, float]:
+def second_source_close(ticker: str, market: str, start: str | None = None,
+                        end: str | None = None) -> dict[str, float]:
     # Independent corroboration only; repaired OHLC still comes from Yahoo.
     symbol = ticker.lower().replace(".hk", ".hk") if market == "HK" else ticker.lower() + ".us"
-    response = retry_http(requests.Session(), "GET",
-                          "https://stooq.com/q/d/l/?s=" + quote(symbol) + "&i=d")
+    url = "https://stooq.com/q/d/l/?s=" + quote(symbol) + "&i=d"
+    if start:
+        url += "&d1=" + start.replace("-", "")
+    if end:
+        url += "&d2=" + end.replace("-", "")
+    response = retry_http(requests.Session(), "GET", url)
     return {r["Date"]: float(r["Close"]) for r in csv.DictReader(io.StringIO(response.text))
             if r.get("Date") and r.get("Close") not in (None, "N/D")}
 
@@ -114,7 +119,18 @@ def decide(drive: Drive, item: dict, security: dict, state=None, base_cache=None
             suspect_days.update(d for d in calendar if first < d < last and d not in present)
         if not suspect_days:
             return {**result, "result": "UNRESOLVED", "reason": "SUSPECT_DATE_NOT_LOCALIZED"}
-    rows, flags, splits, reason = fetch_security(security, calendar, calendar[-1], daily=True)
+    repair_calendar = calendar
+    repair_as_of = calendar[-1]
+    if date:
+        if date not in calendar:
+            return {**result, "result": "UNRESOLVED", "reason": "SESSION_NOT_CONFIRMED"}
+        repair_calendar = [date]
+        repair_as_of = date
+    elif item["category"] == "DATA_SUSPECT" and suspect_days:
+        repair_calendar = sorted(suspect_days)
+        repair_as_of = repair_calendar[-1]
+    rows, flags, splits, reason = fetch_security(
+        security, repair_calendar, repair_as_of, daily=True)
     if not rows:
         listing = security.get("listing_date")
         if date and listing and date < listing and security.get("listing_date_verified"):
@@ -122,7 +138,8 @@ def decide(drive: Drive, item: dict, security: dict, state=None, base_cache=None
         if not official or not official.get("source_hash"):
             return {**result, "result": "UNRESOLVED", "reason": "OFFICIAL_LISTING_PROOF_REQUIRED"}
         try:
-            secondary = second_source_close(security["ticker"], market)
+            secondary = second_source_close(
+                security["ticker"], market, date, date)
         except Exception:
             return {**result, "result": "UNRESOLVED", "reason": "SECOND_SOURCE_UNAVAILABLE"}
         if date and date not in calendar:
@@ -158,7 +175,9 @@ def decide(drive: Drive, item: dict, security: dict, state=None, base_cache=None
            for r in rows):
         return {**result, "result": "UNRESOLVED", "reason": "BAR_STILL_SUSPECT"}
     try:
-        secondary = second_source_close(security["ticker"], market)
+        row_dates = [row["date"] for row in rows]
+        secondary = second_source_close(
+            security["ticker"], market, min(row_dates), max(row_dates))
     except Exception as exc:
         return {**result, "result": "UNRESOLVED", "reason": "SECOND_SOURCE_UNAVAILABLE:" + type(exc).__name__}
     if any(row["date"] not in secondary or

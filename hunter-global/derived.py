@@ -83,6 +83,8 @@ def build(drive: Drive, market: str, date: str):
             by_id[row["security_id"]].append(row)
         start = (batch - 1) * 100
         for security in universe[start:min(start + 100, len(state.securities))]:
+            if security.get("listing_status", "ACTIVE") != "ACTIVE":
+                continue
             sid = security["security_id"]
             rows = compose(by_id[sid], patches[sid], daily[sid])
             if rows:
@@ -91,6 +93,8 @@ def build(drive: Drive, market: str, date: str):
                 indicator["mae_mfe"] = calculate_anchors(adjusted, anchors[sid])
                 derived.append(indicator)
     for security in universe[len(state.securities):]:
+        if security.get("listing_status", "ACTIVE") != "ACTIVE":
+            continue
         sid = security["security_id"]
         rows = compose([], patches[sid], daily[sid])
         if rows:

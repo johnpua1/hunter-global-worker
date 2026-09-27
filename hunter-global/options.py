@@ -12,6 +12,21 @@ from runner import Drive, compact, now_myt, retry_http, TZ
 from foundation import current_universe
 
 
+
+def source_preflight() -> dict:
+    """Detect a source-wide Yahoo optionChain auth/rate-limit outage once."""
+    url = "https://query1.finance.yahoo.com/v7/finance/options/AAPL"
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0 Hunter/1.0"}, timeout=15)
+        body = r.text[:200]
+        unavailable = r.status_code in (401, 429) and (
+            "Invalid Crumb" in body or "Too Many Requests" in body or r.status_code == 429)
+        return {"available": not unavailable, "http_status": r.status_code,
+                "evidence": body.replace("\\n", " ")[:160], "checked_at_myt": now_myt()}
+    except Exception as exc:
+        return {"available": False, "http_status": None,
+                "evidence": "EXCEPTION:" + type(exc).__name__, "checked_at_myt": now_myt()}
+
 def label(symbol: str, market: str) -> dict:
     checked = now_myt()
     unknown = {"has_options": "UNKNOWN", "expiry_available": "UNKNOWN",
@@ -73,11 +88,25 @@ def monthly(drive: Drive, market: str):
     if drive.file(path):
         return 0
     securities = current_universe(drive, market)
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        statuses = pool.map(lambda s: label(s["ticker"], market), securities)
-        values = [{"security_id": s["security_id"], **status}
-                  for s, status in zip(securities, statuses)]
-    drive.put(path, compact({"market": market, "month": month, "items": values}), immutable=True)
+    preflight = source_preflight()
+    if not preflight["available"]:
+        checked = preflight["checked_at_myt"]
+        values = [{"security_id": s["security_id"],
+                   "has_options": "UNKNOWN", "expiry_available": "UNKNOWN",
+                   "nearest_expiry": None, "expiry_count": 0,
+                   "strike_data_available": "UNKNOWN", "bid_ask_available": "UNKNOWN",
+                   "vertical_usable": "UNKNOWN", "checked_at_myt": checked,
+                   "source": "Yahoo optionChain", "status": "SOURCE_UNAVAILABLE",
+                   "source_error": "HTTP_" + str(preflight["http_status"]),
+                   "source_evidence": preflight["evidence"]}
+                  for s in securities]
+    else:
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            statuses = pool.map(lambda s: label(s["ticker"], market), securities)
+            values = [{"security_id": s["security_id"], **status}
+                      for s, status in zip(securities, statuses)]
+    drive.put(path, compact({"market": market, "month": month,
+                             "source_preflight": preflight, "items": values}), immutable=True)
     return len(values)
 
 

@@ -80,7 +80,7 @@ def decide(drive: Drive, item: dict, security: dict, state=None, base_cache=None
         calendar = calendar + closed_dates_since(market, calendar[-1])
     batch = item.get("batch")
     original = []
-    if isinstance(batch, int):
+    if isinstance(batch, int) and batch >= 1:
         if base_cache is not None:
             key = (market, batch)
             def load_once():
@@ -201,7 +201,7 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
         # Drive mutation is introduced.
         for _, original in selected:
             batch = original.get("batch")
-            if isinstance(batch, int):
+            if isinstance(batch, int) and batch >= 1:
                 key = (market, batch)
                 if key not in base_cache:
                     by_id = defaultdict(list)

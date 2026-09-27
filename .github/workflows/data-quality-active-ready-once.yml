@@ -1,0 +1,173 @@
+name: Hunter data quality active-ready closeout once
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/data-quality-active-ready-once.yml
+permissions:
+  contents: read
+env:
+  HUNTER_ACTIONS_CUTOVER: CONFIRMED
+  HUNTER_BRIDGE_ATTEMPTS: '8'
+  HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '90'
+  HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS: '120'
+jobs:
+  closeout:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Quarantine remaining uncertain securities
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import json
+          from collections import defaultdict, Counter
+          from runner import Drive, parse_lines_gz, compact, digest, now_myt
+
+          drive=Drive()
+          q_raw=drive.read("REPAIR_QUEUE.json")
+          q=json.loads(q_raw)
+          summary={}
+          for market in ("US","HK"):
+              u_path=f"{market}/CURRENT_UNIVERSE.json"
+              u_raw=drive.read(u_path)
+              u=json.loads(u_raw)
+              by_sid={s["security_id"]:s for s in u["securities"]}
+              calendar=[r["date"] for r in parse_lines_gz(drive.read(f"{market}/CALENDAR_BASE.ndjson.gz"))]
+
+              unresolved=[(i,x) for i,x in enumerate(q["items"])
+                          if x.get("market")==market and x.get("status")=="UNRESOLVED"]
+              bybatch=defaultdict(list)
+              for i,x in unresolved:
+                  if isinstance(x.get("batch"),int) and x.get("security_id"):
+                      bybatch[x["batch"]].append((i,x))
+
+              counts=Counter()
+              checked=set()
+              for batch,pairs in sorted(bybatch.items()):
+                  rows=parse_lines_gz(drive.read(f"{market}/BASE/batch-{batch:04d}.ndjson.gz"))
+                  byid=defaultdict(list)
+                  for r in rows: byid[r["security_id"]].append(r)
+                  for i,x in pairs:
+                      sid=x["security_id"]; checked.add(sid)
+                      rs=sorted(byid.get(sid,[]),key=lambda r:r["date"])
+                      structural=[]
+                      for r in rs:
+                          ok=(r["high"]>=max(r["open"],r["close"],r["low"]) and
+                              r["low"]<=min(r["open"],r["close"]) and
+                              min(r["open"],r["high"],r["low"],r["close"])>0 and
+                              r["volume"]>=0)
+                          if not ok: structural.append(r)
+                      missing=[]
+                      if rs:
+                          present={r["date"] for r in rs}
+                          first,last=rs[0]["date"],rs[-1]["date"]
+                          missing=[d for d in calendar if first<d<last and d not in present]
+
+                      reason=x.get("reason","")
+                      identity_issue=reason.startswith("OFFICIAL_") or x.get("category")=="IDENTITY_REVIEW"
+                      if (market=="US" and not identity_issue and not structural and not missing
+                              and reason.startswith("SECOND_SOURCE_UNAVAILABLE")):
+                          q["items"][i].update(
+                              status="VALIDATED_NO_DATA_DEFECT",
+                              reason="PRIMARY_DATA_STRUCTURALLY_VALID_SECOND_SOURCE_UNAVAILABLE",
+                              verified_at_myt=now_myt())
+                          counts["validated_primary"]+=1
+                          continue
+
+                      sec=by_sid.get(sid)
+                      if sec:
+                          sec["listing_status"]="QUARANTINED_DATA_QUALITY"
+                          sec["quarantine_reason"]=reason or x.get("problem") or "UNRESOLVED"
+                          sec["quarantined_at_myt"]=now_myt()
+                      q["items"][i].update(
+                          status="QUARANTINED",
+                          quarantine_reason=reason or x.get("problem") or "UNRESOLVED",
+                          verified_at_myt=now_myt())
+                      counts["quarantined"]+=1
+
+              # Any unresolved event not processed above: never allow it to stay ambiguous.
+              for i,x in unresolved:
+                  if q["items"][i].get("status")!="UNRESOLVED":
+                      continue
+                  sid=x.get("security_id")
+                  if sid and sid in by_sid:
+                      by_sid[sid]["listing_status"]="QUARANTINED_DATA_QUALITY"
+                      by_sid[sid]["quarantine_reason"]=x.get("reason") or x.get("problem") or "UNRESOLVED"
+                      by_sid[sid]["quarantined_at_myt"]=now_myt()
+                      q["items"][i].update(
+                          status="QUARANTINED",
+                          quarantine_reason=by_sid[sid]["quarantine_reason"],
+                          verified_at_myt=now_myt())
+                      counts["quarantined"]+=1
+                  elif not sid:
+                      q["items"][i].update(
+                          status="EXECUTION_SUPERSEDED",
+                          reason="NON_SECURITY_EXECUTION_EVENT",
+                          verified_at_myt=now_myt())
+                      counts["execution_event"]+=1
+
+              drive.put(u_path,compact(u),expected_sha=digest(u_raw))
+              active=sum(s.get("listing_status","ACTIVE")=="ACTIVE" for s in u["securities"])
+              quarantined=sum(s.get("listing_status")=="QUARANTINED_DATA_QUALITY" for s in u["securities"])
+              summary[market]={"counts":dict(counts),"active":active,"quarantined":quarantined}
+
+          drive.put("REPAIR_QUEUE.json",compact(q),expected_sha=digest(q_raw))
+          still=[x for x in q["items"] if x.get("status")=="UNRESOLVED"]
+          if still:
+              raise RuntimeError(f"UNRESOLVED_REMAINING_{len(still)}")
+          print(json.dumps({"summary":summary,"unresolved_remaining":0},ensure_ascii=False),flush=True)
+          PY
+      - name: Rebuild active derived US
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: python runner.py --mode analytics --market US --as-of 2026-09-25
+      - name: Rebuild active derived HK
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: python runner.py --mode analytics --market HK --as-of 2026-09-25
+      - name: Write active-ready receipts
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import json
+          from collections import Counter
+          from runner import Drive,compact,now_myt
+          drive=Drive()
+          q=drive.json("REPAIR_QUEUE.json")["items"]
+          if any(x.get("status")=="UNRESOLVED" for x in q):
+              raise RuntimeError("UNRESOLVED_REMAINS")
+          for market in ("US","HK"):
+              u=drive.json(f"{market}/CURRENT_UNIVERSE.json")["securities"]
+              active=[s for s in u if s.get("listing_status","ACTIVE")=="ACTIVE"]
+              quarantined=[s for s in u if s.get("listing_status")=="QUARANTINED_DATA_QUALITY"]
+              market_q=[x for x in q if x.get("market")==market]
+              receipt={
+                "market":market,
+                "status":"ACTIVE_UNIVERSE_READY",
+                "as_of":"2026-09-25",
+                "active_count":len(active),
+                "quarantined_count":len(quarantined),
+                "unresolved_count":0,
+                "queue_status_counts":dict(Counter(x.get("status") for x in market_q)),
+                "base_modified":False,
+                "ready_at_myt":now_myt()
+              }
+              drive.put(f"{market}/CONTROL/DATA_QUALITY_READY.json",compact(receipt))
+              print(receipt,flush=True)
+          PY

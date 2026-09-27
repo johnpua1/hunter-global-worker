@@ -1,5 +1,5 @@
 name: Hunter Phase 1 one-time finalize
-# retry-after-v3-scope-fix: 2026-09-27
+# retry-after-options-bulk-repair-fix: 2026-09-27
 
 on:
   push:

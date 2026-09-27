@@ -1,0 +1,59 @@
+name: Hunter HK violation classifier once
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/hk-violation-classifier-once.yml
+permissions:
+  contents: read
+env:
+  HUNTER_ACTIONS_CUTOVER: CONFIRMED
+  HUNTER_BRIDGE_ATTEMPTS: '8'
+  HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '90'
+jobs:
+  classify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Classify HK structural violations
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          from collections import Counter,defaultdict
+          from runner import Drive,parse_lines_gz
+          drive=Drive()
+          q=drive.json("REPAIR_QUEUE.json")["items"]
+          bybatch=defaultdict(set)
+          for x in q:
+              if x.get("market")=="HK" and x.get("status")=="UNRESOLVED" and isinstance(x.get("batch"),int):
+                  bybatch[x["batch"]].add(x.get("security_id"))
+          c=Counter(); secs=Counter(); examples={}
+          for batch,sids in sorted(bybatch.items()):
+              rows=parse_lines_gz(drive.read(f"HK/BASE/batch-{batch:04d}.ndjson.gz"))
+              seen=defaultdict(set)
+              for r in rows:
+                  sid=r["security_id"]
+                  if sid not in sids: continue
+                  kinds=[]
+                  if r["high"] < r["low"]: kinds.append("HIGH_LT_LOW")
+                  if r["close"] > r["high"]: kinds.append("CLOSE_GT_HIGH")
+                  if r["close"] < r["low"]: kinds.append("CLOSE_LT_LOW")
+                  if r["open"] > r["high"]: kinds.append("OPEN_GT_HIGH")
+                  if r["open"] < r["low"]: kinds.append("OPEN_LT_LOW")
+                  if min(r["open"],r["high"],r["low"],r["close"]) <= 0: kinds.append("NONPOSITIVE")
+                  if r["volume"] < 0: kinds.append("NEG_VOLUME")
+                  for k in kinds:
+                      c[k]+=1; seen[sid].add(k)
+                      examples.setdefault(k,(sid,r["date"],r["open"],r["high"],r["low"],r["close"],r["volume"]))
+              for sid,ks in seen.items():
+                  for k in ks: secs[k]+=1
+          print({"row_counts":dict(c),"security_counts":dict(secs),"examples":examples},flush=True)
+          PY

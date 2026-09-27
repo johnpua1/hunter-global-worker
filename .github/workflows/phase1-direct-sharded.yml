@@ -1,4 +1,5 @@
 name: Hunter Phase 1 direct sharded resume
+# queue-fast-cas-v2
 
 on:
   push:
@@ -57,7 +58,7 @@ jobs:
               result=run_repair(
                   drive, market,
                   deadline=min(hard,time.monotonic()+3300),
-                  chunk_size=8,
+                  chunk_size=64,
                   shard_index=shard,
                   shard_count=4)
               print(result,flush=True)
@@ -104,7 +105,7 @@ jobs:
               result=run_repair(
                   drive, market,
                   deadline=min(hard,time.monotonic()+3300),
-                  chunk_size=8,
+                  chunk_size=64,
                   shard_index=shard,
                   shard_count=4)
               print(result,flush=True)

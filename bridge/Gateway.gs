@@ -14,14 +14,14 @@ function doPost(e) {
     if (!e || !e.postData || !e.postData.contents) throw new Error('EMPTY_REQUEST');
     var body = JSON.parse(e.postData.contents);
     var props = PropertiesService.getScriptProperties();
-    var key = props.getProperty('BRIDGE_SHARED_KEY');
-    if (!key || !bridgeEqual_(String(body.key || ''), key)) throw new Error('UNAUTHORIZED');
+    var scope = bridgeAuthScope_(props, String(body.key || ''));
     var rootId = props.getProperty('HUNTER_GLOBAL_FOLDER_ID');
     if (!rootId) throw new Error('ROOT_NOT_CONFIGURED');
     var root = DriveApp.getFolderById(rootId);
     if (root.getName() !== 'HUNTER_GLOBAL') throw new Error('ROOT_ID_MISMATCH');
     var op = String(body.op || '');
     var path = bridgePath_(body.path || '');
+    bridgeScopeAuthorize_(scope, op, path);
     if (op === 'folder') {
       if (body.create === true && /^(US|HK)\/BASE(?:\/|$)/.test(path))
         throw new Error('BASE_SEALED');
@@ -61,7 +61,7 @@ function doPost(e) {
       return bridgeJson_({ok: true, sha256: bridgeSha_(raw),
                           data_base64: Utilities.base64Encode(raw)});
     }
-    if (op === 'put' || op === 'append') return bridgePut_(root, path, body, op);
+    if (op === 'put' || op === 'append') return bridgePut_(root, path, body, op, scope);
     throw new Error('UNKNOWN_OP');
   } catch (err) {
     return bridgeJson_({ok: false, error: String(err.message || err).slice(0, 160)});
@@ -77,6 +77,62 @@ function bridgeEqual_(a, b) {
   for (var i = 0; i < Math.max(a.length, b.length); i++)
     diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
   return diff === 0;
+}
+function bridgeAuthScope_(props, presented) {
+  var keys = [
+    ['US', props.getProperty('BRIDGE_US_KEY')],
+    ['HK', props.getProperty('BRIDGE_HK_KEY')],
+    ['MAINT', props.getProperty('BRIDGE_MAINT_KEY')],
+    ['LEGACY', props.getProperty('BRIDGE_SHARED_KEY')]
+  ];
+  for (var i = 0; i < keys.length; i++) {
+    if (keys[i][1] && bridgeEqual_(presented, keys[i][1])) return keys[i][0];
+  }
+  throw new Error('UNAUTHORIZED');
+}
+function bridgeScopeAuthorize_(scope, op, path) {
+  if (scope === 'LEGACY') return;
+  if (['folder','list','file','read','put','append'].indexOf(op) < 0)
+    throw new Error('SCOPE_OP_DENIED');
+  if (!path) throw new Error('SCOPE_ROOT_DENIED');
+  if (scope === 'US') {
+    if (/^US(?:\/|$)/.test(path) || path === 'REPAIR_QUEUE.json') return;
+    throw new Error('SCOPE_PATH_DENIED');
+  }
+  if (scope === 'HK') {
+    if (/^HK(?:\/|$)/.test(path) || path === 'REPAIR_QUEUE.json') return;
+    throw new Error('SCOPE_PATH_DENIED');
+  }
+  if (scope === 'MAINT') {
+    if (/^(US|HK)(?:\/|$)/.test(path) ||
+        path === 'REPAIR_QUEUE.json' || path === 'BASE_COMPLETE.json') return;
+    throw new Error('SCOPE_PATH_DENIED');
+  }
+  throw new Error('SCOPE_UNKNOWN');
+}
+function bridgeQueueForeignView_(doc, ownMarket) {
+  if (!doc || !Array.isArray(doc.items)) throw new Error('REPAIR_QUEUE_INVALID');
+  var top = {};
+  Object.keys(doc).sort().forEach(function (key) {
+    if (key !== 'items') top[key] = doc[key];
+  });
+  var foreign = doc.items.filter(function (item) {
+    return !item || item.market !== ownMarket;
+  });
+  return JSON.stringify({top: top, foreign: foreign});
+}
+function bridgeRepairQueueScopeGuard_(scope, oldFile, bytes) {
+  if (scope !== 'US' && scope !== 'HK') return;
+  if (!oldFile) throw new Error('REPAIR_QUEUE_SCOPE_REQUIRES_EXISTING');
+  var oldDoc, newDoc;
+  try {
+    oldDoc = JSON.parse(oldFile.getBlob().getDataAsString('UTF-8'));
+    newDoc = JSON.parse(Utilities.newBlob(bytes).getDataAsString('UTF-8'));
+  } catch (err) {
+    throw new Error('REPAIR_QUEUE_INVALID');
+  }
+  if (bridgeQueueForeignView_(oldDoc, scope) !== bridgeQueueForeignView_(newDoc, scope))
+    throw new Error('SCOPE_FOREIGN_QUEUE_MUTATION');
 }
 function bridgePath_(path) {
   if (typeof path !== 'string' || path.length > 240) throw new Error('INVALID_PATH');
@@ -159,7 +215,8 @@ function bridgeDailyKeys_(path, bytes) {
   });
   return keys;
 }
-function bridgePut_(root, path, body, op) {
+function bridgePut_(root, path, body, op, scope) {
+  scope = scope || 'LEGACY';
   bridgeWritePolicy_(path, op);
   if (!path || (path.indexOf('/') < 0 && path !== 'REPAIR_QUEUE.json' && path !== 'BASE_COMPLETE.json'))
     throw new Error('INVALID_FILE_PATH');
@@ -180,6 +237,7 @@ function bridgePut_(root, path, body, op) {
     var parent = bridgeFolder_(root, split < 0 ? '' : path.slice(0, split), true);
     var name = split < 0 ? path : path.slice(split + 1);
     old = bridgeFile_(root, path);
+    if (path === 'REPAIR_QUEUE.json') bridgeRepairQueueScopeGuard_(scope, old, bytes);
     if (op === 'append' && old) throw new Error('APPEND_CONFLICT');
     if (op === 'append') {
       var dailyKeys = bridgeDailyKeys_(path, bytes);

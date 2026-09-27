@@ -1,0 +1,110 @@
+name: Hunter Phase 1 HK identity fast close once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/phase1-hk-identity-fastclose-once.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HUNTER_ACTIONS_CUTOVER: CONFIRMED
+
+concurrency:
+  group: hunter-phase1-hk-identity-fastclose
+  cancel-in-progress: true
+
+jobs:
+  fastclose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Close HK identity reviews from official evidence
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import json
+          from runner import Drive, compact, digest, now_myt
+          from foundation import current_universe
+          from repair import decide
+
+          drive = Drive()
+          drive.health()
+          securities = {s["security_id"]: s for s in current_universe(drive, "HK")}
+          processed = 0
+          while True:
+              raw = drive.read("REPAIR_QUEUE.json")
+              doc = json.loads(raw)
+              candidates = [(i, x) for i, x in enumerate(doc["items"])
+                            if x.get("market") == "HK"
+                            and x.get("category") == "IDENTITY_REVIEW"
+                            and x.get("status", "OPEN") == "OPEN"][:50]
+              if not candidates:
+                  break
+              updates = {}
+              for index, original in candidates:
+                  item = dict(original)
+                  sid = item.get("security_id")
+                  sec = securities.get(sid)
+                  if sec is None:
+                      raise RuntimeError("HK_IDENTITY_SECURITY_MISSING:" + str(sid))
+                  answer = decide(drive, item, sec, None)
+                  if answer.get("result") != "IDENTITY_FIXED" or not answer.get("accepted"):
+                      raise RuntimeError("HK_IDENTITY_NOT_DETERMINISTIC:" + str(sid) + ":" + str(answer.get("reason")))
+                  identity = digest(compact({"market": "HK", "security_id": sid,
+                                             "category": item["category"], "batch": item.get("batch"),
+                                             "trade_date": item.get("trade_date")}))[:24]
+                  path = f"HK/REPAIR_PATCH/{identity[:2]}/{identity}.json"
+                  if drive.file(path):
+                      old = drive.json(path)
+                      if not old.get("accepted") or old.get("result") != "IDENTITY_FIXED":
+                          raise RuntimeError("PATCH_IDENTITY_CONFLICT:" + path)
+                  else:
+                      drive.append(path, compact(answer))
+                  item["patch_path"] = path
+                  item.update(status="IDENTITY_FIXED",
+                              verified_at_myt=answer["verified_at_myt"],
+                              reason=answer.get("reason"))
+                  updates[index] = item
+
+              for _ in range(8):
+                  latest_raw = drive.read("REPAIR_QUEUE.json")
+                  latest = json.loads(latest_raw)
+                  for index, item in updates.items():
+                      if latest["items"][index].get("status", "OPEN") == "OPEN":
+                          latest["items"][index] = item
+                  try:
+                      drive.put("REPAIR_QUEUE.json", compact(latest),
+                                expected_sha=digest(latest_raw))
+                      break
+                  except RuntimeError as exc:
+                      if "BRIDGE_STALE_WRITE" not in str(exc):
+                          raise
+              else:
+                  raise RuntimeError("HK_IDENTITY_QUEUE_CAS_EXHAUSTED")
+              processed += len(updates)
+              remaining = sum(x.get("market") == "HK"
+                              and x.get("category") == "IDENTITY_REVIEW"
+                              and x.get("status", "OPEN") == "OPEN"
+                              for x in latest["items"])
+              print(f"HK_IDENTITY processed={processed} remaining={remaining}", flush=True)
+
+          final = drive.json("REPAIR_QUEUE.json")["items"]
+          remaining = sum(x.get("market") == "HK"
+                          and x.get("category") == "IDENTITY_REVIEW"
+                          and x.get("status", "OPEN") == "OPEN" for x in final)
+          if remaining:
+              raise RuntimeError(f"HK_IDENTITY_REMAINING_{remaining}")
+          print(f"HK_IDENTITY_FASTCLOSE_COMPLETE processed={processed}", flush=True)
+          PY

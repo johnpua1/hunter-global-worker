@@ -1,0 +1,29 @@
+name: Bridge installAndVerify syntax once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/bridge-install-verify-once.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Gateway JavaScript syntax
+        run: cp bridge/Gateway.gs /tmp/Gateway.js && node --check /tmp/Gateway.js
+      - name: Manifest syntax
+        run: python -m json.tool bridge/appsscript.json >/dev/null
+      - name: Required install contract
+        run: |
+          grep -q 'function installAndVerify()' bridge/Gateway.gs
+          grep -q "newTrigger('dailyUS')" bridge/Gateway.gs
+          grep -q "newTrigger('dailyHK')" bridge/Gateway.gs
+          grep -q "waitHunterJobsTogether_" bridge/Gateway.gs
+          grep -q "dailyUS 下次执行窗口" bridge/Gateway.gs
+          grep -q "https://www.googleapis.com/auth/cloud-platform" bridge/appsscript.json

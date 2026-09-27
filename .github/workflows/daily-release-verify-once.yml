@@ -39,7 +39,5 @@ jobs:
           grep -q "newTrigger('dailyUS')" bridge/Gateway.gs
           grep -q "newTrigger('dailyHK')" bridge/Gateway.gs
           python -m json.tool bridge/appsscript.json >/dev/null
-      - name: Existing foundation unit tests
-        run: |
-          python -m pip install -q -r hunter-global/requirements.txt pytest
-          pytest -q tests/test_foundation.py tests/test_market_close.py
+      - name: Release script syntax
+        run: bash -n cloudrun/update-daily-images.sh

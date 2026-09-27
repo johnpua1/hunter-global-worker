@@ -313,4 +313,4 @@ jobs:
           print(receipt, flush=True)
           PY
 
-# retry-after-parallel-repair-prefetch-fix: 2026-09-27
+# retry-after-http-retry-fix: 2026-09-27

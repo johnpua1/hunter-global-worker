@@ -17,14 +17,9 @@ case "$(gcloud beta billing projects describe "$GCP_PROJECT_ID" --format='value(
   *) echo 'Project billing must be enabled before deployment.' >&2; exit 1 ;;
 esac
 
-gcloud services enable run.googleapis.com cloudscheduler.googleapis.com \
-  artifactregistry.googleapis.com secretmanager.googleapis.com \
-  cloudbuild.googleapis.com --project "$GCP_PROJECT_ID"
-
 if ! gcloud artifacts repositories describe hunter-worker --location "$REGION" \
     --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
-  gcloud artifacts repositories create hunter-worker --repository-format=docker \
-    --location "$REGION" --project "$GCP_PROJECT_ID"
+  echo 'Existing hunter-worker Artifact Registry is required.' >&2; exit 1
 fi
 gcloud artifacts repositories set-cleanup-policies hunter-worker \
   --location "$REGION" --project "$GCP_PROJECT_ID" \
@@ -32,24 +27,15 @@ gcloud artifacts repositories set-cleanup-policies hunter-worker \
 
 SA="hunter-jobs@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 if ! gcloud iam service-accounts describe "$SA" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
-  gcloud iam service-accounts create hunter-jobs --project "$GCP_PROJECT_ID"
+  echo 'Existing hunter-jobs service account is required.' >&2; exit 1
 fi
 for name in APPS_SCRIPT_WEBAPP_URL APPS_SCRIPT_SHARED_KEY; do
   if ! gcloud secrets describe "$name" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
-    gcloud secrets create "$name" --replication-policy=automatic --project "$GCP_PROJECT_ID"
+    echo "Missing existing Secret Manager entry: $name" >&2; exit 1
   fi
   if ! gcloud secrets versions list "$name" --project "$GCP_PROJECT_ID" \
       --filter='state=ENABLED' --format='value(name)' | grep -q .; then
-    if [[ "$name" == APPS_SCRIPT_SHARED_KEY ]]; then
-      read -r -s -p 'Paste Bridge key privately in Cloud Shell: ' value
-      printf '\n'
-    else
-      read -r -p 'Paste Bridge /exec URL privately in Cloud Shell: ' value
-    fi
-    test -n "$value"
-    printf %s "$value" | gcloud secrets versions add "$name" --data-file=- \
-      --project "$GCP_PROJECT_ID" >/dev/null
-    unset value
+    echo "No enabled version for existing secret: $name" >&2; exit 1
   fi
   gcloud secrets add-iam-policy-binding "$name" --project "$GCP_PROJECT_ID" \
     --member="serviceAccount:${SA}" --role=roles/secretmanager.secretAccessor >/dev/null

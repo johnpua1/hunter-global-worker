@@ -5,6 +5,8 @@ import csv
 import datetime as dt
 import io
 import json
+import os
+import time
 from urllib.parse import quote
 
 import requests
@@ -22,7 +24,7 @@ def second_source_close(ticker: str, market: str) -> dict[str, float]:
             if r.get("Date") and r.get("Close") not in (None, "N/D")}
 
 
-def decide(drive: Drive, item: dict, security: dict) -> dict:
+def decide(drive: Drive, item: dict, security: dict, state=None) -> dict:
     market, sid = item["market"], item["security_id"]
     evidence = {"ticker": security["ticker"], "exchange": security.get("exchange"),
                 "listing_status": security.get("listing_status"),
@@ -31,6 +33,11 @@ def decide(drive: Drive, item: dict, security: dict) -> dict:
     result = {"market": market, "security_id": sid,
               "category": item["category"], "accepted": False,
               "verified_at_myt": now_myt(), "evidence": evidence, "rows": []}
+    delisting = security.get("delisting_evidence")
+    if (delisting and delisting.get("official_source") and
+            delisting.get("source_hash") and delisting.get("effective_date")):
+        return {**result, "result": "DELISTED", "reason": "OFFICIAL_DELISTING_CONFIRMED",
+                "evidence": {**evidence, "delisting": delisting}}
     proof = security.get("identity_proof")
     if (item["category"] == "IDENTITY_REVIEW" and
             item.get("problem") == "OFFICIAL_ISIN_SAME_NEW_TICKER" and
@@ -61,7 +68,9 @@ def decide(drive: Drive, item: dict, security: dict) -> dict:
         return {**result, "result": "UNRESOLVED", "reason": "OFFICIAL_IDENTITY_PROOF_REQUIRED"}
     if not official or official.get("ticker") != security["ticker"] or not official.get("source_hash"):
         return {**result, "result": "UNRESOLVED", "reason": "OFFICIAL_LISTING_PROOF_REQUIRED"}
-    state = load_market(drive, market)
+    if security.get("identity_review"):
+        return {**result, "result": "UNRESOLVED", "reason": "IDENTITY_REVIEW_OPEN"}
+    state = state or load_market(drive, market)
     calendar = state.calendar
     if date and date > calendar[-1]:
         from runner import closed_dates_since
@@ -88,7 +97,23 @@ def decide(drive: Drive, item: dict, security: dict) -> dict:
             return {**result, "result": "UNRESOLVED", "reason": "SUSPECT_DATE_NOT_LOCALIZED"}
     rows, flags, splits, reason = fetch_security(security, calendar, calendar[-1], daily=True)
     if not rows:
-        return {**result, "result": "UNRESOLVED", "reason": reason or "NO_YAHOO_BARS"}
+        listing = security.get("listing_date")
+        if date and listing and date < listing and security.get("listing_date_verified"):
+            return {**result, "result": "SHORT_HISTORY", "reason": "PRE_LISTING_DATE"}
+        if not official or not official.get("source_hash"):
+            return {**result, "result": "UNRESOLVED", "reason": "OFFICIAL_LISTING_PROOF_REQUIRED"}
+        try:
+            secondary = second_source_close(security["ticker"], market)
+        except Exception:
+            return {**result, "result": "UNRESOLVED", "reason": "SECOND_SOURCE_UNAVAILABLE"}
+        if date and date not in calendar:
+            return {**result, "result": "UNRESOLVED", "reason": "SESSION_NOT_CONFIRMED"}
+        if date and date in secondary:
+            return {**result, "result": "UNRESOLVED", "reason": "PRIMARY_SOURCE_MISSING"}
+        if not date and secondary:
+            return {**result, "result": "UNRESOLVED", "reason": "PRIMARY_SOURCE_MISSING"}
+        return {**result, "result": "NO_DATA", "reason": "TWO_INDEPENDENT_SOURCES_EMPTY",
+                "evidence": {**evidence, "second_source": "stooq", "primary_error": reason}}
     if date:
         rows = [row for row in rows if row["date"] == date]
     elif item["category"] == "DATA_SUSPECT":
@@ -128,65 +153,58 @@ def decide(drive: Drive, item: dict, security: dict) -> dict:
     return result
 
 
-def run_repair(drive: Drive, market: str, limit: int = 150) -> dict:
+def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
+               chunk_size: int = 25) -> dict:
+    """Persist each chunk before the Cloud Run deadline; restarts skip terminal rows."""
+    if deadline is None:
+        deadline = time.monotonic() + int(os.getenv("REPAIR_TIME_BUDGET_SECONDS", "3300"))
     securities = {s["security_id"]: s for s in current_universe(drive, market)}
-    raw = drive.read("REPAIR_QUEUE.json")
-    doc = json.loads(raw)
-    resolved = 0
-    updates = {}
-    accepted_count = 0
-    # Revisit previously unresolved identity reviews once an official weekly
-    # snapshot supplies proof. Keep fresh work ahead of repeated reviews.
-    candidates = [x for x in doc["items"] if x.get("market") == market and
-                  x.get("status", "OPEN") == "OPEN"]
-    candidates += [x for x in doc["items"] if x.get("market") == market and
-                   x.get("status") == "UNRESOLVED" and
-                   x.get("reason") in ("OFFICIAL_IDENTITY_PROOF_REQUIRED",
-                                       "OFFICIAL_LISTING_PROOF_REQUIRED") and
-                   (securities.get(x.get("security_id")) or {}).get("official_listing_evidence") and
-                   (x.get("category") != "IDENTITY_REVIEW" or
-                    (securities[x["security_id"]].get("identity_review") is False and
-                     securities[x["security_id"]]["official_listing_evidence"].get("ticker") ==
-                     securities[x["security_id"]]["ticker"]))]
-    for item in candidates:
-        if resolved >= limit:
+    processed = accepted_count = 0
+    state = None
+    while time.monotonic() < deadline - 300:
+        raw = drive.read("REPAIR_QUEUE.json")
+        doc = json.loads(raw)
+        candidates = [(i, x) for i, x in enumerate(doc["items"])
+                      if x.get("market") == market and x.get("status", "OPEN") == "OPEN"]
+        if not candidates:
             break
-        sid = item.get("security_id")
-        if sid not in securities:
-            item.update(status="UNRESOLVED", reason="SECURITY_ID_MISSING")
-            resolved += 1
-            updates[(sid, item.get("category"), item.get("trade_date"), item.get("batch"))] = dict(item)
-            continue
-        answer = decide(drive, item, securities[sid])
-        if answer["accepted"]:
-            accepted_count += 1
-            identity = digest(compact({"market": market, "security_id": sid,
-                                       "category": item["category"],
-                                       "trade_date": item.get("trade_date")}))[:24]
-            path = f"{market}/REPAIR_PATCH/{identity}.json"
-            if drive.file(path):
-                if drive.json(path) != answer:
-                    # Timestamp differs after restart; accept the already
-                    # persisted verified patch rather than replacing it.
+        updates = {}
+        for index, original in candidates[:chunk_size]:
+            if time.monotonic() >= deadline - 300:
+                break
+            item = dict(original)
+            sid = item.get("security_id")
+            if sid not in securities:
+                answer = {"result": "UNRESOLVED", "reason": "SECURITY_ID_MISSING_OR_EXECUTION_EVENT",
+                          "verified_at_myt": now_myt(), "accepted": False}
+            else:
+                # BASE identity is immutable; read it once for this invocation.
+                if state is None:
+                    state = load_market(drive, market)
+                answer = decide(drive, item, securities[sid], state)
+            if answer["accepted"]:
+                identity = digest(compact({"market": market, "security_id": sid,
+                                           "category": item["category"], "batch": item.get("batch"),
+                                           "trade_date": item.get("trade_date")}))[:24]
+                path = f"{market}/REPAIR_PATCH/{identity}.json"
+                if drive.file(path):
                     old = drive.json(path)
                     if not old.get("accepted") or old.get("result") != answer["result"]:
                         raise RuntimeError("PATCH_IDENTITY_CONFLICT:" + path)
-            else:
-                drive.append(path, compact(answer))
-            item["patch_path"] = path
-        item["status"] = answer["result"]
-        item["verified_at_myt"] = answer["verified_at_myt"]
-        item["reason"] = answer.get("reason")
-        resolved += 1
-        updates[(sid, item.get("category"), item.get("trade_date"), item.get("batch"))] = dict(item)
-    if resolved:
+                else:
+                    drive.append(path, compact(answer))
+                item["patch_path"] = path
+                accepted_count += 1
+            item.update(status=answer["result"], verified_at_myt=answer["verified_at_myt"],
+                        reason=answer.get("reason"))
+            updates[index] = item
+        if not updates:
+            break
         for _ in range(5):
             latest = json.loads(raw)
-            for item in latest["items"]:
-                key = (item.get("security_id"), item.get("category"),
-                       item.get("trade_date"), item.get("batch"))
-                if item.get("market") == market and key in updates:
-                    item.update(updates[key])
+            for index, item in updates.items():
+                if latest["items"][index].get("status", "OPEN") == "OPEN":
+                    latest["items"][index] = item
             try:
                 drive.put("REPAIR_QUEUE.json", compact(latest), expected_sha=digest(raw))
                 break
@@ -194,12 +212,12 @@ def run_repair(drive: Drive, market: str, limit: int = 150) -> dict:
                 if "BRIDGE_STALE_WRITE" not in str(exc):
                     raise
                 raw = drive.read("REPAIR_QUEUE.json")
+                if len(json.loads(raw)["items"]) < len(doc["items"]):
+                    raise RuntimeError("REPAIR_QUEUE_SHRANK_DURING_CAS")
         else:
             raise RuntimeError("REPAIR_QUEUE_CAS_EXHAUSTED")
-    if accepted_count:
-        from derived import build
-        checkpoint = f"{market}/CONTROL/DAILY_CHECKPOINT.json"
-        as_of = drive.json(checkpoint)["last_completed_date"] if drive.file(checkpoint) else load_market(
-            drive, market).checkpoint["as_of"]
-        build(drive, market, as_of)
-    return {"market": market, "processed": resolved}
+        processed += len(updates)
+    remaining = sum(x.get("market") == market and x.get("status", "OPEN") == "OPEN"
+                    for x in drive.json("REPAIR_QUEUE.json")["items"])
+    return {"market": market, "processed": processed, "accepted": accepted_count,
+            "open": remaining, "timed_out": remaining > 0 and time.monotonic() >= deadline - 300}

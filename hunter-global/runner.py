@@ -573,8 +573,10 @@ def run_mini(drive: Drive, markets: tuple[str, ...]):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("probe", "mini", "base", "daily", "auto",
-                                           "repair", "universe", "options", "analytics"), default="probe")
+                                           "repair", "universe", "options", "analytics",
+                                           "bootstrap", "calendar"), default="probe")
     parser.add_argument("--market", choices=MARKETS, help="Run one market in an independent job")
+    parser.add_argument("--as-of", help="Explicit historical close for calendar/derived")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     authenticated = all(os.getenv(v) for v in ("APPS_SCRIPT_WEBAPP_URL", "APPS_SCRIPT_SHARED_KEY"))
@@ -598,6 +600,22 @@ def main():
         for market in markets:
             LOG.info("repair result=%s", run_repair(drive, market))
         return
+    if args.mode == "bootstrap":
+        from foundation import current_universe, initialize_control, seed_corporate_actions
+        from market_calendar import materialize
+        for market in markets:
+            current_universe(drive, market)
+            checkpoint = initialize_control(drive, market)
+            LOG.info("bootstrap market=%s splits=%d calendar=%d", market,
+                     seed_corporate_actions(drive, market),
+                     materialize(drive, market, args.as_of or checkpoint["last_completed_date"]))
+        return
+    if args.mode == "calendar":
+        from market_calendar import materialize
+        for market in markets:
+            date = args.as_of or drive.json(f"{market}/CONTROL/DAILY_CHECKPOINT.json")["last_completed_date"]
+            LOG.info("calendar market=%s rows=%d", market, materialize(drive, market, date))
+        return
     if args.mode == "universe":
         from universe import refresh
         for market in markets:
@@ -612,7 +630,7 @@ def main():
         from derived import build
         for market in markets:
             path = f"{market}/CONTROL/DAILY_CHECKPOINT.json"
-            date = drive.json(path)["last_completed_date"]
+            date = args.as_of or drive.json(path)["last_completed_date"]
             LOG.info("derived market=%s date=%s rows=%d", market, date, build(drive, market, date))
         return
     from foundation import run_daily as run_foundation_daily, seed_corporate_actions

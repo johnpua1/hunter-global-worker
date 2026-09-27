@@ -1,10 +1,9 @@
 # Hunter Cloud Run release
 
 Deploy only from the merged `main` commit after Phase 1 live Bridge
-deployment. `deploy.sh` checks the exact commit, linked billing, and project
-access. It prompts for the Bridge URL and key only inside authenticated Cloud
-Shell and writes them directly to Secret Manager. Do not paste either secret
-in chat, a source file, a shell command, or GitHub.
+deployment. `deploy.sh` checks the exact commit, linked billing, project
+access, and the existing enabled Secret Manager versions. It never prompts
+for or creates the Bridge secrets.
 
 Run `cloudrun/deploy.sh` with `GCP_PROJECT_ID` and `MERGED_MAIN_SHA` set. The
 script creates or updates three jobs, without any Scheduler jobs. Each job is
@@ -25,10 +24,11 @@ Set the account-currency equivalent of USD 1 as `BUDGET_AMOUNT` and run
 `cloudrun/budget.sh` with `BILLING_ACCOUNT_ID` and `GCP_PROJECT_ID`. Confirm
 the alert recipients. A budget is a warning, not a spending cap.
 
-After the three Cloud Run jobs are configured, run `cloudrun/schedule.sh`. It
-creates exactly three Asia/Kuala_Lumpur schedules: US and HK daily at 08:37
-(the existing production time), maintenance Saturday at 10:00. Disable the
-GitHub production schedules without deleting their workflow files. Inspect the Cloud Scheduler list and
+After the three Cloud Run jobs are configured, run `cloudrun/phase1.sh`. It
+upserts the three Asia/Kuala_Lumpur schedules (US 07:15 Tue-Sat, HK 17:45
+Mon-Fri, maintenance 20:00 daily), initializes the foundation, executes
+maintenance twice, drains OPEN repairs, and builds 2026-09-25 DERIVED. The
+GitHub production schedules remain disabled. Inspect the Cloud Scheduler list and
 billing-account free-tier usage before scheduling; other projects share the
 three free Scheduler jobs and Cloud Run allowances. Monitor Cloud Run CPU,
 memory, network, Scheduler, Artifact Registry, and Cloud Build monthly.

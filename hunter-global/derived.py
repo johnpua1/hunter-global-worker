@@ -98,8 +98,18 @@ def build(drive: Drive, market: str, date: str):
                                 -(r["rank_score"] or 0), r["security_id"]))
     # No benchmark is built or assumed. Relative strength stays null until
     # the user supplies an explicit benchmark list.
-    path = f"{market}/DERIVED/{date}/RANK.json"
-    payload = compact({"market": market, "as_of": date, "rows": derived,
+    folder = f"{market}/DERIVED/{date}"
+    for offset in range(0, len(derived), 250):
+        path = f"{folder}/batch-{offset // 250 + 1:04d}.json"
+        payload = compact({"market": market, "as_of": date,
+                           "rows": derived[offset:offset + 250]})
+        if not drive.file(path) or digest(drive.read(path)) != digest(payload):
+            drive.put(path, payload)
+    path = f"{folder}/RANK.json"
+    payload = compact({"market": market, "as_of": date,
+                       "rows": [{"security_id": row["security_id"], "rank_score": row["rank_score"],
+                                 "filter_pass": row["filter_pass"]} for row in derived],
+                       "detail_parts": (len(derived) + 249) // 250,
                        "filters": {"minimum_history_20d": True, "current_date": date},
                        "benchmark": None, "mae_mfe_anchor": None})
     if not drive.file(path) or digest(drive.read(path)) != digest(payload):

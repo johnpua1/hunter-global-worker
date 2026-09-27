@@ -8,8 +8,10 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hunter-global"))
 from analytics import compose, excursions, indicators, split_adjust
 from foundation import append_daily_date
-from options import current_status
+from options import current_status, label
 from repair import decide
+from repair import run_repair
+from market_calendar import materialize
 from runner import compact, parse_lines_gz
 
 
@@ -66,6 +68,21 @@ class FoundationTests(unittest.TestCase):
     def test_options_status_stales_after_missed_monthly_refresh(self):
         self.assertEqual(current_status({"status": "TRUE", "checked_at_myt": "2026-08-01T09:00:00+08:00"},
                                         "2026-09"), "STALE")
+
+    @patch("options.retry_http")
+    def test_options_requires_two_quoted_distinct_strikes_same_expiry(self, get):
+        chain = {"expirationDate": 1790294400, "calls": [
+            {"strike": 100, "bid": 2.0, "ask": 2.2},
+            {"strike": 105, "bid": 1.0, "ask": 1.2}]}
+        get.return_value.json.return_value = {"optionChain": {"result": [{
+            "expirationDates": [1790294400], "options": [chain]}]}}
+        full = label("AAPL", "US")
+        self.assertEqual(full["vertical_usable"], "TRUE")
+        self.assertEqual(len(full["vertical_evidence"]["legs"]), 2)
+        chain["calls"][1].pop("ask")
+        partial = label("AAPL", "US")
+        self.assertEqual(partial["has_options"], "TRUE")
+        self.assertEqual(partial["vertical_usable"], "UNKNOWN")
     def test_patch_composition_and_split_applied_once(self):
         base = [row("2026-01-01", 100)]
         patch = [{"accepted": True, "result": "RESOLVED", "rows": [row("2026-01-01", 110)]}]
@@ -126,6 +143,35 @@ class FoundationTests(unittest.TestCase):
                                    set(), 2, ["2026-01-01"])
         self.assertEqual(result["status"], "MARKET_WIDE_DATA_UNAVAILABLE")
         self.assertEqual(drive.json("REPAIR_QUEUE.json")["items"], [])
+
+    @patch("repair.load_market", return_value=object())
+    @patch("repair.decide")
+    @patch("repair.current_universe")
+    def test_repairs_drain_in_persisted_chunks_without_base_writes(self, universe, decide_repair, base):
+        drive = MemoryDrive()
+        universe.return_value = [{"security_id": "US-000001"}]
+        drive.data["REPAIR_QUEUE.json"] = compact({"items": [
+            {"market": "US", "security_id": "US-000001", "category": "DATA_SUSPECT",
+             "batch": i, "status": "OPEN"} for i in range(52)]})
+        decide_repair.return_value = {"result": "UNRESOLVED", "accepted": False,
+                                      "reason": "NO_INDEPENDENT_EVIDENCE",
+                                      "verified_at_myt": "2026-09-27T08:00:00+08:00"}
+        result = run_repair(drive, "US", chunk_size=20)
+        self.assertEqual(result["open"], 0)
+        self.assertEqual(result["processed"], 52)
+        self.assertEqual(drive.writes, ["REPAIR_QUEUE.json"] * 3)
+        self.assertEqual(run_repair(drive, "US")["processed"], 0)
+
+    @patch("market_calendar.closed_dates_since", return_value=[])
+    @patch("market_calendar.load_market")
+    def test_calendar_does_not_invent_halt_or_weekday_closure(self, base, sessions):
+        drive = MemoryDrive()
+        base.return_value.calendar = ["2026-09-25"]
+        materialize(drive, "US", "2026-09-28")
+        doc = drive.json("US/MARKET_CALENDAR/as_of_2026-09-28.json")
+        self.assertEqual([x["session_status"] for x in doc["sessions"]],
+                         ["OPEN", "CLOSED", "CLOSED"])
+        self.assertEqual(doc["unverified_weekdays"], ["2026-09-28"])
 
 
 if __name__ == "__main__":

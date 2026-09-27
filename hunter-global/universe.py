@@ -39,9 +39,9 @@ def parse_us(sources):
             name = row.get("Security Name", "")
             if (not ticker or row.get("ETF") != "N" or row.get("Test Issue") != "N"
                     or any(word in name.upper() for word in
-                           ("WARRANT", "PREFERRED", "PREF ", "RIGHT", " UNIT", " REIT", " FUND",
-                            "SENIOR NOTES", "SUBORDINATED NOTES", "DEBENTURE",
-                            "MORTGAGE BOND"))):
+                           ("WARRANT", "PREFERRED", "PREF ", " PFD", "RIGHT", " UNIT", " REIT", " FUND",
+                            "SENIOR NOTES", "SUBORDINATED NOTES", "NOTES DUE", "DEBENTURE",
+                            "MORTGAGE BOND", "TRUST PREFERRED"))):
                 continue
             exchange = "NASDAQ" if filename.startswith("nasdaq") else {
                 "N": "NYSE", "A": "NYSE_AMERICAN", "P": "NYSE_ARCA"}.get(row.get("Exchange"))

@@ -76,13 +76,12 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -r hunter-global/requirements.txt
-      - name: Build Phase 1 derived
+      - name: Build remaining Phase 1 HK derived
         working-directory: hunter-global
         env:
           APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
           APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
         run: |
-          python runner.py --mode analytics --market US --as-of "$PHASE1_AS_OF"
           python runner.py --mode analytics --market HK --as-of "$PHASE1_AS_OF"
       - name: Write Phase 1 final receipts
         working-directory: hunter-global

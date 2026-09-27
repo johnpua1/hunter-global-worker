@@ -188,7 +188,7 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
         # worker threads never share Drive transport calls.
         for _, original in batch_candidates:
             batch = original.get("batch")
-            if not isinstance(batch, int):
+            if not isinstance(batch, int) or batch < 1:
                 continue
             key = (market, batch)
             if key in base_cache:

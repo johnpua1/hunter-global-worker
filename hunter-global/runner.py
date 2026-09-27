@@ -126,7 +126,8 @@ class Drive:
         attempts = 8
         for attempt in range(attempts):
             try:
-                response = self.http.post(self.url, json=request, timeout=120)
+                timeout = 30 if op == "read" else 120
+                response = self.http.post(self.url, json=request, timeout=timeout)
                 response.raise_for_status()
                 result = response.json()
                 # Apps Script can rarely return the doGet health payload to a

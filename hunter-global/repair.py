@@ -6,6 +6,7 @@ import datetime as dt
 import io
 import json
 import os
+from collections import defaultdict
 import time
 from urllib.parse import quote
 
@@ -24,7 +25,7 @@ def second_source_close(ticker: str, market: str) -> dict[str, float]:
             if r.get("Date") and r.get("Close") not in (None, "N/D")}
 
 
-def decide(drive: Drive, item: dict, security: dict, state=None) -> dict:
+def decide(drive: Drive, item: dict, security: dict, state=None, base_cache=None) -> dict:
     market, sid = item["market"], item["security_id"]
     evidence = {"ticker": security["ticker"], "exchange": security.get("exchange"),
                 "listing_status": security.get("listing_status"),
@@ -78,8 +79,17 @@ def decide(drive: Drive, item: dict, security: dict, state=None) -> dict:
     batch = item.get("batch")
     original = []
     if isinstance(batch, int):
-        original = [r for r in parse_lines_gz(
-            drive.read(f"{market}/BASE/batch-{batch:04d}.ndjson.gz")) if r["security_id"] == sid]
+        if base_cache is not None:
+            key = (market, batch)
+            if key not in base_cache:
+                by_id = defaultdict(list)
+                for row in parse_lines_gz(drive.read(f"{market}/BASE/batch-{batch:04d}.ndjson.gz")):
+                    by_id[row["security_id"]].append(row)
+                base_cache[key] = by_id
+            original = base_cache[key].get(sid, [])
+        else:
+            original = [r for r in parse_lines_gz(
+                drive.read(f"{market}/BASE/batch-{batch:04d}.ndjson.gz")) if r["security_id"] == sid]
     suspect_days = set()
     if item["category"] == "DATA_SUSPECT" and not date:
         suspect_days = {r["date"] for r in original if
@@ -161,6 +171,7 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
     securities = {s["security_id"]: s for s in current_universe(drive, market)}
     processed = accepted_count = 0
     state = None
+    base_cache = {}
     while time.monotonic() < deadline - 300:
         raw = drive.read("REPAIR_QUEUE.json")
         doc = json.loads(raw)
@@ -181,7 +192,7 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
                 # BASE identity is immutable; read it once for this invocation.
                 if state is None:
                     state = load_market(drive, market)
-                answer = decide(drive, item, securities[sid], state)
+                answer = decide(drive, item, securities[sid], state, base_cache=base_cache)
             if answer["accepted"]:
                 identity = digest(compact({"market": market, "security_id": sid,
                                            "category": item["category"], "batch": item.get("batch"),

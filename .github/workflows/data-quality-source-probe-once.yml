@@ -1,0 +1,44 @@
+name: Hunter data quality source probe once
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/data-quality-source-probe-once.yml
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install requests
+      - name: Probe independent OHLC
+        run: |
+          python - <<'PY'
+          import csv, io, requests
+          samples=[
+            ("0004.hk","20250108","20250108"),
+            ("0008.hk","20250922","20250922"),
+            ("0010.hk","20241113","20241113"),
+            ("2370.hk","20241028","20241028"),
+            ("0630.hk","20260709","20260709"),
+            ("2205.hk","20260206","20260206"),
+            ("0001.hk","20251224","20251224"),
+            ("0001.hk","20260216","20260216"),
+            ("0008.hk","20251224","20251224"),
+            ("0008.hk","20260216","20260216"),
+          ]
+          s=requests.Session(); s.headers.update({"User-Agent":"Mozilla/5.0 Hunter/1.0"})
+          for sym,d1,d2 in samples:
+              url=f"https://stooq.com/q/d/l/?s={sym}&i=d&d1={d1}&d2={d2}"
+              try:
+                  r=s.get(url,timeout=20)
+                  print("SAMPLE",sym,d1,"HTTP",r.status_code,"LEN",len(r.content),flush=True)
+                  print(r.text[:500].replace("\r",""),flush=True)
+              except Exception as e:
+                  print("SAMPLE",sym,d1,"EXC",type(e).__name__,str(e),flush=True)
+          PY

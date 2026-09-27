@@ -20,19 +20,32 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -r hunter-global/requirements.txt
-      - name: Probe Yahoo optionChain sample
+      - name: Probe Yahoo crumb session
         working-directory: hunter-global
         run: |
           python - <<'PY'
-          import time, requests
-          symbols=["AAPL","MSFT","NVDA","SPY","QQQ","IWM","AMZN","META","TSLA","AMD"]
-          for s in symbols:
-              t=time.monotonic()
+          import requests, urllib.parse, time
+          s=requests.Session()
+          s.headers.update({"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36"})
+          for seed in ["https://fc.yahoo.com","https://finance.yahoo.com/quote/AAPL/options/"]:
               try:
-                  r=requests.get("https://query1.finance.yahoo.com/v7/finance/options/"+s,
-                                 headers={"User-Agent":"Mozilla/5.0 Hunter/1.0"},timeout=15)
-                  print(s,r.status_code,len(r.content),round(time.monotonic()-t,3),
-                        r.text[:120].replace("\n"," "),flush=True)
+                  r=s.get(seed,timeout=15,allow_redirects=True)
+                  print("SEED",seed,r.status_code,"cookies",dict(s.cookies),flush=True)
               except Exception as e:
-                  print(s,"EXC",type(e).__name__,str(e)[:120],round(time.monotonic()-t,3),flush=True)
+                  print("SEED_EXC",seed,type(e).__name__,str(e)[:160],flush=True)
+          crumb=None
+          for url in ["https://query1.finance.yahoo.com/v1/test/getcrumb",
+                      "https://query2.finance.yahoo.com/v1/test/getcrumb"]:
+              try:
+                  r=s.get(url,timeout=15)
+                  print("CRUMB",url,r.status_code,repr(r.text[:120]),"cookies",dict(s.cookies),flush=True)
+                  if r.ok and r.text and "Too Many Requests" not in r.text:
+                      crumb=r.text.strip(); break
+              except Exception as e:
+                  print("CRUMB_EXC",url,type(e).__name__,str(e)[:160],flush=True)
+          for sym in ["AAPL","SPY","NVDA"]:
+              url="https://query1.finance.yahoo.com/v7/finance/options/"+sym
+              params={"crumb":crumb} if crumb else {}
+              r=s.get(url,params=params,timeout=15)
+              print("OPTION",sym,r.status_code,len(r.content),r.url,r.text[:180].replace("\n"," "),flush=True)
           PY

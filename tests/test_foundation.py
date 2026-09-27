@@ -13,7 +13,7 @@ from repair import decide
 from repair import run_repair
 from market_calendar import materialize
 from derived import read_files
-from runner import compact, parse_lines_gz
+from runner import compact, lines_gz, parse_lines_gz
 
 
 class MemoryDrive:
@@ -194,6 +194,7 @@ class FoundationTests(unittest.TestCase):
     def test_repairs_drain_in_persisted_chunks_without_base_writes(self, universe, decide_repair, base):
         drive = MemoryDrive()
         universe.return_value = [{"security_id": "US-000001"}]
+        drive.data["US/CALENDAR_BASE.ndjson.gz"] = lines_gz([{"date": "2026-01-02"}])
         drive.data["REPAIR_QUEUE.json"] = compact({"items": [
             {"market": "US", "security_id": "US-000001", "category": "DATA_SUSPECT",
              "batch": i, "status": "OPEN"} for i in range(52)]})

@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/phase1-hk-serial-finish.yml
+      - hunter-global/analytics.py
   workflow_dispatch:
 
 permissions:

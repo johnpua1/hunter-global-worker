@@ -1,5 +1,5 @@
 name: Hunter Phase 1 one-time finalize
-# retry-phase1-repair-throughput-8x50: 2026-09-27
+# retry-after-tested-repair-restore: 2026-09-27
 
 on:
   push:

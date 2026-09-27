@@ -80,7 +80,7 @@ def decide(drive: Drive, item: dict, security: dict, state=None, base_cache=None
         calendar = calendar + closed_dates_since(market, calendar[-1])
     batch = item.get("batch")
     original = []
-    if isinstance(batch, int) and batch >= 1:
+    if isinstance(batch, int):
         if base_cache is not None:
             key = (market, batch)
             def load_once():
@@ -173,15 +173,14 @@ def decide(drive: Drive, item: dict, security: dict, state=None, base_cache=None
 
 def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
                chunk_size: int = 25) -> dict:
-    """Persist each chunk before the deadline; Drive writes stay single-writer."""
+    """Persist each chunk before the Cloud Run deadline; restarts skip terminal rows."""
     if deadline is None:
         deadline = time.monotonic() + int(os.getenv("REPAIR_TIME_BUDGET_SECONDS", "3300"))
     securities = {s["security_id"]: s for s in current_universe(drive, market)}
     processed = accepted_count = 0
     state = None
     base_cache = {}
-    verify_workers = max(1, min(8, int(os.getenv("REPAIR_VERIFY_WORKERS", "6"))))
-
+    base_cache_lock = threading.Lock()
     while time.monotonic() < deadline - 300:
         raw = drive.read("REPAIR_QUEUE.json")
         doc = json.loads(raw)
@@ -189,30 +188,9 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
                       if x.get("market") == market and x.get("status", "OPEN") == "OPEN"]
         if not candidates:
             break
-        selected = candidates[:chunk_size]
-        if not selected:
-            break
-
-        if state is None:
+        batch_candidates = candidates[:chunk_size]
+        if state is None and any(x.get("security_id") in securities for _, x in batch_candidates):
             state = load_market(drive, market)
-
-        # Preload each immutable BASE batch once on the single writer thread.
-        # Worker threads below perform external verification only; no concurrent
-        # Drive mutation is introduced.
-        for _, original in selected:
-            batch = original.get("batch")
-            if isinstance(batch, int) and batch >= 1:
-                key = (market, batch)
-                if key not in base_cache:
-                    base_path = f"{market}/BASE/batch-{batch:04d}.ndjson.gz"
-                    # Preserve the existing test/injection contract: prefetch
-                    # only when the immutable BASE object is actually present.
-                    # In production every real batch has this sealed object.
-                    if drive.file(base_path):
-                        by_id = defaultdict(list)
-                        for row in parse_lines_gz(drive.read(base_path)):
-                            by_id[row["security_id"]].append(row)
-                        base_cache[key] = by_id
 
         def evaluate(pair):
             index, original = pair
@@ -223,62 +201,54 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
                           "reason": "SECURITY_ID_MISSING_OR_EXECUTION_EVENT",
                           "verified_at_myt": now_myt(), "accepted": False}
             else:
-                answer = decide(drive, item, securities[sid], state,
-                                base_cache=base_cache)
+                answer = decide(drive, item, securities[sid], state, base_cache=base_cache, base_cache_lock=base_cache_lock)
             return index, item, sid, answer
 
-        remaining_budget = deadline - time.monotonic()
-        if remaining_budget < 300:
-            break
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=verify_workers) as pool:
-            results = list(pool.map(evaluate, selected))
+        workers = max(1, int(os.getenv("REPAIR_WORKERS", os.getenv("FETCH_WORKERS", "6"))))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            evaluated = list(pool.map(evaluate, batch_candidates))
 
         updates = {}
-        for index, item, sid, answer in results:
+        for index, item, sid, answer in evaluated:
             if answer["accepted"]:
                 identity = digest(compact({"market": market, "security_id": sid,
                                            "category": item["category"], "batch": item.get("batch"),
                                            "trade_date": item.get("trade_date")}))[:24]
+                # Shard repair sidecars so the Bridge's 1,000-entry folder
+                # listing ceiling can never block DERIVED once the historical
+                # backlog is drained. Existing flat/bulk sidecars remain readable.
                 path = f"{market}/REPAIR_PATCH/{identity[:2]}/{identity}.json"
                 if drive.file(path):
-                    old = drive.json(path)
-                    if not old.get("accepted") or old.get("result") != answer["result"]:
+                    previous = drive.json(path)
+                    if not previous.get("accepted") or previous.get("result") != answer["result"]:
                         raise RuntimeError("PATCH_IDENTITY_CONFLICT:" + path)
                 else:
                     drive.append(path, compact(answer))
                 item["patch_path"] = path
                 accepted_count += 1
-            item.update(status=answer["result"],
-                        verified_at_myt=answer["verified_at_myt"],
+            item.update(status=answer["result"], verified_at_myt=answer["verified_at_myt"],
                         reason=answer.get("reason"))
             updates[index] = item
-
         if not updates:
             break
         for _ in range(5):
-            latest_raw = drive.read("REPAIR_QUEUE.json")
-            latest = json.loads(latest_raw)
-            if len(latest["items"]) < len(doc["items"]):
-                raise RuntimeError("REPAIR_QUEUE_SHRANK_DURING_CAS")
+            latest = json.loads(raw)
             for index, item in updates.items():
                 if latest["items"][index].get("status", "OPEN") == "OPEN":
                     latest["items"][index] = item
             try:
-                drive.put("REPAIR_QUEUE.json", compact(latest),
-                          expected_sha=digest(latest_raw))
+                drive.put("REPAIR_QUEUE.json", compact(latest), expected_sha=digest(raw))
                 break
             except RuntimeError as exc:
                 if "BRIDGE_STALE_WRITE" not in str(exc):
                     raise
+                raw = drive.read("REPAIR_QUEUE.json")
+                if len(json.loads(raw)["items"]) < len(doc["items"]):
+                    raise RuntimeError("REPAIR_QUEUE_SHRANK_DURING_CAS")
         else:
             raise RuntimeError("REPAIR_QUEUE_CAS_EXHAUSTED")
         processed += len(updates)
-
     remaining = sum(x.get("market") == market and x.get("status", "OPEN") == "OPEN"
                     for x in drive.json("REPAIR_QUEUE.json")["items"])
     return {"market": market, "processed": processed, "accepted": accepted_count,
-            "open": remaining,
-            "verify_workers": verify_workers,
-            "timed_out": remaining > 0 and time.monotonic() >= deadline - 300}
-
+            "open": remaining, "timed_out": remaining > 0 and time.monotonic() >= deadline - 300}

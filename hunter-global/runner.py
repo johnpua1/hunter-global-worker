@@ -56,12 +56,14 @@ def now_myt() -> str:
 def retry_http(session, method: str, url: str, **kwargs):
     retryable = {429, 500, 502, 503, 504}
     last_error = None
-    for attempt in range(5):
+    attempts = max(1, int(os.getenv("HUNTER_HTTP_RETRY_ATTEMPTS", "5")))
+    timeout = max(3.0, float(os.getenv("HUNTER_HTTP_TIMEOUT_SECONDS", "45")))
+    for attempt in range(attempts):
         try:
-            response = session.request(method, url, timeout=45, **kwargs)
+            response = session.request(method, url, timeout=timeout, **kwargs)
         except (requests.RequestException, OSError) as exc:
             last_error = exc
-            if attempt == 4:
+            if attempt == attempts - 1:
                 raise
             time.sleep(min(30, 2**attempt + random.random()))
             continue
@@ -74,7 +76,7 @@ def retry_http(session, method: str, url: str, **kwargs):
             return response
 
         last_error = requests.HTTPError(f"HTTP {response.status_code}", response=response)
-        if attempt == 4:
+        if attempt == attempts - 1:
             raise last_error
         time.sleep(min(30, 2**attempt + random.random()))
 

@@ -1,0 +1,61 @@
+name: Hunter HK gap quarantine once
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/hk-gap-quarantine-once.yml
+permissions:
+  contents: read
+env:
+  HUNTER_ACTIONS_CUTOVER: CONFIRMED
+  HUNTER_BRIDGE_ATTEMPTS: '8'
+  HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '90'
+  HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS: '120'
+jobs:
+  quarantine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Quarantine unresolved HK data gaps
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import json
+          from runner import Drive,compact,digest,now_myt
+          drive=Drive()
+          q_raw=drive.read("REPAIR_QUEUE.json"); q=json.loads(q_raw)
+          u_raw=drive.read("HK/CURRENT_UNIVERSE.json"); u=json.loads(u_raw)
+          targets={x.get("security_id") for x in q["items"]
+                   if x.get("market")=="HK" and x.get("status")=="UNRESOLVED"}
+          byid={s["security_id"]:s for s in u["securities"]}
+          for sid in targets:
+              sec=byid.get(sid)
+              if sec:
+                  sec["listing_status"]="QUARANTINED_DATA_GAP"
+                  sec["quarantine_reason"]="UNRESOLVED_HISTORICAL_GAP"
+                  sec["quarantined_at_myt"]=now_myt()
+          changed=0
+          for x in q["items"]:
+              if x.get("market")=="HK" and x.get("status")=="UNRESOLVED":
+                  x.update(status="QUARANTINED_DATA_GAP",
+                           reason="UNRESOLVED_HISTORICAL_GAP",
+                           verified_at_myt=now_myt())
+                  changed+=1
+          drive.put("HK/CURRENT_UNIVERSE.json",compact(u),expected_sha=digest(u_raw))
+          drive.put("REPAIR_QUEUE.json",compact(q),expected_sha=digest(q_raw))
+          print({"quarantined":len(targets),"queue_items_changed":changed,"targets":sorted(targets)},flush=True)
+          PY
+      - name: Rebuild HK derived without quarantined gaps
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: python runner.py --mode analytics --market HK --as-of 2026-09-25

@@ -16,9 +16,12 @@ upsert_schedule() {
   gcloud run jobs add-iam-policy-binding "$job" --region "$REGION" --project "$GCP_PROJECT_ID" \
     --member="serviceAccount:${SA}" --role=roles/run.invoker >/dev/null
 
-  gcloud scheduler jobs describe "$name" --location "$REGION" \
-      --project "$GCP_PROJECT_ID" >/dev/null
-  gcloud scheduler jobs update http "$name" --location "$REGION" \
+  local action=create
+  if gcloud scheduler jobs describe "$name" --location "$REGION" \
+      --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
+    action=update
+  fi
+  gcloud scheduler jobs "$action" http "$name" --location "$REGION" \
     --project "$GCP_PROJECT_ID" --schedule "$cron" --time-zone "$timezone" \
     --uri="$uri" --http-method=POST --oauth-service-account-email="$SA" \
     --oauth-token-scope='https://www.googleapis.com/auth/cloud-platform' \

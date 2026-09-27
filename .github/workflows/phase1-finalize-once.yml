@@ -1,0 +1,314 @@
+name: Hunter Phase 1 one-time finalize
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/phase1-finalize-once.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hunter-phase1-finalize-once
+  cancel-in-progress: false
+
+env:
+  HUNTER_ACTIONS_CUTOVER: CONFIRMED
+  FETCH_WORKERS: '6'
+  PHASE1_AS_OF: '2026-09-25'
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Unit tests
+        run: python -m unittest discover -s tests -p 'test_*.py'
+      - name: Bootstrap Phase 1 state
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python runner.py --mode probe --market US
+          python runner.py --mode probe --market HK
+          python runner.py --mode bootstrap --market US --as-of "$PHASE1_AS_OF"
+          python runner.py --mode bootstrap --market HK --as-of "$PHASE1_AS_OF"
+          python runner.py --mode universe --market US
+          python runner.py --mode universe --market HK
+
+  options-us:
+    needs: bootstrap
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Materialize US options metadata
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: python runner.py --mode options --market US
+
+  options-hk:
+    needs: options-us
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Materialize HK options metadata
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: python runner.py --mode options --market HK
+
+  repair-us-a:
+    needs: options-hk
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Drain US repairs pass A
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import time
+          from runner import Drive
+          from repair import run_repair
+
+          market = "US"
+          drive = Drive()
+          drive.health()
+          hard = time.monotonic() + 17400
+          while True:
+              items = drive.json("REPAIR_QUEUE.json")["items"]
+              open_count = sum(x.get("market") == market and x.get("status", "OPEN") == "OPEN" for x in items)
+              print(f"{market} OPEN={open_count}", flush=True)
+              if open_count == 0:
+                  break
+              if time.monotonic() >= hard - 600:
+                  print(f"{market} PASS_A_TIMEBOX_REACHED OPEN={open_count}", flush=True)
+                  break
+              result = run_repair(drive, market, deadline=min(hard, time.monotonic() + 3300))
+              print(result, flush=True)
+              if result["processed"] == 0 and result["open"] > 0:
+                  raise RuntimeError(f"{market}_REPAIR_NO_PROGRESS")
+          PY
+
+  repair-us-b:
+    needs: repair-us-a
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Drain US repairs pass B and require closure
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import time
+          from runner import Drive
+          from repair import run_repair
+
+          market = "US"
+          drive = Drive()
+          drive.health()
+          hard = time.monotonic() + 17400
+          while True:
+              items = drive.json("REPAIR_QUEUE.json")["items"]
+              open_count = sum(x.get("market") == market and x.get("status", "OPEN") == "OPEN" for x in items)
+              print(f"{market} OPEN={open_count}", flush=True)
+              if open_count == 0:
+                  break
+              if time.monotonic() >= hard - 600:
+                  raise RuntimeError(f"{market}_REPAIR_DRAIN_TIMEOUT_OPEN_{open_count}")
+              result = run_repair(drive, market, deadline=min(hard, time.monotonic() + 3300))
+              print(result, flush=True)
+              if result["processed"] == 0 and result["open"] > 0:
+                  raise RuntimeError(f"{market}_REPAIR_NO_PROGRESS")
+          PY
+
+  repair-hk-a:
+    needs: repair-us-b
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Drain HK repairs pass A
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import time
+          from runner import Drive
+          from repair import run_repair
+
+          market = "HK"
+          drive = Drive()
+          drive.health()
+          hard = time.monotonic() + 17400
+          while True:
+              items = drive.json("REPAIR_QUEUE.json")["items"]
+              open_count = sum(x.get("market") == market and x.get("status", "OPEN") == "OPEN" for x in items)
+              print(f"{market} OPEN={open_count}", flush=True)
+              if open_count == 0:
+                  break
+              if time.monotonic() >= hard - 600:
+                  print(f"{market} PASS_A_TIMEBOX_REACHED OPEN={open_count}", flush=True)
+                  break
+              result = run_repair(drive, market, deadline=min(hard, time.monotonic() + 3300))
+              print(result, flush=True)
+              if result["processed"] == 0 and result["open"] > 0:
+                  raise RuntimeError(f"{market}_REPAIR_NO_PROGRESS")
+          PY
+
+  repair-hk-b:
+    needs: repair-hk-a
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Drain HK repairs pass B and require closure
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import time
+          from runner import Drive
+          from repair import run_repair
+
+          market = "HK"
+          drive = Drive()
+          drive.health()
+          hard = time.monotonic() + 17400
+          while True:
+              items = drive.json("REPAIR_QUEUE.json")["items"]
+              open_count = sum(x.get("market") == market and x.get("status", "OPEN") == "OPEN" for x in items)
+              print(f"{market} OPEN={open_count}", flush=True)
+              if open_count == 0:
+                  break
+              if time.monotonic() >= hard - 600:
+                  raise RuntimeError(f"{market}_REPAIR_DRAIN_TIMEOUT_OPEN_{open_count}")
+              result = run_repair(drive, market, deadline=min(hard, time.monotonic() + 3300))
+              print(result, flush=True)
+              if result["processed"] == 0 and result["open"] > 0:
+                  raise RuntimeError(f"{market}_REPAIR_NO_PROGRESS")
+          PY
+
+  finalize:
+    needs: repair-hk-b
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Build derived
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python runner.py --mode analytics --market US --as-of "$PHASE1_AS_OF"
+          python runner.py --mode analytics --market HK --as-of "$PHASE1_AS_OF"
+      - name: Verify Phase 1 closure and write receipts
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import os
+          from collections import Counter
+          from runner import Drive, compact, now_myt
+
+          drive = Drive()
+          drive.health()
+          queue = drive.json("REPAIR_QUEUE.json")["items"]
+          open_items = [x for x in queue if x.get("status", "OPEN") == "OPEN"]
+          if open_items:
+              raise RuntimeError(f"REPAIR_OPEN={len(open_items)}")
+          terminal = {"RESOLVED", "SHORT_HISTORY", "DELISTED", "NO_DATA", "IDENTITY_FIXED", "UNRESOLVED"}
+          bad = [x for x in queue if x.get("status", "OPEN") not in terminal and x.get("category") != "EXECUTION"]
+          if bad:
+              raise RuntimeError(f"NON_TERMINAL_REPAIR_STATUS={len(bad)}")
+
+          required = {}
+          for market in ("US", "HK"):
+              required[market] = [
+                  f"{market}/CURRENT_UNIVERSE.json",
+                  f"{market}/MARKET_CALENDAR/as_of_2026-09-25.json",
+                  f"{market}/CORPORATE_ACTIONS/BASE_SPLITS.json",
+                  f"{market}/CONTROL/DAILY_CHECKPOINT.json",
+                  f"{market}/OPTIONS_METADATA/2026-09.json",
+                  f"{market}/DERIVED/2026-09-25/RANK.json",
+              ]
+              missing = [p for p in required[market] if not drive.file(p)]
+              if missing:
+                  raise RuntimeError(f"{market}_MISSING=" + ",".join(missing))
+              checkpoint = drive.json(f"{market}/CONTROL/DAILY_CHECKPOINT.json")
+              if checkpoint.get("last_completed_date") != "2026-09-25":
+                  raise RuntimeError(f"{market}_BAD_CHECKPOINT={checkpoint.get('last_completed_date')}")
+
+          counts = Counter(x.get("status", "OPEN") for x in queue)
+          receipt = {
+              "phase": "PHASE1",
+              "status": "COMPLETE",
+              "as_of": "2026-09-25",
+              "execution_channel": "GITHUB_ACTIONS_TEMPORARY",
+              "execution_sha": os.environ.get("GITHUB_SHA"),
+              "repair_total": len(queue),
+              "repair_open": 0,
+              "repair_counts": dict(counts),
+              "base_rebuilt": False,
+              "verified_rerun": False,
+              "phase2_started": False,
+              "completed_at_myt": now_myt(),
+          }
+          for market in ("US", "HK"):
+              drive.put(f"{market}/CONTROL/PHASE1_FINAL.json", compact({**receipt, "market": market}))
+          print(receipt, flush=True)
+          PY

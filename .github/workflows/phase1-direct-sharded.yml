@@ -1,5 +1,6 @@
 name: Hunter Phase 1 direct sharded resume
 # queue-fast-cas-v2
+# bridge-bounded-us-tail-v3
 
 on:
   push:
@@ -21,6 +22,9 @@ env:
   REPAIR_WORKERS: '8'
   HUNTER_HTTP_TIMEOUT_SECONDS: '15'
   HUNTER_HTTP_RETRY_ATTEMPTS: '2'
+  HUNTER_BRIDGE_ATTEMPTS: '3'
+  HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '30'
+  HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS: '60'
   PHASE1_AS_OF: '2026-09-25'
 
 jobs:
@@ -58,7 +62,7 @@ jobs:
               result=run_repair(
                   drive, market,
                   deadline=min(hard,time.monotonic()+3300),
-                  chunk_size=64,
+                  chunk_size=16,
                   shard_index=shard,
                   shard_count=4)
               print(result,flush=True)

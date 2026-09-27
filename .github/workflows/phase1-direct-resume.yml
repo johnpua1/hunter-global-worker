@@ -1,4 +1,5 @@
 name: Hunter Phase 1 direct resume
+# direct-fast-calendar-v2
 
 on:
   push:
@@ -51,7 +52,7 @@ jobs:
               print(f"US OPEN={n}", flush=True)
               if n == 0:
                   break
-              result = run_repair(drive, "US", deadline=min(hard, time.monotonic()+3300), chunk_size=8)
+              result = run_repair(drive, "US", deadline=min(hard, time.monotonic()+3300), chunk_size=4)
               print(result, flush=True)
               if result["processed"] == 0 and result["open"] > 0:
                   raise RuntimeError(f"US_REPAIR_NO_PROGRESS_OPEN_{result['open']}")
@@ -88,7 +89,7 @@ jobs:
               print(f"HK OPEN={n}", flush=True)
               if n == 0:
                   break
-              result = run_repair(drive, "HK", deadline=min(hard, time.monotonic()+3300), chunk_size=8)
+              result = run_repair(drive, "HK", deadline=min(hard, time.monotonic()+3300), chunk_size=4)
               print(result, flush=True)
               if result["processed"] == 0 and result["open"] > 0:
                   raise RuntimeError(f"HK_REPAIR_NO_PROGRESS_OPEN_{result['open']}")

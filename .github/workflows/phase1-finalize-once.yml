@@ -1,5 +1,5 @@
 name: Hunter Phase 1 one-time finalize
-# retry-after-hkex-dimension-fix: 2026-09-27
+# retry-after-v3-scope-fix: 2026-09-27
 
 on:
   push:
@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: hunter-phase1-finalize-once
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   HUNTER_ACTIONS_CUTOVER: CONFIRMED
@@ -42,6 +42,38 @@ jobs:
           # Resume from the first open gate only; do not repeat completed work.
           python runner.py --mode probe --market US
           python runner.py --mode probe --market HK
+          python - <<'PY'
+          import json
+          from runner import Drive, compact, digest
+
+          drive = Drive()
+          raw = drive.read("HK/CURRENT_UNIVERSE.json")
+          doc = json.loads(raw)
+          bad = []
+          keep = []
+          for sec in doc["securities"]:
+              sid = sec.get("security_id", "")
+              try:
+                  n = int(sid.rsplit("-", 1)[1])
+              except Exception:
+                  n = -1
+              is_bad_phase1_expansion = (
+                  sec.get("security_id_origin") == "NEW_LISTING"
+                  and 2761 <= n <= 2820
+              )
+              if is_bad_phase1_expansion:
+                  bad.append(sec)
+              else:
+                  keep.append(sec)
+          if bad:
+              if len(bad) != 60:
+                  raise RuntimeError(f"HK_BAD_EXPANSION_GUARD expected=60 actual={len(bad)}")
+              doc["securities"] = keep
+              drive.put("HK/CURRENT_UNIVERSE.json", compact(doc), expected_sha=digest(raw))
+              print(f"HK rollback removed={len(bad)} bad parser additions", flush=True)
+          else:
+              print("HK rollback no-op; bad parser additions already absent", flush=True)
+          PY
           python runner.py --mode universe --market HK
 
   options-us:

@@ -87,7 +87,8 @@ def monthly(drive: Drive, market: str):
     path = f"{market}/OPTIONS_METADATA/{month}.json"
     if drive.file(path):
         return 0
-    securities = current_universe(drive, market)
+    securities = [s for s in current_universe(drive, market)
+                  if s.get("listing_status", "ACTIVE") == "ACTIVE"]
     preflight = source_preflight()
     if not preflight["available"]:
         checked = preflight["checked_at_myt"]

@@ -288,6 +288,16 @@ def fetch_security(security: dict, calendar: list[str], as_of: str,
                     for key in ("open", "high", "low", "close", "volume")}
             if any(vals[key] is None for key in vals):
                 continue
+            if market == "HK":
+                # Yahoo HK daily bars can combine auction open/close prices with
+                # continuous-session high/low fields. Canonicalize the full-day
+                # envelope so H/L contains every observed same-day price.
+                prices = [float(vals[k]) for k in ("open", "high", "low", "close")]
+                if vals["volume"] == 0 and float(vals["close"]) > 0 and any(x <= 0 for x in prices[:3]):
+                    vals["open"] = vals["high"] = vals["low"] = vals["close"]
+                elif min(prices) > 0:
+                    vals["high"] = max(prices)
+                    vals["low"] = min(prices)
             rows.append({"security_id": sid, "date": date, **vals, "adjustment_as_of": as_of})
         rows.sort(key=lambda r: r["date"])
         seen = {r["date"] for r in rows}

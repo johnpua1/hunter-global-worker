@@ -6,7 +6,7 @@ REGION=us-central1
 SA="hunter-scheduler@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 
 if ! gcloud iam service-accounts describe "$SA" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
-  gcloud iam service-accounts create hunter-scheduler --project "$GCP_PROJECT_ID"
+  echo 'Existing hunter-scheduler service account is required.' >&2; exit 1
 fi
 
 upsert_schedule() {
@@ -16,20 +16,13 @@ upsert_schedule() {
   gcloud run jobs add-iam-policy-binding "$job" --region "$REGION" --project "$GCP_PROJECT_ID" \
     --member="serviceAccount:${SA}" --role=roles/run.invoker >/dev/null
 
-  if gcloud scheduler jobs describe "$name" --location "$REGION" \
-      --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
-    gcloud scheduler jobs update http "$name" --location "$REGION" \
-      --project "$GCP_PROJECT_ID" --schedule "$cron" --time-zone "$timezone" \
-      --uri="$uri" --http-method=POST --oauth-service-account-email="$SA" \
-      --oauth-token-scope='https://www.googleapis.com/auth/cloud-platform' \
-      --max-retry-attempts=0
-  else
-    gcloud scheduler jobs create http "$name" --location "$REGION" \
-      --project "$GCP_PROJECT_ID" --schedule "$cron" --time-zone "$timezone" \
-      --uri="$uri" --http-method=POST --oauth-service-account-email="$SA" \
-      --oauth-token-scope='https://www.googleapis.com/auth/cloud-platform' \
-      --max-retry-attempts=0
-  fi
+  gcloud scheduler jobs describe "$name" --location "$REGION" \
+      --project "$GCP_PROJECT_ID" >/dev/null
+  gcloud scheduler jobs update http "$name" --location "$REGION" \
+    --project "$GCP_PROJECT_ID" --schedule "$cron" --time-zone "$timezone" \
+    --uri="$uri" --http-method=POST --oauth-service-account-email="$SA" \
+    --oauth-token-scope='https://www.googleapis.com/auth/cloud-platform' \
+    --max-retry-attempts=0
 }
 
 # Malaysia time (MYT, UTC+8).

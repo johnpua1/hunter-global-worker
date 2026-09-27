@@ -29,6 +29,17 @@ def current_universe(drive: Drive, market: str) -> list[dict]:
     return securities
 
 
+def initialize_control(drive: Drive, market: str):
+    """Create the control pointer once at the BASE close; never fabricate a weekend bar."""
+    state = load_market(drive, market)
+    path = f"{market}/CONTROL/DAILY_CHECKPOINT.json"
+    if not drive.file(path):
+        drive.put(path, compact({"market": market,
+                                 "last_completed_date": state.checkpoint["as_of"],
+                                 "updated_at_myt": now_myt()}), immutable=True)
+    return drive.json(path)
+
+
 def daily_segments(drive: Drive, market: str) -> list[str]:
     folders = drive.list(market)
     if not any(x["name"] == "DAILY" for x in folders):

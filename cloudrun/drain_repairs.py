@@ -74,23 +74,14 @@ def main() -> None:
     counts = open_counts(url, key)
     print(f"OPEN US={counts['US']} HK={counts['HK']}", flush=True)
     for market in ("US", "HK"):
-        # The Phase 1 worker accepts at most 150 open items per execution.
-        # Two extra rounds allow for a partially processed last execution.
-        max_runs = (counts[market] + 149) // 150 + 2
-        for _ in range(max_runs):
-            if counts[market] == 0:
-                break
+        while counts[market]:
             previous = counts[market]
             execute(market)
             counts = open_counts(url, key)
             print(f"OPEN US={counts['US']} HK={counts['HK']}", flush=True)
             if counts[market] >= previous:
-                raise RuntimeError(f"{market} queue made no progress; stopped safely")
-        if counts[market]:
-            raise RuntimeError(f"{market} queue still open after bounded executions")
+                raise RuntimeError(f"{market} queue made no progress; inspect source blocker")
     print("REPAIR_QUEUE_OPEN=0", flush=True)
-    execute_maintenance()
-    print("MAINTENANCE_EXECUTION=COMPLETE", flush=True)
 
 
 if __name__ == "__main__":

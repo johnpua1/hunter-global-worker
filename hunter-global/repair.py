@@ -186,7 +186,10 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
                 identity = digest(compact({"market": market, "security_id": sid,
                                            "category": item["category"], "batch": item.get("batch"),
                                            "trade_date": item.get("trade_date")}))[:24]
-                path = f"{market}/REPAIR_PATCH/{identity}.json"
+                # Shard repair sidecars so the Bridge's 1,000-entry folder
+                # listing ceiling can never block DERIVED once the historical
+                # backlog is drained. Existing flat sidecars remain readable.
+                path = f"{market}/REPAIR_PATCH/{identity[:2]}/{identity}.json"
                 if drive.file(path):
                     old = drive.json(path)
                     if not old.get("accepted") or old.get("result") != answer["result"]:

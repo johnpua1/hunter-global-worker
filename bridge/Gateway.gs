@@ -224,3 +224,203 @@ function bridgePut_(root, path, body, op) {
     lock.releaseLock();
   }
 }
+
+
+/** Cloud Run DAILY control plane. Installable triggers run as the script owner. */
+function hunterCloudConfig_() {
+  var props = PropertiesService.getScriptProperties();
+  return {
+    project: props.getProperty('GCP_PROJECT_ID') || 'rgs-hunter-global',
+    region: props.getProperty('GCP_REGION') || 'us-central1',
+    usJob: props.getProperty('HUNTER_US_JOB') || 'hunter-us-daily',
+    hkJob: props.getProperty('HUNTER_HK_JOB') || 'hunter-hk-daily'
+  };
+}
+
+function hunterCloudRequest_(method, resource, payload) {
+  var url = 'https://run.googleapis.com/v2/' + resource;
+  var options = {
+    method: String(method || 'get').toLowerCase(),
+    headers: {Authorization: 'Bearer ' + ScriptApp.getOAuthToken()},
+    muteHttpExceptions: true
+  };
+  if (payload != null) {
+    options.contentType = 'application/json';
+    options.payload = JSON.stringify(payload);
+  }
+  var last;
+  for (var attempt = 0; attempt < 3; attempt++) {
+    try {
+      var response = UrlFetchApp.fetch(url, options);
+      var code = response.getResponseCode();
+      var text = response.getContentText();
+      var body = text ? JSON.parse(text) : {};
+      if (code >= 200 && code < 300) return body;
+      last = new Error('CLOUD_RUN_HTTP_' + code + ':' + text.slice(0, 500));
+      if ([408, 429, 500, 502, 503, 504].indexOf(code) < 0) break;
+    } catch (err) {
+      last = err;
+    }
+    Utilities.sleep(Math.pow(2, attempt) * 1000);
+  }
+  throw last || new Error('CLOUD_RUN_REQUEST_FAILED');
+}
+
+function hunterJobName_(marketOrJob) {
+  var cfg = hunterCloudConfig_();
+  var value = String(marketOrJob || '').toUpperCase();
+  if (value === 'US') return cfg.usJob;
+  if (value === 'HK') return cfg.hkJob;
+  if (marketOrJob === cfg.usJob || marketOrJob === cfg.hkJob) return String(marketOrJob);
+  throw new Error('UNKNOWN_HUNTER_JOB:' + marketOrJob);
+}
+
+function hunterJobResource_(job) {
+  var cfg = hunterCloudConfig_();
+  return 'projects/' + encodeURIComponent(cfg.project) +
+      '/locations/' + encodeURIComponent(cfg.region) +
+      '/jobs/' + encodeURIComponent(hunterJobName_(job));
+}
+
+function hunterExecutionState_(execution) {
+  var conditions = execution.conditions || [];
+  var completed = null;
+  for (var i = 0; i < conditions.length; i++) {
+    if (conditions[i].type === 'Completed') { completed = conditions[i]; break; }
+  }
+  if (!execution.completionTime) return 'RUNNING';
+  if (completed && completed.state === 'CONDITION_SUCCEEDED') return 'SUCCEEDED';
+  if (completed && completed.state === 'CONDITION_FAILED') return 'FAILED';
+  if (execution.cancelledCount > 0) return 'CANCELLED';
+  return completed ? String(completed.state || 'COMPLETED') : 'COMPLETED';
+}
+
+function status(job) {
+  var name = hunterJobName_(job);
+  var resource = hunterJobResource_(name);
+  var response = hunterCloudRequest_('get', resource + '/executions?pageSize=3', null);
+  var executions = (response.executions || []).slice(0, 3).map(function (x) {
+    return {
+      name: x.name || null,
+      status: hunterExecutionState_(x),
+      createTime: x.createTime || null,
+      startTime: x.startTime || null,
+      endTime: x.completionTime || null,
+      succeededCount: x.succeededCount || 0,
+      failedCount: x.failedCount || 0,
+      cancelledCount: x.cancelledCount || 0
+    };
+  });
+  return {
+    job: name,
+    running: executions.some(function (x) { return x.status === 'RUNNING'; }),
+    executions: executions
+  };
+}
+
+function hunterJobConfig_(job) {
+  var name = hunterJobName_(job);
+  var doc = hunterCloudRequest_('get', hunterJobResource_(name), null);
+  var task = (((doc.template || {}).template || {}));
+  var containers = task.containers || [];
+  var container = containers.length ? containers[0] : {};
+  return {
+    job: name,
+    generation: doc.generation || null,
+    latestCreatedExecution: doc.latestCreatedExecution || null,
+    image: container.image || null,
+    command: container.command || [],
+    args: container.args || [],
+    envNames: (container.env || []).map(function (x) { return x.name; }),
+    updateTime: doc.updateTime || null
+  };
+}
+
+function inspectHunterJobs() {
+  return {US: hunterJobConfig_('US'), HK: hunterJobConfig_('HK')};
+}
+
+function runHunterJob_(job) {
+  var name = hunterJobName_(job);
+  var before = status(name);
+  if (before.running) {
+    console.log('SKIP_ALREADY_RUNNING job=' + name);
+    return {ok: true, job: name, skipped: true, reason: 'ALREADY_RUNNING', status: before};
+  }
+  var op = hunterCloudRequest_('post', hunterJobResource_(name) + ':run', {});
+  console.log('STARTED job=' + name + ' operation=' + String(op.name || 'UNKNOWN'));
+  return {ok: true, job: name, skipped: false, operation: op.name || null};
+}
+
+function runUS() { return runHunterJob_('US'); }
+function runHK() { return runHunterJob_('HK'); }
+
+function dailyUS() { return runUS(); }
+function dailyHK() { return runHK(); }
+
+function installHunterDailyTriggers() {
+  ScriptApp.requireScopes(ScriptApp.AuthMode.FULL, [
+    'https://www.googleapis.com/auth/cloud-platform',
+    'https://www.googleapis.com/auth/script.external_request',
+    'https://www.googleapis.com/auth/drive',
+    'https://www.googleapis.com/auth/script.scriptapp'
+  ]);
+  ScriptApp.getProjectTriggers().forEach(function (trigger) {
+    var handler = trigger.getHandlerFunction();
+    if (handler === 'dailyUS' || handler === 'dailyHK') ScriptApp.deleteTrigger(trigger);
+  });
+  ScriptApp.newTrigger('dailyUS').timeBased().atHour(6).everyDays(1)
+      .inTimezone('Asia/Kuala_Lumpur').create();
+  ScriptApp.newTrigger('dailyHK').timeBased().atHour(18).everyDays(1)
+      .inTimezone('Asia/Kuala_Lumpur').create();
+  return listHunterDailyTriggers();
+}
+
+function listHunterDailyTriggers() {
+  var rows = ScriptApp.getProjectTriggers().filter(function (trigger) {
+    var handler = trigger.getHandlerFunction();
+    return handler === 'dailyUS' || handler === 'dailyHK';
+  }).map(function (trigger) {
+    return {
+      handler: trigger.getHandlerFunction(),
+      triggerId: trigger.getUniqueId(),
+      eventType: String(trigger.getEventType()),
+      source: String(trigger.getTriggerSource())
+    };
+  });
+  var counts = {dailyUS: 0, dailyHK: 0};
+  rows.forEach(function (x) { counts[x.handler] = (counts[x.handler] || 0) + 1; });
+  return {timeZone: Session.getScriptTimeZone(), counts: counts, triggers: rows};
+}
+
+function waitHunterJob_(job, timeoutMs) {
+  var deadline = Date.now() + Math.min(Number(timeoutMs || 240000), 240000);
+  var last = status(job);
+  while (last.running && Date.now() < deadline) {
+    Utilities.sleep(5000);
+    last = status(job);
+  }
+  return last;
+}
+
+function verifyHunterDaily() {
+  var triggers = installHunterDailyTriggers();
+  var usRun = runUS();
+  var hkRun = runHK();
+  var us = waitHunterJob_('US', 240000);
+  var hk = waitHunterJob_('HK', 240000);
+  var finalTriggers = listHunterDailyTriggers();
+  var okTriggers = finalTriggers.timeZone === 'Asia/Kuala_Lumpur' &&
+      finalTriggers.counts.dailyUS === 1 && finalTriggers.counts.dailyHK === 1;
+  var okUS = us.executions.length > 0 && us.executions[0].status === 'SUCCEEDED';
+  var okHK = hk.executions.length > 0 && hk.executions[0].status === 'SUCCEEDED';
+  return {
+    ok: okTriggers && okUS && okHK,
+    initialTriggers: triggers,
+    runUS: usRun,
+    runHK: hkRun,
+    statusUS: us,
+    statusHK: hk,
+    triggers: finalTriggers
+  };
+}

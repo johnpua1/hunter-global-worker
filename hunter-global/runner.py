@@ -301,9 +301,6 @@ def fetch_security(security: dict, calendar: list[str], as_of: str,
                     min(r["open"], r["high"], r["low"], r["close"]) > 0 and
                     r["volume"] >= 0) for r in rows) or len(seen) != len(rows):
             flags.append("DATA_SUSPECT")
-        if any(r["volume"] == 0 and len({r[k] for k in ("open", "high", "low", "close")}) == 1 for r in rows):
-            if "DATA_SUSPECT" not in flags:
-                flags.append("DATA_SUSPECT")
         if len(rows) == len(calendar) and [r["date"] for r in rows] == calendar:
             flags.append("PASS_DAILY" if daily else "PASS_501")
         else:

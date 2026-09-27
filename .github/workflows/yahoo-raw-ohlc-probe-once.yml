@@ -1,0 +1,42 @@
+name: Hunter Yahoo raw OHLC probe once
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/yahoo-raw-ohlc-probe-once.yml
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install requests
+      - name: Print raw Yahoo bars
+        run: |
+          python - <<'PY'
+          import requests,datetime as dt,json
+          samples=[
+            ("0004.HK","2025-01-08"),("0004.HK","2025-12-09"),("0008.HK","2025-09-22"),
+            ("0010.HK","2024-11-13"),("0018.HK","2025-01-08"),("0013.HK","2026-06-04")]
+          s=requests.Session(); s.headers.update({"User-Agent":"Mozilla/5.0 Hunter/1.0","Accept":"application/json"})
+          for sym,day in samples:
+              d=dt.date.fromisoformat(day); p1=int(dt.datetime.combine(d-dt.timedelta(days=3),dt.time(),dt.timezone.utc).timestamp())
+              p2=int(dt.datetime.combine(d+dt.timedelta(days=3),dt.time(),dt.timezone.utc).timestamp())
+              url="https://query1.finance.yahoo.com/v8/finance/chart/"+sym
+              r=s.get(url,params={"period1":p1,"period2":p2,"interval":"1d","events":"splits"},timeout=20)
+              print("HTTP",sym,day,r.status_code,flush=True)
+              if not r.ok: print(r.text[:500],flush=True); continue
+              x=r.json()["chart"]["result"][0]; q=x["indicators"]["quote"][0]; off=int(x.get("meta",{}).get("gmtoffset") or 28800)
+              for i,ts in enumerate(x.get("timestamp",[])):
+                  dd=dt.datetime.fromtimestamp(ts+off,dt.timezone.utc).date().isoformat()
+                  if dd==day:
+                      print(json.dumps({"symbol":sym,"date":dd,"open":q["open"][i],"high":q["high"][i],
+                        "low":q["low"][i],"close":q["close"][i],"volume":q["volume"][i],
+                        "events":x.get("events"),"meta":{"currency":x.get("meta",{}).get("currency"),
+                        "exchangeTimezoneName":x.get("meta",{}).get("exchangeTimezoneName")}},ensure_ascii=False),flush=True)
+          PY

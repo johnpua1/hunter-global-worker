@@ -7,7 +7,19 @@ REGION=us-central1
 test "$GCP_PROJECT_ID" = rgs-hunter-global
 test "$(git branch --show-current)" = main
 test "$(git rev-parse HEAD)" = "$MERGED_MAIN_SHA"
-bash cloudrun/schedule.sh
+TRIGGER_AUTHORITY="${HUNTER_TRIGGER_AUTHORITY:-APPS_SCRIPT}"
+case "$TRIGGER_AUTHORITY" in
+  APPS_SCRIPT)
+    echo 'SCHEDULERS=SKIPPED_TRIGGER_AUTHORITY_APPS_SCRIPT'
+    ;;
+  CLOUD_SCHEDULER)
+    bash cloudrun/schedule.sh
+    ;;
+  *)
+    echo "Unknown HUNTER_TRIGGER_AUTHORITY: $TRIGGER_AUTHORITY" >&2
+    exit 2
+    ;;
+esac
 
 run_market() {
   local market="$1" mode="$2"; shift 2

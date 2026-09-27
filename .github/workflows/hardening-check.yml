@@ -1,0 +1,25 @@
+name: hardening-check
+
+on:
+  push:
+    branches:
+      - 'hardening/**'
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bridge authorization tests
+        run: node tests/test_bridge.js
+      - name: Shell syntax
+        run: bash -n cloudrun/deploy.sh cloudrun/schedule.sh cloudrun/phase1.sh cloudrun/iam-audit.sh
+      - name: Python syntax
+        run: python -m py_compile hunter-global/*.py

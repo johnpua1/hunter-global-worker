@@ -6,6 +6,26 @@ const zlib = require('node:zlib');
 const source = fs.readFileSync('bridge/Gateway.gs', 'utf8');
 const context = vm.createContext({});
 vm.runInContext(source, context);
+const scopedProps = {getProperty(name) {
+  return ({
+    BRIDGE_US_KEY: 'us-key',
+    BRIDGE_HK_KEY: 'hk-key',
+    BRIDGE_MAINT_KEY: 'maint-key',
+    BRIDGE_SHARED_KEY: 'legacy-key',
+  })[name] || null;
+}};
+assert.equal(context.bridgeAuthScope_(scopedProps, 'us-key'), 'US');
+assert.equal(context.bridgeAuthScope_(scopedProps, 'hk-key'), 'HK');
+assert.equal(context.bridgeAuthScope_(scopedProps, 'maint-key'), 'MAINT');
+assert.equal(context.bridgeAuthScope_(scopedProps, 'legacy-key'), 'LEGACY');
+assert.throws(() => context.bridgeAuthScope_(scopedProps, 'wrong-key'), /UNAUTHORIZED/);
+assert.doesNotThrow(() => context.bridgeScopeAuthorize_('US', 'read', 'US/CURRENT_UNIVERSE.json'));
+assert.throws(() => context.bridgeScopeAuthorize_('US', 'read', 'HK/CURRENT_UNIVERSE.json'), /SCOPE_PATH_DENIED/);
+assert.doesNotThrow(() => context.bridgeScopeAuthorize_('HK', 'read', 'HK/CURRENT_UNIVERSE.json'));
+assert.throws(() => context.bridgeScopeAuthorize_('HK', 'read', 'US/CURRENT_UNIVERSE.json'), /SCOPE_PATH_DENIED/);
+assert.doesNotThrow(() => context.bridgeScopeAuthorize_('MAINT', 'read', 'US/CURRENT_UNIVERSE.json'));
+assert.doesNotThrow(() => context.bridgeScopeAuthorize_('MAINT', 'read', 'HK/CURRENT_UNIVERSE.json'));
+assert.throws(() => context.bridgeScopeAuthorize_('US', 'append', '_BRIDGE_TEST/DAILY/US/x.ndjson.gz'), /SCOPE_PATH_DENIED/);
 assert.throws(() => context.bridgeWritePolicy_('US/BASE/batch-0001.ndjson.gz', 'put'), /BASE_SEALED/);
 assert.throws(() => context.bridgeWritePolicy_('HK/BASE/batch-0001.ndjson.gz', 'append'), /BASE_SEALED/);
 assert.throws(() => context.bridgeWritePolicy_('HK/DAILY/2026-09-27/part-0001.ndjson.gz', 'put'), /DAILY_APPEND_ONLY/);
@@ -70,4 +90,31 @@ assert.equal(remaining.next().getName(), 'part-0001.ndjson.gz');
 assert.equal(remaining.hasNext(), false);
 assert.throws(() => context.bridgeDailyKeys_(first, bytes(zlib.gzipSync(
   JSON.stringify(row) + '\n' + JSON.stringify(row) + '\n'))), /DAILY_DUPLICATE_KEY/);
-console.log('bridge sealed path and row dedup PASS');
+const jsonFields = value => {
+  const data = Buffer.from(JSON.stringify(value));
+  return {
+    sha256: crypto.createHash('sha256').update(data).digest('hex'),
+    data_base64: data.toString('base64'),
+    mime: 'application/json',
+  };
+};
+const queuePath = 'REPAIR_QUEUE.json';
+const q0 = {items: [
+  {market: 'US', security_id: 'US-000001', category: 'FETCH_FAILED'},
+  {market: 'HK', security_id: 'HK-000001', category: 'FETCH_FAILED'},
+]};
+context.bridgePut_(root, queuePath, jsonFields(q0), 'put', 'LEGACY');
+const qUsAllowed = {items: [
+  {market: 'US', security_id: 'US-000001', category: 'DATA_SUSPECT'},
+  {market: 'HK', security_id: 'HK-000001', category: 'FETCH_FAILED'},
+]};
+assert.doesNotThrow(() => context.bridgePut_(root, queuePath, jsonFields(qUsAllowed), 'put', 'US'));
+const qUsForbidden = {items: [
+  {market: 'US', security_id: 'US-000001', category: 'DATA_SUSPECT'},
+  {market: 'HK', security_id: 'HK-000001', category: 'IDENTITY_REVIEW'},
+]};
+assert.throws(
+  () => context.bridgePut_(root, queuePath, jsonFields(qUsForbidden), 'put', 'US'),
+  /SCOPE_FOREIGN_QUEUE_MUTATION/
+);
+console.log('bridge sealed path, scoped auth, queue isolation and row dedup PASS');

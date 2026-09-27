@@ -1,0 +1,21 @@
+name: Cancel obsolete BASE read probe once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/cancel-base-probe-once.yml
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Cancel obsolete probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh api --method POST "repos/$GH_REPO/actions/runs/36297062625/cancel"

@@ -66,22 +66,25 @@ def parse_hk(sources):
         raise RuntimeError("OFFICIAL_HK_TIMESTAMP_MISSING")
     headings = [str(x) if x else "" for x in next(rows)]
     idx = {key: headings.index(key) for key in
-           ("Stock Code", "Name of Securities", "Category", "Sub-Category", "ISIN")}
+           ("Stock Code", "Name of Securities", "Category", "Sub-Category", "ISIN",
+            "Trading Currency")}
     result = {}
     for row in rows:
-        # HKEX has changed the wording of Category/Sub-Category over time.
-        # Treat the official Category as the product-type authority and do not
-        # fail the whole universe merely because the board label wording moved.
         category = str(row[idx["Category"]] or "").strip()
-        sub_category = str(row[idx["Sub-Category"]] or "").strip()
-        if not category.lower().startswith("equit"):
+        sub_category = str(row[idx["Sub-Category"]] or "").strip().lower()
+        trading_currency = str(row[idx["Trading Currency"]] or "").strip().upper()
+        name = str(row[idx["Name of Securities"]] or "").strip()
+        # V3 authority: HK Main Board/GEM company shares in HKD. This excludes
+        # investment companies, RMB counters, USD preference shares and other
+        # non-common-equity rows even when HKEX labels them under Equity.
+        if category.lower() != "equity":
             continue
-        # Preserve a sanity guard without coupling to one exact HKEX label.
-        # If a board label is present, accept Main Board/GEM variants; blank or
-        # generic equity sub-categories remain valid official equity rows.
-        if sub_category and any(tag in sub_category.lower() for tag in ("board", "gem")):
-            if not any(tag in sub_category.lower() for tag in ("main", "gem")):
-                continue
+        if "main board" not in sub_category and "gem" not in sub_category:
+            continue
+        if trading_currency != "HKD":
+            continue
+        if "PREF" in name.upper():
+            continue
         code = str(row[idx["Stock Code"]]).zfill(5)
         result[code] = {"ticker": f"{int(code):04d}.HK", "exchange": "HKEX",
                         "name": row[idx["Name of Securities"]], "isin": row[idx["ISIN"]],

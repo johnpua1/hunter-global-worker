@@ -22,13 +22,25 @@ def calculate_anchors(rows, anchors):
 
 
 def read_files(drive: Drive, market: str, folder: str, suffix: str):
+    """Read direct files plus one shard level without exceeding Bridge list caps."""
+    base = f"{market}/{folder}"
     try:
-        files = drive.list(f"{market}/{folder}")
+        entries = drive.list(base)
     except RuntimeError as exc:
         if "FOLDER_NOT_FOUND" in str(exc):
             return []
         raise
-    return [f"{market}/{folder}/{x['name']}" for x in files if x["name"].endswith(suffix)]
+    paths = []
+    for entry in entries:
+        name = entry["name"]
+        if entry.get("mimeType") == "application/vnd.google-apps.folder":
+            shard = f"{base}/{name}"
+            for child in drive.list(shard):
+                if child["name"].endswith(suffix):
+                    paths.append(f"{shard}/{child['name']}")
+        elif name.endswith(suffix):
+            paths.append(f"{base}/{name}")
+    return paths
 
 
 def build(drive: Drive, market: str, date: str):

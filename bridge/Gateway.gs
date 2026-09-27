@@ -403,24 +403,94 @@ function waitHunterJob_(job, timeoutMs) {
   return last;
 }
 
-function verifyHunterDaily() {
+function hunterNextWindow_(handler) {
+  var now = new Date();
+  var tz = 'Asia/Kuala_Lumpur';
+  var y = Number(Utilities.formatDate(now, tz, 'yyyy'));
+  var m = Number(Utilities.formatDate(now, tz, 'MM')) - 1;
+  var d = Number(Utilities.formatDate(now, tz, 'dd'));
+  var hour = handler === 'dailyUS' ? 6 : 18;
+  var localNowMinutes = Number(Utilities.formatDate(now, tz, 'HH')) * 60 +
+      Number(Utilities.formatDate(now, tz, 'mm'));
+  var targetMinutes = hour * 60;
+  var base = new Date(Date.UTC(y, m, d, hour - 8, 0, 0));
+  if (localNowMinutes >= targetMinutes + 60) base = new Date(base.getTime() + 24 * 60 * 60 * 1000);
+  var dateText = Utilities.formatDate(base, tz, 'yyyy-MM-dd');
+  return dateText + ' ' + ('0' + hour).slice(-2) + ':00–' +
+      ('0' + (hour + 1)).slice(-2) + ':00 MYT';
+}
+
+function waitHunterJobsTogether_(timeoutMs) {
+  var deadline = Date.now() + Math.min(Number(timeoutMs || 300000), 300000);
+  var us = status('US');
+  var hk = status('HK');
+  while ((us.running || hk.running) && Date.now() < deadline) {
+    Utilities.sleep(5000);
+    us = status('US');
+    hk = status('HK');
+  }
+  return {US: us, HK: hk, timedOut: us.running || hk.running};
+}
+
+function hunterLatestOk_(state) {
+  if (!state || !state.executions || !state.executions.length) return false;
+  return state.executions[0].status === 'SUCCEEDED';
+}
+
+function installAndVerify() {
+  Logger.log('=== HUNTER DAILY 安装与验证开始 ===');
   var triggers = installHunterDailyTriggers();
+  Logger.log('已重建触发器：dailyUS=' + triggers.counts.dailyUS +
+             '，dailyHK=' + triggers.counts.dailyHK +
+             '，时区=' + triggers.timeZone);
+
   var usRun = runUS();
   var hkRun = runHK();
-  var us = waitHunterJob_('US', 240000);
-  var hk = waitHunterJob_('HK', 240000);
+  Logger.log('US触发：' + JSON.stringify(usRun));
+  Logger.log('HK触发：' + JSON.stringify(hkRun));
+
+  var states = waitHunterJobsTogether_(300000);
   var finalTriggers = listHunterDailyTriggers();
+
+  var okUS = hunterLatestOk_(states.US);
+  var okHK = hunterLatestOk_(states.HK);
   var okTriggers = finalTriggers.timeZone === 'Asia/Kuala_Lumpur' &&
-      finalTriggers.counts.dailyUS === 1 && finalTriggers.counts.dailyHK === 1;
-  var okUS = us.executions.length > 0 && us.executions[0].status === 'SUCCEEDED';
-  var okHK = hk.executions.length > 0 && hk.executions[0].status === 'SUCCEEDED';
+      finalTriggers.counts.dailyUS === 1 &&
+      finalTriggers.counts.dailyHK === 1;
+
+  Logger.log((okUS ? '✓' : '✗') + ' hunter-us-daily：' +
+             (states.US.executions.length ? states.US.executions[0].status : 'NO_EXECUTION'));
+  Logger.log((okHK ? '✓' : '✗') + ' hunter-hk-daily：' +
+             (states.HK.executions.length ? states.HK.executions[0].status : 'NO_EXECUTION'));
+  Logger.log((okTriggers ? '✓' : '✗') +
+             ' 触发器：dailyUS=' + finalTriggers.counts.dailyUS +
+             '，dailyHK=' + finalTriggers.counts.dailyHK);
+
+  // Apps Script does not expose the randomized exact minute chosen by atHour().
+  // Therefore report the truthful next execution window, not a fabricated minute.
+  Logger.log('dailyUS 下次执行窗口：' + hunterNextWindow_('dailyUS'));
+  Logger.log('dailyHK 下次执行窗口：' + hunterNextWindow_('dailyHK'));
+
+  if (states.timedOut) {
+    Logger.log('✗ 验证超时：Cloud Run Job 仍在运行；请稍后执行 status(\'US\') / status(\'HK\') 复核。');
+    throw new Error('VERIFY_TIMEOUT_JOB_STILL_RUNNING');
+  }
+  if (!okUS || !okHK || !okTriggers) {
+    throw new Error('HUNTER_DAILY_VERIFY_FAILED');
+  }
+
+  Logger.log('=== ✓ HUNTER DAILY 上线验证完成 ===');
   return {
-    ok: okTriggers && okUS && okHK,
-    initialTriggers: triggers,
-    runUS: usRun,
-    runHK: hkRun,
-    statusUS: us,
-    statusHK: hk,
-    triggers: finalTriggers
+    ok: true,
+    jobs: states,
+    triggers: finalTriggers,
+    nextWindows: {
+      dailyUS: hunterNextWindow_('dailyUS'),
+      dailyHK: hunterNextWindow_('dailyHK')
+    }
   };
+}
+
+function verifyHunterDaily() {
+  return installAndVerify();
 }

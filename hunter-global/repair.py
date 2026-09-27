@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import concurrent.futures
 import io
 import json
 import os
@@ -179,31 +180,53 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
                       if x.get("market") == market and x.get("status", "OPEN") == "OPEN"]
         if not candidates:
             break
-        updates = {}
-        for index, original in candidates[:chunk_size]:
-            if time.monotonic() >= deadline - 300:
-                break
+        batch_candidates = candidates[:chunk_size]
+        if state is None and any(x.get("security_id") in securities for _, x in batch_candidates):
+            state = load_market(drive, market)
+
+        # Preload immutable BASE batches serially before network concurrency so
+        # worker threads never share Drive transport calls.
+        for _, original in batch_candidates:
+            batch = original.get("batch")
+            if not isinstance(batch, int):
+                continue
+            key = (market, batch)
+            if key in base_cache:
+                continue
+            by_id = defaultdict(list)
+            for row in parse_lines_gz(drive.read(f"{market}/BASE/batch-{batch:04d}.ndjson.gz")):
+                by_id[row["security_id"]].append(row)
+            base_cache[key] = by_id
+
+        def evaluate(pair):
+            index, original = pair
             item = dict(original)
             sid = item.get("security_id")
             if sid not in securities:
-                answer = {"result": "UNRESOLVED", "reason": "SECURITY_ID_MISSING_OR_EXECUTION_EVENT",
+                answer = {"result": "UNRESOLVED",
+                          "reason": "SECURITY_ID_MISSING_OR_EXECUTION_EVENT",
                           "verified_at_myt": now_myt(), "accepted": False}
             else:
-                # BASE identity is immutable; read it once for this invocation.
-                if state is None:
-                    state = load_market(drive, market)
                 answer = decide(drive, item, securities[sid], state, base_cache=base_cache)
+            return index, item, sid, answer
+
+        workers = max(1, int(os.getenv("REPAIR_WORKERS", os.getenv("FETCH_WORKERS", "6"))))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            evaluated = list(pool.map(evaluate, batch_candidates))
+
+        updates = {}
+        for index, item, sid, answer in evaluated:
             if answer["accepted"]:
                 identity = digest(compact({"market": market, "security_id": sid,
                                            "category": item["category"], "batch": item.get("batch"),
                                            "trade_date": item.get("trade_date")}))[:24]
                 # Shard repair sidecars so the Bridge's 1,000-entry folder
                 # listing ceiling can never block DERIVED once the historical
-                # backlog is drained. Existing flat sidecars remain readable.
+                # backlog is drained. Existing flat/bulk sidecars remain readable.
                 path = f"{market}/REPAIR_PATCH/{identity[:2]}/{identity}.json"
                 if drive.file(path):
-                    old = drive.json(path)
-                    if not old.get("accepted") or old.get("result") != answer["result"]:
+                    previous = drive.json(path)
+                    if not previous.get("accepted") or previous.get("result") != answer["result"]:
                         raise RuntimeError("PATCH_IDENTITY_CONFLICT:" + path)
                 else:
                     drive.append(path, compact(answer))

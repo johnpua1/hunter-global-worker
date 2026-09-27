@@ -1,0 +1,92 @@
+name: Hunter data quality quantify once
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/data-quality-quantify-once.yml
+permissions:
+  contents: read
+env:
+  HUNTER_ACTIONS_CUTOVER: CONFIRMED
+  HUNTER_BRIDGE_ATTEMPTS: '8'
+  HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '90'
+  HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS: '120'
+jobs:
+  quantify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Quantify unresolved bar defects
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import json, math
+          from collections import Counter, defaultdict
+          from runner import Drive, parse_lines_gz
+
+          drive=Drive()
+          queue=drive.json("REPAIR_QUEUE.json")["items"]
+          for market in ("US","HK"):
+              items=[x for x in queue if x.get("market")==market and x.get("status")=="UNRESOLVED"
+                     and x.get("category") in ("DATA_SUSPECT","FETCH_FAILED")]
+              bybatch=defaultdict(list)
+              for x in items:
+                  if isinstance(x.get("batch"),int):
+                      bybatch[x["batch"]].append(x)
+              stats=Counter(); rel=[]; recent20=recent60=0; affected=set()
+              examples=[]
+              calendar=[r["date"] for r in parse_lines_gz(drive.read(f"{market}/CALENDAR_BASE.ndjson.gz"))]
+              for batch, qs in sorted(bybatch.items()):
+                  rows=parse_lines_gz(drive.read(f"{market}/BASE/batch-{batch:04d}.ndjson.gz"))
+                  byid=defaultdict(list)
+                  for r in rows: byid[r["security_id"]].append(r)
+                  for q in qs:
+                      sid=q["security_id"]; rs=sorted(byid.get(sid,[]),key=lambda r:r["date"])
+                      invalid=[]; flat=[]
+                      for r in rs:
+                          prices=[float(r[k]) for k in ("open","high","low","close")]
+                          structural=not (r["high"]>=max(r["open"],r["close"],r["low"]) and
+                                          r["low"]<=min(r["open"],r["close"]) and min(prices)>0 and r["volume"]>=0)
+                          zflat=(r["volume"]==0 and len({r[k] for k in ("open","high","low","close")})==1)
+                          if structural: invalid.append(r)
+                          elif zflat: flat.append(r)
+                      present={r["date"] for r in rs}
+                      missing=[]
+                      if rs:
+                          first,last=rs[0]["date"],rs[-1]["date"]
+                          missing=[d for d in calendar if first<d<last and d not in present]
+                      if invalid:
+                          stats["securities_structural"]+=1; stats["structural_rows"]+=len(invalid); affected.add(sid)
+                          for r in invalid:
+                              hi=max(r["open"],r["high"],r["low"],r["close"])
+                              lo=min(r["open"],r["high"],r["low"],r["close"])
+                              denom=max(abs(float(r["close"])),1e-9)
+                              corr=max(abs(hi-float(r["high"])),abs(float(r["low"])-lo))/denom
+                              rel.append(corr)
+                              if r["date"] in calendar[-20:]: recent20+=1
+                              if r["date"] in calendar[-60:]: recent60+=1
+                              if len(examples)<12: examples.append((sid,r["date"],r["open"],r["high"],r["low"],r["close"],r["volume"],corr))
+                      if flat:
+                          stats["securities_flat_zero"]+=1; stats["flat_zero_rows"]+=len(flat)
+                      if missing:
+                          stats["securities_missing_internal"]+=1; stats["missing_internal_days"]+=len(missing)
+                      if not invalid and not flat and not missing:
+                          stats["not_reproduced"]+=1
+              rel.sort()
+              def q(p):
+                  if not rel:return None
+                  return rel[min(len(rel)-1,int((len(rel)-1)*p))]
+              print(json.dumps({"market":market,"unresolved_items":len(items),"stats":dict(stats),
+                "structural_affected":len(affected),"recent20_structural_rows":recent20,
+                "recent60_structural_rows":recent60,
+                "correction_relative":{"p50":q(.5),"p90":q(.9),"p99":q(.99),"max":q(1)},
+                "examples":examples},ensure_ascii=False),flush=True)
+          PY

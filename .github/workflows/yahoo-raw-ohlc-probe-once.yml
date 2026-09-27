@@ -21,8 +21,8 @@ jobs:
           python - <<'PY'
           import requests,datetime as dt,json
           samples=[
-            ("0004.HK","2025-01-08"),("0004.HK","2025-12-09"),("0008.HK","2025-09-22"),
-            ("0010.HK","2024-11-13"),("0018.HK","2025-01-08"),("0013.HK","2026-06-04")]
+            ("0533.HK","2025-07-03"),("0533.HK","2025-07-04"),("0607.HK","2025-04-02"),
+            ("2696.HK","2025-02-11"),("2696.HK","2025-02-12"),("2696.HK","2025-02-13")]
           s=requests.Session(); s.headers.update({"User-Agent":"Mozilla/5.0 Hunter/1.0","Accept":"application/json"})
           for sym,day in samples:
               d=dt.date.fromisoformat(day); p1=int(dt.datetime.combine(d-dt.timedelta(days=3),dt.time(),dt.timezone.utc).timestamp())

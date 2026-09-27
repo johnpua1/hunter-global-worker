@@ -9,6 +9,7 @@ import json
 import os
 from collections import defaultdict
 import time
+import threading
 from urllib.parse import quote
 
 import requests
@@ -26,7 +27,7 @@ def second_source_close(ticker: str, market: str) -> dict[str, float]:
             if r.get("Date") and r.get("Close") not in (None, "N/D")}
 
 
-def decide(drive: Drive, item: dict, security: dict, state=None, base_cache=None) -> dict:
+def decide(drive: Drive, item: dict, security: dict, state=None, base_cache=None, base_cache_lock=None) -> dict:
     market, sid = item["market"], item["security_id"]
     evidence = {"ticker": security["ticker"], "exchange": security.get("exchange"),
                 "listing_status": security.get("listing_status"),
@@ -82,11 +83,17 @@ def decide(drive: Drive, item: dict, security: dict, state=None, base_cache=None
     if isinstance(batch, int):
         if base_cache is not None:
             key = (market, batch)
-            if key not in base_cache:
-                by_id = defaultdict(list)
-                for row in parse_lines_gz(drive.read(f"{market}/BASE/batch-{batch:04d}.ndjson.gz")):
-                    by_id[row["security_id"]].append(row)
-                base_cache[key] = by_id
+            def load_once():
+                if key not in base_cache:
+                    by_id = defaultdict(list)
+                    for row in parse_lines_gz(drive.read(f"{market}/BASE/batch-{batch:04d}.ndjson.gz")):
+                        by_id[row["security_id"]].append(row)
+                    base_cache[key] = by_id
+            if base_cache_lock is not None:
+                with base_cache_lock:
+                    load_once()
+            else:
+                load_once()
             original = base_cache[key].get(sid, [])
         else:
             original = [r for r in parse_lines_gz(
@@ -173,6 +180,7 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
     processed = accepted_count = 0
     state = None
     base_cache = {}
+    base_cache_lock = threading.Lock()
     while time.monotonic() < deadline - 300:
         raw = drive.read("REPAIR_QUEUE.json")
         doc = json.loads(raw)
@@ -184,20 +192,6 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
         if state is None and any(x.get("security_id") in securities for _, x in batch_candidates):
             state = load_market(drive, market)
 
-        # Preload immutable BASE batches serially before network concurrency so
-        # worker threads never share Drive transport calls.
-        for _, original in batch_candidates:
-            batch = original.get("batch")
-            if not isinstance(batch, int) or batch < 1:
-                continue
-            key = (market, batch)
-            if key in base_cache:
-                continue
-            by_id = defaultdict(list)
-            for row in parse_lines_gz(drive.read(f"{market}/BASE/batch-{batch:04d}.ndjson.gz")):
-                by_id[row["security_id"]].append(row)
-            base_cache[key] = by_id
-
         def evaluate(pair):
             index, original = pair
             item = dict(original)
@@ -207,7 +201,7 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
                           "reason": "SECURITY_ID_MISSING_OR_EXECUTION_EVENT",
                           "verified_at_myt": now_myt(), "accepted": False}
             else:
-                answer = decide(drive, item, securities[sid], state, base_cache=base_cache)
+                answer = decide(drive, item, securities[sid], state, base_cache=base_cache, base_cache_lock=base_cache_lock)
             return index, item, sid, answer
 
         workers = max(1, int(os.getenv("REPAIR_WORKERS", os.getenv("FETCH_WORKERS", "6"))))

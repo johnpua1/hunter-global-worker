@@ -1,0 +1,167 @@
+name: Hunter Phase 1 direct sharded resume
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/phase1-direct-sharded.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hunter-phase1-finalize-once
+  cancel-in-progress: true
+
+env:
+  HUNTER_ACTIONS_CUTOVER: CONFIRMED
+  FETCH_WORKERS: '6'
+  REPAIR_WORKERS: '8'
+  HUNTER_HTTP_TIMEOUT_SECONDS: '15'
+  HUNTER_HTTP_RETRY_ATTEMPTS: '2'
+  PHASE1_AS_OF: '2026-09-25'
+
+jobs:
+  repair-us:
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [0,1,2,3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Direct sharded US repair
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+          SHARD_INDEX: ${{ matrix.shard }}
+        run: |
+          python - <<'PY'
+          import os, time
+          from runner import Drive
+          from repair import run_repair
+
+          market="US"
+          shard=int(os.environ["SHARD_INDEX"])
+          drive=Drive()
+          hard=time.monotonic()+17400
+          while True:
+              result=run_repair(
+                  drive, market,
+                  deadline=min(hard,time.monotonic()+3300),
+                  chunk_size=8,
+                  shard_index=shard,
+                  shard_count=4)
+              print(result,flush=True)
+              if result["open"]==0:
+                  break
+              if result["processed"]==0:
+                  raise RuntimeError(f"US_SHARD_{shard}_NO_PROGRESS_OPEN_{result['open']}")
+              if time.monotonic()>=hard-600:
+                  raise RuntimeError(f"US_SHARD_{shard}_TIMEOUT_OPEN_{result['open']}")
+          PY
+
+  repair-hk:
+    needs: repair-us
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [0,1,2,3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Direct sharded HK repair
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+          SHARD_INDEX: ${{ matrix.shard }}
+        run: |
+          python - <<'PY'
+          import os, time
+          from runner import Drive
+          from repair import run_repair
+
+          market="HK"
+          shard=int(os.environ["SHARD_INDEX"])
+          drive=Drive()
+          hard=time.monotonic()+17400
+          while True:
+              result=run_repair(
+                  drive, market,
+                  deadline=min(hard,time.monotonic()+3300),
+                  chunk_size=8,
+                  shard_index=shard,
+                  shard_count=4)
+              print(result,flush=True)
+              if result["open"]==0:
+                  break
+              if result["processed"]==0:
+                  raise RuntimeError(f"HK_SHARD_{shard}_NO_PROGRESS_OPEN_{result['open']}")
+              if time.monotonic()>=hard-600:
+                  raise RuntimeError(f"HK_SHARD_{shard}_TIMEOUT_OPEN_{result['open']}")
+          PY
+
+  finalize:
+    needs: repair-hk
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Build Phase 1 derived
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python runner.py --mode analytics --market US --as-of "$PHASE1_AS_OF"
+          python runner.py --mode analytics --market HK --as-of "$PHASE1_AS_OF"
+      - name: Write Phase 1 final receipts
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import os
+          from collections import Counter
+          from runner import Drive, compact, now_myt
+
+          drive=Drive()
+          queue=drive.json("REPAIR_QUEUE.json")["items"]
+          open_count=sum(x.get("status","OPEN")=="OPEN" for x in queue)
+          if open_count:
+              raise RuntimeError(f"REPAIR_OPEN={open_count}")
+          counts=Counter(x.get("status","OPEN") for x in queue)
+          receipt={
+              "phase":"PHASE1","status":"COMPLETE","as_of":"2026-09-25",
+              "execution_channel":"GITHUB_ACTIONS_DIRECT_SHARDED",
+              "execution_sha":os.environ.get("GITHUB_SHA"),
+              "repair_total":len(queue),"repair_open":0,
+              "repair_counts":dict(counts),
+              "base_rebuilt":False,"verified_rerun":False,
+              "phase2_started":False,"completed_at_myt":now_myt()
+          }
+          for market in ("US","HK"):
+              drive.put(f"{market}/CONTROL/PHASE1_FINAL.json",
+                        compact({**receipt,"market":market}))
+          print(receipt,flush=True)
+          PY

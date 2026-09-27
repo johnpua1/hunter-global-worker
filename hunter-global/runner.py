@@ -93,11 +93,19 @@ class Drive:
 
     def _call(self, op: str, **fields) -> dict:
         request = {"op": op, "key": self.key, **fields}
-        for attempt in range(5):
+        attempts = 8
+        for attempt in range(attempts):
             try:
                 response = self.http.post(self.url, json=request, timeout=120)
                 response.raise_for_status()
                 result = response.json()
+                # Apps Script can rarely return the doGet health payload to a
+                # POST route during a transient redirect/session anomaly. Never
+                # accept it as operation data; reset the HTTP session and retry.
+                if result == {"ok": True, "service": "HUNTER_GLOBAL_BRIDGE"}:
+                    self.http.close()
+                    self.http = requests.Session()
+                    raise ValueError("BRIDGE_POST_RETURNED_HEALTH:" + op)
                 if not result.get("ok"):
                     raise RuntimeError("BRIDGE_" + str(result.get("error", "UNKNOWN")))
                 required = {"read": ("data_base64", "sha256"), "put": ("file", "sha256"),
@@ -107,9 +115,9 @@ class Drive:
                     raise ValueError("BRIDGE_RESPONSE_SHAPE:" + op + ":" + ",".join(sorted(result)))
                 return result
             except (requests.RequestException, ValueError):
-                if attempt == 4:
+                if attempt == attempts - 1:
                     raise
-                time.sleep(min(30, 2 ** attempt + random.random()))
+                time.sleep(min(30, 2 ** min(attempt, 4) + random.random()))
         raise AssertionError("unreachable")
 
     def list(self, parent_id: str, name: str | None = None) -> list[dict]:

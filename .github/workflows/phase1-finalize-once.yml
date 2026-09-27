@@ -1,5 +1,5 @@
 name: Hunter Phase 1 one-time finalize
-# retry-after-hkex-parser-fix: 2026-09-27
+# retry-after-hkex-dimension-fix: 2026-09-27
 
 on:
   push:
@@ -38,11 +38,10 @@ jobs:
           APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
           APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
         run: |
+          # US/HK bootstrap and US universe already passed in prior Phase 1 attempts.
+          # Resume from the first open gate only; do not repeat completed work.
           python runner.py --mode probe --market US
           python runner.py --mode probe --market HK
-          python runner.py --mode bootstrap --market US --as-of "$PHASE1_AS_OF"
-          python runner.py --mode bootstrap --market HK --as-of "$PHASE1_AS_OF"
-          python runner.py --mode universe --market US
           python runner.py --mode universe --market HK
 
   options-us:

@@ -10,6 +10,9 @@ on:
 permissions:
   contents: read
 
+env:
+  HUNTER_ACTIONS_CUTOVER: CONFIRMED
+
 concurrency:
   group: hunter-phase1-hk-universe-evidence-repair
   cancel-in-progress: true

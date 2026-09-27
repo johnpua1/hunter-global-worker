@@ -702,6 +702,11 @@ def main():
         result = run_foundation_daily(drive, market, workers)
         LOG.info("daily market=%s sessions=%d written=%d", market, len(result),
                  sum(item.get("written", 0) for item in result))
+        if all(item.get("status") == "COMPLETE" for item in result):
+            from phase2_runtime import daily as run_phase2_daily
+            LOG.info("phase2 daily market=%s result=%s", market, run_phase2_daily(drive, market))
+        else:
+            LOG.warning("phase2 daily deferred until foundation completes market=%s", market)
 
 
 if __name__ == "__main__":

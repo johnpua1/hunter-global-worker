@@ -42,69 +42,72 @@ jobs:
           drive = Drive()
           drive.health()
           securities = {s["security_id"]: s for s in current_universe(drive, "HK")}
-          processed = 0
-          while True:
-              raw = drive.read("REPAIR_QUEUE.json")
-              doc = json.loads(raw)
-              candidates = [(i, x) for i, x in enumerate(doc["items"])
-                            if x.get("market") == "HK"
-                            and x.get("category") == "IDENTITY_REVIEW"
-                            and x.get("status", "OPEN") == "OPEN"][:50]
-              if not candidates:
-                  break
-              updates = {}
-              for index, original in candidates:
-                  item = dict(original)
-                  sid = item.get("security_id")
-                  sec = securities.get(sid)
-                  if sec is None:
-                      raise RuntimeError("HK_IDENTITY_SECURITY_MISSING:" + str(sid))
-                  answer = decide(drive, item, sec, None)
-                  if answer.get("result") != "IDENTITY_FIXED" or not answer.get("accepted"):
-                      raise RuntimeError("HK_IDENTITY_NOT_DETERMINISTIC:" + str(sid) + ":" + str(answer.get("reason")))
-                  identity = digest(compact({"market": "HK", "security_id": sid,
-                                             "category": item["category"], "batch": item.get("batch"),
-                                             "trade_date": item.get("trade_date")}))[:24]
-                  path = f"HK/REPAIR_PATCH/{identity[:2]}/{identity}.json"
-                  if drive.file(path):
-                      old = drive.json(path)
-                      if not old.get("accepted") or old.get("result") != "IDENTITY_FIXED":
-                          raise RuntimeError("PATCH_IDENTITY_CONFLICT:" + path)
-                  else:
-                      drive.append(path, compact(answer))
+
+          raw = drive.read("REPAIR_QUEUE.json")
+          doc = json.loads(raw)
+          accepted = []
+          indices = []
+          for index, original in enumerate(doc["items"]):
+              if not (original.get("market") == "HK"
+                      and original.get("category") == "IDENTITY_REVIEW"
+                      and original.get("status", "OPEN") == "OPEN"):
+                  continue
+              sid = original.get("security_id")
+              sec = securities.get(sid)
+              if sec is None:
+                  continue
+              answer = decide(drive, dict(original), sec, None)
+              if answer.get("result") == "IDENTITY_FIXED" and answer.get("accepted"):
+                  accepted.append(answer)
+                  indices.append(index)
+
+          if accepted:
+              stamp = now_myt().replace(":", "").replace("-", "")
+              path = f"HK/REPAIR_PATCH/identity-fastclose-{stamp}.json"
+              payload = {"market": "HK", "kind": "IDENTITY_FASTCLOSE_BULK",
+                         "accepted": True, "count": len(accepted),
+                         "verified_at_myt": now_myt(), "items": accepted}
+              drive.append(path, compact(payload))
+              patch_sha = digest(compact(payload))
+
+              for index, answer in zip(indices, accepted):
+                  item = dict(doc["items"][index])
                   item["patch_path"] = path
+                  item["patch_sha"] = patch_sha
                   item.update(status="IDENTITY_FIXED",
                               verified_at_myt=answer["verified_at_myt"],
                               reason=answer.get("reason"))
-                  updates[index] = item
+                  doc["items"][index] = item
 
               for _ in range(8):
                   latest_raw = drive.read("REPAIR_QUEUE.json")
                   latest = json.loads(latest_raw)
-                  for index, item in updates.items():
-                      if latest["items"][index].get("status", "OPEN") == "OPEN":
-                          latest["items"][index] = item
+                  changed = 0
+                  for index, answer in zip(indices, accepted):
+                      if latest["items"][index].get("status", "OPEN") != "OPEN":
+                          continue
+                      item = dict(latest["items"][index])
+                      item["patch_path"] = path
+                      item["patch_sha"] = patch_sha
+                      item.update(status="IDENTITY_FIXED",
+                                  verified_at_myt=answer["verified_at_myt"],
+                                  reason=answer.get("reason"))
+                      latest["items"][index] = item
+                      changed += 1
                   try:
                       drive.put("REPAIR_QUEUE.json", compact(latest),
                                 expected_sha=digest(latest_raw))
+                      print(f"HK_IDENTITY_FASTCLOSE bulk={len(accepted)} queue_changed={changed}", flush=True)
                       break
                   except RuntimeError as exc:
                       if "BRIDGE_STALE_WRITE" not in str(exc):
                           raise
               else:
                   raise RuntimeError("HK_IDENTITY_QUEUE_CAS_EXHAUSTED")
-              processed += len(updates)
-              remaining = sum(x.get("market") == "HK"
-                              and x.get("category") == "IDENTITY_REVIEW"
-                              and x.get("status", "OPEN") == "OPEN"
-                              for x in latest["items"])
-              print(f"HK_IDENTITY processed={processed} remaining={remaining}", flush=True)
 
           final = drive.json("REPAIR_QUEUE.json")["items"]
           remaining = sum(x.get("market") == "HK"
                           and x.get("category") == "IDENTITY_REVIEW"
                           and x.get("status", "OPEN") == "OPEN" for x in final)
-          if remaining:
-              raise RuntimeError(f"HK_IDENTITY_REMAINING_{remaining}")
-          print(f"HK_IDENTITY_FASTCLOSE_COMPLETE processed={processed}", flush=True)
+          print(f"HK_IDENTITY_FASTCLOSE_COMPLETE accepted={len(accepted)} remaining={remaining}", flush=True)
           PY

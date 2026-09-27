@@ -309,8 +309,13 @@ def update_history(market,old_calendar,new_calendar,history,today,refresh_eps=Tr
                 if raw:
                     actual=numeric(raw.get('eps'))
                     if actual is not None:
-                        event.update(eps_actual=actual,eps_surprise_pct=numeric(raw.get('surprise')),eps_status='AVAILABLE')
-                event['eps_refresh_attempted_at']=now;event['eps_refresh_pending']=False
+                        event.update(eps_actual=actual,eps_surprise_pct=numeric(raw.get('surprise')),
+                                     eps_status='AVAILABLE',eps_refresh_pending=False)
+                    else:
+                        event['eps_refresh_pending']=True
+                else:
+                    event['eps_refresh_pending']=True
+                event['eps_refresh_attempted_at']=now
     events.sort(key=lambda row:(row['report_date'],row['security_id']))
     assert len(byid)==len(events)
     return history

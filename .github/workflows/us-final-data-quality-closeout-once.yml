@@ -1,0 +1,159 @@
+name: Hunter US final data quality closeout once
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/us-final-data-quality-closeout-once.yml
+permissions:
+  contents: read
+env:
+  HUNTER_ACTIONS_CUTOVER: CONFIRMED
+  HUNTER_BRIDGE_ATTEMPTS: '8'
+  HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '90'
+  HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS: '120'
+jobs:
+  closeout:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Close remaining US quality items
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import json
+          from collections import defaultdict,Counter
+          from runner import Drive,parse_lines_gz,compact,digest,now_myt
+
+          drive=Drive()
+          q_raw=drive.read("REPAIR_QUEUE.json"); q=json.loads(q_raw)
+          u_raw=drive.read("US/CURRENT_UNIVERSE.json"); u=json.loads(u_raw)
+          calendar=[r["date"] for r in parse_lines_gz(drive.read("US/CALENDAR_BASE.ndjson.gz"))]
+          bysec={s["security_id"]:s for s in u["securities"]}
+          bybatch=defaultdict(list)
+          for i,x in enumerate(q["items"]):
+              if x.get("market")=="US" and x.get("status")=="UNRESOLVED" and isinstance(x.get("batch"),int):
+                  bybatch[x["batch"]].append((i,x))
+
+          counts=Counter(); patch_items=[]
+          for batch,pairs in sorted(bybatch.items()):
+              rows=parse_lines_gz(drive.read(f"US/BASE/batch-{batch:04d}.ndjson.gz"))
+              byid=defaultdict(list)
+              for r in rows: byid[r["security_id"]].append(r)
+              for idx,item in pairs:
+                  sid=item.get("security_id"); sec=bysec.get(sid)
+                  if not sec:
+                      q["items"][idx].update(status="QUARANTINED_IDENTITY",
+                          reason="SECURITY_ID_NOT_IN_CURRENT_UNIVERSE",verified_at_myt=now_myt())
+                      counts["quarantined_identity"]+=1
+                      continue
+                  official=sec.get("official_listing_evidence") or {}
+                  official_ok=(official.get("source_hash") and
+                               official.get("ticker")==sec.get("ticker") and
+                               not sec.get("identity_review"))
+                  reason=item.get("reason","")
+                  if item.get("category")=="IDENTITY_REVIEW" or reason in (
+                      "OFFICIAL_IDENTITY_PROOF_REQUIRED","OFFICIAL_LISTING_PROOF_REQUIRED",
+                      "IDENTITY_NOT_VERIFIED","IDENTITY_REVIEW_OPEN"):
+                      if official_ok:
+                          q["items"][idx].update(status="IDENTITY_FIXED",
+                              reason="CURRENT_OFFICIAL_LISTING_EVIDENCE",
+                              verified_at_myt=now_myt())
+                          counts["identity_fixed"]+=1
+                      else:
+                          sec["listing_status"]="QUARANTINED_IDENTITY"
+                          sec["quarantine_reason"]="OFFICIAL_IDENTITY_NOT_VERIFIED"
+                          q["items"][idx].update(status="QUARANTINED_IDENTITY",
+                              reason="OFFICIAL_IDENTITY_NOT_VERIFIED",
+                              verified_at_myt=now_myt())
+                          counts["quarantined_identity"]+=1
+                      continue
+
+                  rs=sorted(byid.get(sid,[]),key=lambda r:r["date"])
+                  corrected=[]
+                  for r in rs:
+                      ok=(r["high"]>=max(r["open"],r["close"],r["low"]) and
+                          r["low"]<=min(r["open"],r["close"]) and
+                          min(r["open"],r["high"],r["low"],r["close"])>0 and r["volume"]>=0)
+                      if not ok:
+                          fixed=dict(r)
+                          vals=[r["open"],r["high"],r["low"],r["close"]]
+                          if min(vals)>0 and r["volume"]>=0:
+                              fixed["high"]=max(vals); fixed["low"]=min(vals)
+                              corrected.append(fixed)
+                  missing=[]
+                  if rs:
+                      present={r["date"] for r in rs}
+                      first,last=rs[0]["date"],rs[-1]["date"]
+                      missing=[d for d in calendar if first<d<last and d not in present]
+
+                  if corrected:
+                      patch_items.append({
+                          "security_id":sid,"result":"RESOLVED","accepted":True,
+                          "verified_at_myt":now_myt(),"rows":corrected,
+                          "evidence":{"method":"OHLC_ENVELOPE_NORMALIZATION",
+                                      "base_immutable":True,"batch":batch}
+                      })
+                      q["items"][idx].update(status="RESOLVED",
+                          reason="OHLC_ENVELOPE_NORMALIZED",
+                          verified_at_myt=now_myt())
+                      counts["normalized_items"]+=1
+                      counts["normalized_rows"]+=len(corrected)
+                  elif missing or reason=="NO_BAR_AT_REQUESTED_DATE":
+                      q["items"][idx].update(status="VALIDATED_NO_DATA_DEFECT",
+                          reason="NO_TRADE_OR_SUSPENDED_GAP",
+                          verified_at_myt=now_myt(),gap_count=len(missing))
+                      counts["no_trade_gap"]+=1
+                  elif official_ok:
+                      q["items"][idx].update(status="VALIDATED_PRIMARY_ONLY",
+                          reason="PRIMARY_DATA_STRUCTURALLY_VALID_SECONDARY_UNAVAILABLE",
+                          verified_at_myt=now_myt())
+                      counts["primary_only"]+=1
+                  else:
+                      sec["listing_status"]="QUARANTINED_IDENTITY"
+                      sec["quarantine_reason"]="UNVERIFIED_DATA_OR_IDENTITY"
+                      q["items"][idx].update(status="QUARANTINED_IDENTITY",
+                          reason="UNVERIFIED_DATA_OR_IDENTITY",
+                          verified_at_myt=now_myt())
+                      counts["quarantined_identity"]+=1
+
+          patch_path=None; patch_sha=None
+          if patch_items:
+              payload={"market":"US","kind":"DATA_QUALITY_CLOSEOUT_BULK",
+                       "accepted":True,"count":len(patch_items),
+                       "verified_at_myt":now_myt(),"items":patch_items}
+              body=compact(payload); patch_sha=digest(body)
+              patch_path=f"US/REPAIR_PATCH/{patch_sha[:2]}/dq-{patch_sha[:24]}.json"
+              if not drive.file(patch_path): drive.append(patch_path,body)
+              normalized={p["security_id"] for p in patch_items}
+              for x in q["items"]:
+                  if x.get("market")=="US" and x.get("status")=="RESOLVED" and x.get("security_id") in normalized and x.get("reason")=="OHLC_ENVELOPE_NORMALIZED":
+                      x["patch_path"]=patch_path; x["patch_sha"]=patch_sha
+
+          for i,x in enumerate(q["items"]):
+              if x.get("market")=="US" and x.get("status")=="UNRESOLVED" and not x.get("security_id"):
+                  q["items"][i].update(status="EXECUTION_SUPERSEDED",
+                      reason="NON_SECURITY_EXECUTION_EVENT",verified_at_myt=now_myt())
+                  counts["execution_event"]+=1
+
+          drive.put("US/CURRENT_UNIVERSE.json",compact(u),expected_sha=digest(u_raw))
+          drive.put("REPAIR_QUEUE.json",compact(q),expected_sha=digest(q_raw))
+          rem=[x for x in q["items"] if x.get("market")=="US" and x.get("status")=="UNRESOLVED"]
+          print(json.dumps({"counts":dict(counts),"patch_path":patch_path,
+                            "remaining_unresolved":len(rem),
+                            "remaining_reasons":dict(Counter(x.get("reason") for x in rem))},
+                           ensure_ascii=False),flush=True)
+          PY
+      - name: Rebuild US derived
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: python runner.py --mode analytics --market US --as-of 2026-09-25

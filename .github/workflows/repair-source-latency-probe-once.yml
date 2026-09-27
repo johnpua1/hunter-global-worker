@@ -1,0 +1,59 @@
+name: Hunter repair source latency probe once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/repair-source-latency-probe-once.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Probe Yahoo chart and Stooq latency
+        working-directory: hunter-global
+        run: |
+          python - <<'PY'
+          import time, concurrent.futures
+          from runner import yahoo_chart
+          from repair import second_source_close
+
+          symbols=["DXF","DXST","DYNC","DYOR","EBON","ECBK","ECCV","ECXWW","EDHL","EDIT",
+                   "EDRY","EDUC","EDVA","EEIQ","EFSI","EFTY","EGG","EHGO","EHLD","ELAB"]
+
+          def one(sym):
+              out={"symbol":sym}
+              t=time.monotonic()
+              try:
+                  y=yahoo_chart(sym,"2024-01-01","2026-09-25")
+                  out["yahoo_s"]=round(time.monotonic()-t,3)
+                  out["yahoo_rows"]=len(y.get("timestamp") or [])
+              except Exception as e:
+                  out["yahoo_s"]=round(time.monotonic()-t,3)
+                  out["yahoo_err"]=type(e).__name__+":"+str(e)[:100]
+              t=time.monotonic()
+              try:
+                  s=second_source_close(sym,"US")
+                  out["stooq_s"]=round(time.monotonic()-t,3)
+                  out["stooq_rows"]=len(s)
+              except Exception as e:
+                  out["stooq_s"]=round(time.monotonic()-t,3)
+                  out["stooq_err"]=type(e).__name__+":"+str(e)[:100]
+              return out
+
+          t=time.monotonic()
+          with concurrent.futures.ThreadPoolExecutor(max_workers=8) as p:
+              for r in p.map(one,symbols):
+                  print(r,flush=True)
+          print("TOTAL_SECONDS",round(time.monotonic()-t,3),flush=True)
+          PY

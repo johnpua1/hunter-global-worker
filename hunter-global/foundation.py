@@ -131,6 +131,14 @@ def append_daily_date(drive: Drive, market: str, date: str, securities: list[dic
     # recovers multi-session gaps without rereading or rewriting BASE.
     target = [s for s in active if last[s["security_id"]] is None or
               last[s["security_id"]] < date]
+    # A stale/manual replay of an already-complete date must be a true no-op.
+    # Without this guard, an empty target can look like 0/N market coverage
+    # because BASE rows are intentionally not duplicated into DAILY keys.
+    if not target:
+        return {"market": market, "trade_date": date, "status": "COMPLETE",
+                "active": len(active), "available": len(active), "written": 0,
+                "repairs": 0, "updated_at_myt": now_myt(),
+                "no_op_reason": "NO_TARGETS"}
     from concurrent.futures import ThreadPoolExecutor
     def history_start(security):
         return (last[security["security_id"]] or
@@ -216,7 +224,15 @@ def run_daily(drive: Drive, market: str, workers: int):
                 {"market": market, "last_completed_date": base.checkpoint["as_of"]})
     results = []
     dates = closed_dates_since(market, previous["last_completed_date"])
-    if not dates and any(value is None for value in last.values()):
+    # Only ACTIVE new listings may require a same-date bootstrap when there is
+    # no newly completed market session. Quarantined/excluded NEW_LISTING rows
+    # must never force a weekend replay of the checkpoint date.
+    active_needs_backfill = any(
+        s.get("listing_status", "ACTIVE") == "ACTIVE"
+        and last[s["security_id"]] is None
+        for s in securities
+    )
+    if not dates and active_needs_backfill:
         dates = [previous["last_completed_date"]]
     for date in dates:
         result = append_daily_date(drive, market, date, securities, last, keys, workers,

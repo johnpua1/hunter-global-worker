@@ -311,3 +311,5 @@ jobs:
               drive.put(f"{market}/CONTROL/PHASE1_FINAL.json", compact({**receipt, "market": market}))
           print(receipt, flush=True)
           PY
+
+# retry-after-repair-base-cache: 2026-09-27

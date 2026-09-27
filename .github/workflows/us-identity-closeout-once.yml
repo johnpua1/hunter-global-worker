@@ -1,0 +1,71 @@
+name: Hunter US identity closeout once
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/us-identity-closeout-once.yml
+permissions:
+  contents: read
+env:
+  HUNTER_ACTIONS_CUTOVER: CONFIRMED
+  HUNTER_BRIDGE_ATTEMPTS: '8'
+  HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '90'
+  HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS: '120'
+jobs:
+  closeout:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Close unbatched US identity items
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import json
+          from collections import Counter
+          from runner import Drive,compact,digest,now_myt
+          drive=Drive()
+          q_raw=drive.read("REPAIR_QUEUE.json"); q=json.loads(q_raw)
+          u_raw=drive.read("US/CURRENT_UNIVERSE.json"); u=json.loads(u_raw)
+          byid={s["security_id"]:s for s in u["securities"]}
+          counts=Counter()
+          for x in q["items"]:
+              if not (x.get("market")=="US" and x.get("status")=="UNRESOLVED"):
+                  continue
+              sid=x.get("security_id"); sec=byid.get(sid)
+              if not sec:
+                  x.update(status="QUARANTINED_IDENTITY",
+                           reason="SECURITY_ID_NOT_IN_CURRENT_UNIVERSE",
+                           verified_at_myt=now_myt())
+                  counts["quarantined"]+=1
+                  continue
+              official=sec.get("official_listing_evidence") or {}
+              official_ok=(official.get("source_hash") and
+                           official.get("ticker")==sec.get("ticker") and
+                           not sec.get("identity_review"))
+              if official_ok:
+                  x.update(status="IDENTITY_FIXED",
+                           reason="CURRENT_OFFICIAL_LISTING_EVIDENCE",
+                           verified_at_myt=now_myt())
+                  sec["review_status"]="IDENTITY_CONFIRMED"
+                  counts["fixed"]+=1
+              else:
+                  sec["listing_status"]="QUARANTINED_IDENTITY"
+                  sec["quarantine_reason"]="OFFICIAL_IDENTITY_NOT_VERIFIED"
+                  sec["quarantined_at_myt"]=now_myt()
+                  x.update(status="QUARANTINED_IDENTITY",
+                           reason="OFFICIAL_IDENTITY_NOT_VERIFIED",
+                           verified_at_myt=now_myt())
+                  counts["quarantined"]+=1
+          drive.put("US/CURRENT_UNIVERSE.json",compact(u),expected_sha=digest(u_raw))
+          drive.put("REPAIR_QUEUE.json",compact(q),expected_sha=digest(q_raw))
+          rem=[x for x in q["items"] if x.get("status")=="UNRESOLVED"]
+          print({"counts":dict(counts),"global_unresolved":len(rem)},flush=True)
+          PY

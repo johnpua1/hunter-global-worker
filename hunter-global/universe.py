@@ -65,9 +65,19 @@ def parse_hk(sources):
            ("Stock Code", "Name of Securities", "Category", "Sub-Category", "ISIN")}
     result = {}
     for row in rows:
-        if (row[idx["Category"]] != "Equity" or not
-                any(x in str(row[idx["Sub-Category"]]) for x in ("Main Board", "GEM"))):
+        # HKEX has changed the wording of Category/Sub-Category over time.
+        # Treat the official Category as the product-type authority and do not
+        # fail the whole universe merely because the board label wording moved.
+        category = str(row[idx["Category"]] or "").strip()
+        sub_category = str(row[idx["Sub-Category"]] or "").strip()
+        if not category.lower().startswith("equit"):
             continue
+        # Preserve a sanity guard without coupling to one exact HKEX label.
+        # If a board label is present, accept Main Board/GEM variants; blank or
+        # generic equity sub-categories remain valid official equity rows.
+        if sub_category and any(tag in sub_category.lower() for tag in ("board", "gem")):
+            if not any(tag in sub_category.lower() for tag in ("main", "gem")):
+                continue
         code = str(row[idx["Stock Code"]]).zfill(5)
         result[code] = {"ticker": f"{int(code):04d}.HK", "exchange": "HKEX",
                         "name": row[idx["Name of Securities"]], "isin": row[idx["ISIN"]],

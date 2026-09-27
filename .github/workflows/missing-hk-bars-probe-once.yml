@@ -1,0 +1,37 @@
+name: Hunter missing HK bars public-source probe once
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/missing-hk-bars-probe-once.yml
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install requests
+      - name: Probe missing HK bars
+        run: |
+          python - <<'PY'
+          import requests,json
+          reqs=[
+            ("00533","20250703","20250704"),
+            ("00607","20250402","20250402"),
+            ("02696","20250211","20250213"),
+          ]
+          s=requests.Session(); s.headers.update({"User-Agent":"Mozilla/5.0 Hunter/1.0"})
+          for sym,a,b in reqs:
+              u="https://api.databull.cn/hk/stock/history"
+              try:
+                  r=s.get(u,params={"symbol":sym,"start_date":a,"end_date":b,"period":"d"},timeout=20)
+                  print("REQ",sym,a,b,"HTTP",r.status_code,"TYPE",r.headers.get("content-type"),flush=True)
+                  print(r.text[:8000],flush=True)
+              except Exception as e:
+                  print("EXC",sym,type(e).__name__,str(e),flush=True)
+          PY

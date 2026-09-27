@@ -304,7 +304,7 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
                 if latest["items"][index].get("status", "OPEN") == "OPEN":
                     latest["items"][index] = item
             try:
-                drive.put("REPAIR_QUEUE.json", compact(latest), expected_sha=digest(raw))
+                drive.put_fast("REPAIR_QUEUE.json", compact(latest), expected_sha=digest(raw))
                 break
             except RuntimeError as exc:
                 if "BRIDGE_STALE_WRITE" not in str(exc):

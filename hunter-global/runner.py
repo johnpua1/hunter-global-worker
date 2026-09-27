@@ -84,12 +84,27 @@ class Drive:
         self.folders: dict[str, str] = {"": ""}
 
     def health(self):
-        response = self.http.get(self.url, timeout=60)
-        response.raise_for_status()
-        result = response.json()
-        if result != {"ok": True, "service": "HUNTER_GLOBAL_BRIDGE"}:
-            raise RuntimeError("BRIDGE_HEALTH_FAILED")
-        LOG.info("bridge health ok")
+        expected = {"ok": True, "service": "HUNTER_GLOBAL_BRIDGE"}
+        for attempt in range(8):
+            try:
+                response = self.http.get(self.url, timeout=60)
+                response.raise_for_status()
+                result = response.json()
+                if result != expected:
+                    raise ValueError("BRIDGE_HEALTH_RESPONSE_SHAPE")
+                LOG.info("bridge health ok")
+                return
+            except (requests.RequestException, ValueError):
+                if attempt == 7:
+                    raise
+                # Apps Script redirects health GETs to short-lived
+                # script.googleusercontent.com URLs.  A stale redirect can
+                # transiently return 404; rebuild the session and retry the
+                # original /exec URL instead of accepting or caching it.
+                self.http.close()
+                self.http = requests.Session()
+                time.sleep(min(30, 2 ** attempt + random.random()))
+        raise AssertionError("unreachable")
 
     def _call(self, op: str, **fields) -> dict:
         request = {"op": op, "key": self.key, **fields}

@@ -204,7 +204,12 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
                 if key in base_cache:
                     continue
                 base_path = f"{market}/BASE/batch-{batch:04d}.ndjson.gz"
-                if drive.file(base_path):
+                # Production queue entries are bound to sealed BASE batches.
+                # Avoid a serial Bridge 'file' round-trip before each read;
+                # a missing BASE object must fail on read. MemoryDrive/tests do
+                # not expose the production transport marker and keep the
+                # existence check contract.
+                if hasattr(drive, "url") or drive.file(base_path):
                     missing_batches.append((key, base_path))
         # preserve first occurrence only
         seen_missing = set()

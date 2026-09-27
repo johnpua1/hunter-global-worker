@@ -56,6 +56,10 @@ def parse_hk(sources):
     workbook = openpyxl.load_workbook(io.BytesIO(sources["ListOfSecurities.xlsx"]),
                                       read_only=True, data_only=True)
     sheet = workbook.active
+    # HKEX occasionally publishes a valid workbook with a stale worksheet
+    # dimension (for example A1:R8 while the sheet contains thousands of rows).
+    # openpyxl read_only trusts that metadata unless dimensions are reset.
+    sheet.reset_dimensions()
     rows = sheet.iter_rows(values_only=True)
     next(rows); stamp = next(rows)
     if "Updated as at" not in str(stamp[0]):

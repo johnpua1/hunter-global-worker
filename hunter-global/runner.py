@@ -125,10 +125,13 @@ class Drive:
 
     def _call(self, op: str, **fields) -> dict:
         request = {"op": op, "key": self.key, **fields}
-        attempts = 8
+        attempts = max(1, int(os.getenv("HUNTER_BRIDGE_ATTEMPTS", "8")))
         for attempt in range(attempts):
             try:
-                timeout = 30 if op == "read" else 120
+                if op == "read":
+                    timeout = float(os.getenv("HUNTER_BRIDGE_READ_TIMEOUT_SECONDS", "30"))
+                else:
+                    timeout = float(os.getenv("HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS", "120"))
                 response = self.http.post(self.url, json=request, timeout=timeout)
                 response.raise_for_status()
                 result = response.json()

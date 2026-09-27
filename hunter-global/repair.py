@@ -110,9 +110,7 @@ def decide(drive: Drive, item: dict, security: dict, state=None, base_cache=None
                         not (r["high"] >= max(r["open"], r["close"], r["low"]) and
                              r["low"] <= min(r["open"], r["close"]) and
                              min(r["open"], r["high"], r["low"], r["close"]) > 0 and
-                             r["volume"] >= 0) or
-                        (r["volume"] == 0 and len({r[k] for k in
-                                                         ("open", "high", "low", "close")}) == 1)}
+                             r["volume"] >= 0)}
         if original:
             present = {r["date"] for r in original}
             first, last = min(present), max(present)
@@ -169,9 +167,7 @@ def decide(drive: Drive, item: dict, security: dict, state=None, base_cache=None
     if any(not (r["high"] >= max(r["open"], r["close"], r["low"]) and
                 r["low"] <= min(r["open"], r["close"]) and
                 min(r["open"], r["high"], r["low"], r["close"]) > 0 and
-                r["volume"] >= 0 and
-                not (r["volume"] == 0 and len({r[k] for k in
-                                                   ("open", "high", "low", "close")}) == 1))
+                r["volume"] >= 0)
            for r in rows):
         return {**result, "result": "UNRESOLVED", "reason": "BAR_STILL_SUSPECT"}
     try:

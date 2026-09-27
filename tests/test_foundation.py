@@ -38,6 +38,9 @@ class MemoryDrive:
         self.data[path] = data
         self.writes.append(path)
 
+    def put_fast(self, path, data, **kwargs):
+        self.put(path, data, **kwargs)
+
     def append(self, path, data, mime=None):
         if path in self.data:
             raise RuntimeError("APPEND_CONFLICT")

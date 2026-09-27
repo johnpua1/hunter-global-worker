@@ -702,6 +702,9 @@ def main():
         result = run_foundation_daily(drive, market, workers)
         LOG.info("daily market=%s sessions=%d written=%d", market, len(result),
                  sum(item.get("written", 0) for item in result))
+        if not result:
+            LOG.info("NO_NEW_SESSION market=%s", market)
+            continue
         if all(item.get("status") == "COMPLETE" for item in result):
             from phase2_runtime import daily as run_phase2_daily
             LOG.info("phase2 daily market=%s result=%s", market, run_phase2_daily(drive, market))

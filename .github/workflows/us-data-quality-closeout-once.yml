@@ -1,0 +1,113 @@
+name: Hunter US data quality closeout once
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/us-data-quality-closeout-once.yml
+permissions:
+  contents: read
+env:
+  HUNTER_ACTIONS_CUTOVER: CONFIRMED
+  HUNTER_BRIDGE_ATTEMPTS: '8'
+  HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '90'
+  HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS: '120'
+jobs:
+  closeout:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Close deterministic US data quality issues
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import json,re
+          from collections import defaultdict,Counter
+          from runner import Drive,parse_lines_gz,compact,digest,now_myt
+
+          drive=Drive()
+          u_path="US/CURRENT_UNIVERSE.json"
+          u_raw=drive.read(u_path); u=json.loads(u_raw)
+          q_raw=drive.read("REPAIR_QUEUE.json"); q=json.loads(q_raw)
+          calendar=[r["date"] for r in parse_lines_gz(drive.read("US/CALENDAR_BASE.ndjson.gz"))]
+          by_sid={s["security_id"]:s for s in u["securities"]}
+
+          noncommon=re.compile(
+              r"WARRANT|PREFERRED|\bPREF\b|\bRIGHTS?\b|\bUNITS?\b|\bREIT\b|\bFUND\b|"
+              r"SENIOR NOTES|SUBORDINATED NOTES|\bDEBENTURES?\b|MORTGAGE BONDS?",
+              re.I)
+          excluded=set()
+          for s in u["securities"]:
+              if noncommon.search(s.get("name","")):
+                  s["listing_status"]="EXCLUDED_NON_COMMON"
+                  s["exclusion_reason"]="NON_COMMON_SECURITY"
+                  excluded.add(s["security_id"])
+
+          items_by_batch=defaultdict(list)
+          for i,x in enumerate(q["items"]):
+              if x.get("market")=="US" and x.get("status")=="UNRESOLVED" and isinstance(x.get("batch"),int):
+                  items_by_batch[x["batch"]].append((i,x))
+
+          changed=Counter()
+          cache={}
+          for batch,pairs in sorted(items_by_batch.items()):
+              rows=parse_lines_gz(drive.read(f"US/BASE/batch-{batch:04d}.ndjson.gz"))
+              byid=defaultdict(list)
+              for r in rows: byid[r["security_id"]].append(r)
+              for i,x in pairs:
+                  sid=x.get("security_id")
+                  if sid in excluded:
+                      q["items"][i].update(status="EXCLUDED_NON_COMMON",
+                          reason="NON_COMMON_SECURITY",verified_at_myt=now_myt())
+                      changed["excluded_non_common"]+=1
+                      continue
+                  if x.get("category")!="DATA_SUSPECT" or x.get("reason") not in ("BAR_STILL_SUSPECT","SUSPECT_DATE_NOT_LOCALIZED"):
+                      continue
+                  rs=sorted(byid.get(sid,[]),key=lambda r:r["date"])
+                  structural=[]
+                  flat=[]
+                  for r in rs:
+                      ok=(r["high"]>=max(r["open"],r["close"],r["low"]) and
+                          r["low"]<=min(r["open"],r["close"]) and
+                          min(r["open"],r["high"],r["low"],r["close"])>0 and r["volume"]>=0)
+                      if not ok: structural.append(r)
+                      elif r["volume"]==0 and len({r[k] for k in ("open","high","low","close")})==1:
+                          flat.append(r)
+                  missing=[]
+                  if rs:
+                      present={r["date"] for r in rs}
+                      first,last=rs[0]["date"],rs[-1]["date"]
+                      missing=[d for d in calendar if first<d<last and d not in present]
+                  if not structural and not missing:
+                      reason="NO_TRADE_BAR_VALID" if flat else "NOT_REPRODUCED"
+                      q["items"][i].update(status="VALIDATED_NO_DATA_DEFECT",
+                          reason=reason,verified_at_myt=now_myt())
+                      changed[reason]+=1
+
+          for i,x in enumerate(q["items"]):
+              if x.get("market")=="US" and x.get("status")=="UNRESOLVED" and not x.get("security_id"):
+                  q["items"][i].update(status="EXECUTION_SUPERSEDED",
+                      reason="NON_SECURITY_EXECUTION_EVENT",verified_at_myt=now_myt())
+                  changed["execution_event"]+=1
+
+          drive.put(u_path,compact(u),expected_sha=digest(u_raw))
+          drive.put("REPAIR_QUEUE.json",compact(q),expected_sha=digest(q_raw))
+          remaining=[x for x in q["items"] if x.get("market")=="US" and x.get("status")=="UNRESOLVED"]
+          print(json.dumps({"changed":dict(changed),"excluded_securities":len(excluded),
+                            "remaining_unresolved":len(remaining),
+                            "remaining_reasons":dict(Counter(x.get("reason") for x in remaining))},
+                           ensure_ascii=False),flush=True)
+          PY
+      - name: Rebuild US derived
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: python runner.py --mode analytics --market US --as-of 2026-09-25

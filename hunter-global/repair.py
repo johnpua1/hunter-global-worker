@@ -10,6 +10,7 @@ import os
 from collections import defaultdict
 import time
 import threading
+from types import SimpleNamespace
 from urllib.parse import quote
 
 import requests
@@ -190,7 +191,11 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
             break
         batch_candidates = candidates[:chunk_size]
         if state is None and any(x.get("security_id") in securities for _, x in batch_candidates):
-            state = load_market(drive, market)
+            # Direct Phase 1 repair only needs the sealed trading calendar.
+            # Do not re-read/re-hash the full BASE universe on every resume.
+            calendar = [row["date"] for row in parse_lines_gz(
+                drive.read(f"{market}/CALENDAR_BASE.ndjson.gz"))]
+            state = SimpleNamespace(calendar=calendar)
 
         # BASE is immutable/sealed. Prefetch only the distinct shards needed by
         # this chunk, using independent read-only Bridge sessions. This avoids

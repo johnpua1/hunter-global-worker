@@ -7,13 +7,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hunter-global"))
 from analytics import compose, excursions, indicators, split_adjust
-from foundation import append_daily_date
+from foundation import append_daily_date, run_daily
 from options import current_status, label
 from repair import decide
 from repair import run_repair
 from market_calendar import materialize
 from derived import read_files
-from runner import compact, parse_lines_gz
+from runner import compact, lines_gz, parse_lines_gz
 
 
 class MemoryDrive:
@@ -37,6 +37,9 @@ class MemoryDrive:
     def put(self, path, data, **kwargs):
         self.data[path] = data
         self.writes.append(path)
+
+    def put_fast(self, path, data, **kwargs):
+        self.put(path, data, **kwargs)
 
     def append(self, path, data, mime=None):
         if path in self.data:
@@ -132,6 +135,49 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(len([x for x in drive.writes[before:] if "/DAILY/" in x]), 0)
         self.assertEqual(len(parse_lines_gz(drive.data["US/DAILY/2026-01-02/part-0001.ndjson.gz"])), 1)
 
+    @patch("foundation.fetch_security")
+    def test_daily_no_targets_is_noop_not_market_outage(self, fetch):
+        drive = MemoryDrive()
+        security = {"market": "US", "security_id": "US-000001", "ticker": "AAPL",
+                    "listing_status": "ACTIVE"}
+        result = append_daily_date(
+            drive, "US", "2026-09-25", [security],
+            {security["security_id"]: "2026-09-25"}, set(), 1, ["2026-09-25"])
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual(result["no_op_reason"], "NO_TARGETS")
+        self.assertEqual(result["available"], 1)
+        self.assertNotIn("US/CONTROL/DAILY_RUN_2026-09-25.json", drive.data)
+        fetch.assert_not_called()
+
+    @patch("foundation.append_daily_date")
+    @patch("foundation.closed_dates_since", return_value=[])
+    @patch("foundation.read_existing")
+    @patch("foundation.current_universe")
+    @patch("foundation.load_market")
+    def test_inactive_new_listing_does_not_force_weekend_replay(
+            self, base, universe, existing, dates, append):
+        drive = MemoryDrive()
+        drive.data["US/CONTROL/DAILY_CHECKPOINT.json"] = compact({
+            "market": "US", "last_completed_date": "2026-09-25",
+            "updated_at_myt": "2026-09-27T09:12:28+08:00"})
+        base.return_value = type("Base", (), {
+            "checkpoint": {"as_of": "2026-09-25", "total_batches": 1,
+                           "verified_batches": {"1": {}}},
+            "calendar": ["2026-09-25"],
+        })()
+        securities = [
+            {"market": "US", "security_id": "US-000001", "ticker": "AAPL",
+             "listing_status": "ACTIVE"},
+            {"market": "US", "security_id": "US-009999", "ticker": "NEWX",
+             "listing_status": "QUARANTINED_DATA_GAP",
+             "security_id_origin": "NEW_LISTING"},
+        ]
+        universe.return_value = securities
+        existing.return_value = (
+            {"US-000001": "2026-09-25", "US-009999": None}, set())
+        self.assertEqual(run_daily(drive, "US", 1), [])
+        append.assert_not_called()
+
     @patch("foundation.closed_dates_since", return_value=["2026-01-02"])
     @patch("foundation.fetch_security")
     def test_market_wide_outage_has_no_individual_repairs(self, fetch, dates):
@@ -151,6 +197,7 @@ class FoundationTests(unittest.TestCase):
     def test_repairs_drain_in_persisted_chunks_without_base_writes(self, universe, decide_repair, base):
         drive = MemoryDrive()
         universe.return_value = [{"security_id": "US-000001"}]
+        drive.data["US/CALENDAR_BASE.ndjson.gz"] = lines_gz([{"date": "2026-01-02"}])
         drive.data["REPAIR_QUEUE.json"] = compact({"items": [
             {"market": "US", "security_id": "US-000001", "category": "DATA_SUSPECT",
              "batch": i, "status": "OPEN"} for i in range(52)]})

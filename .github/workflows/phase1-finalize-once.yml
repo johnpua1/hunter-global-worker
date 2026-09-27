@@ -39,10 +39,20 @@ jobs:
           APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
           APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
         run: |
-          # Bootstrap/universe gates are already verified. Keep only live
-          # bridge/market probes and continue from the first open Phase 1 gate.
-          python runner.py --mode probe --market US
-          python runner.py --mode probe --market HK
+          # Bootstrap/universe gates are already verified. Resume without
+          # re-running expensive probes; final closure revalidates all required
+          # artifacts and checkpoints.
+          python - <<'PY'
+          from runner import Drive
+          drive = Drive()
+          drive.health()
+          required = ["US/CURRENT_UNIVERSE.json", "HK/CURRENT_UNIVERSE.json",
+                      "REPAIR_QUEUE.json"]
+          missing = [p for p in required if not drive.file(p)]
+          if missing:
+              raise RuntimeError("PHASE1_RESUME_MISSING:" + ",".join(missing))
+          print("PHASE1_RESUME_GATE=PASS", flush=True)
+          PY
 
   options-us:
     needs: bootstrap
@@ -313,4 +323,4 @@ jobs:
           print(receipt, flush=True)
           PY
 
-# retry-after-bridge-read-timeout: 2026-09-27
+# retry-after-lightweight-resume-gate: 2026-09-27

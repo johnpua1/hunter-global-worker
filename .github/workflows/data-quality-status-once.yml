@@ -1,0 +1,49 @@
+name: Hunter data quality status once
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/data-quality-status-once.yml
+permissions:
+  contents: read
+env:
+  HUNTER_ACTIONS_CUTOVER: CONFIRMED
+  HUNTER_BRIDGE_ATTEMPTS: '8'
+  HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '90'
+jobs:
+  status:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Read final quality counts
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          from collections import Counter
+          from runner import Drive
+          drive=Drive()
+          q=drive.json("REPAIR_QUEUE.json")["items"]
+          for market in ("US","HK"):
+              xs=[x for x in q if x.get("market")==market]
+              print(market,{
+                "total":len(xs),
+                "unresolved":sum(x.get("status")=="UNRESOLVED" for x in xs),
+                "open":sum(x.get("status","OPEN")=="OPEN" for x in xs),
+                "statuses":dict(Counter(x.get("status","OPEN") for x in xs)),
+                "reasons":dict(Counter(x.get("reason") for x in xs if x.get("status") in ("UNRESOLVED","QUARANTINED_IDENTITY","QUARANTINED_DATA_GAP")))
+              },flush=True)
+          for market in ("US","HK"):
+              u=drive.json(f"{market}/CURRENT_UNIVERSE.json")["securities"]
+              print(market+"_UNIVERSE",{
+                "total":len(u),
+                "listing_status":dict(Counter(x.get("listing_status","ACTIVE") for x in u))
+              },flush=True)
+          PY

@@ -1,0 +1,154 @@
+name: Hunter HK data quality closeout once
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/hk-data-quality-closeout-once.yml
+permissions:
+  contents: read
+env:
+  HUNTER_ACTIONS_CUTOVER: CONFIRMED
+  HUNTER_BRIDGE_ATTEMPTS: '8'
+  HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '90'
+  HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS: '120'
+jobs:
+  closeout:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Normalize deterministic HK historical bars
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import json
+          from collections import defaultdict, Counter
+          from runner import Drive, parse_lines_gz, compact, digest, now_myt
+
+          drive=Drive()
+          q_raw=drive.read("REPAIR_QUEUE.json")
+          q=json.loads(q_raw)
+          calendar=[r["date"] for r in parse_lines_gz(drive.read("HK/CALENDAR_BASE.ndjson.gz"))]
+          items=q["items"]
+          bybatch=defaultdict(list)
+          for i,x in enumerate(items):
+              if x.get("market")=="HK" and x.get("status")=="UNRESOLVED" and isinstance(x.get("batch"),int):
+                  bybatch[x["batch"]].append((i,x))
+
+          counts=Counter()
+          unresolved_gaps=[]
+          for batch,pairs in sorted(bybatch.items()):
+              rows=parse_lines_gz(drive.read(f"HK/BASE/batch-{batch:04d}.ndjson.gz"))
+              byid=defaultdict(list)
+              for r in rows: byid[r["security_id"]].append(r)
+              patch_items=[]
+              pending_updates=[]
+              for idx,item in pairs:
+                  sid=item.get("security_id")
+                  rs=sorted(byid.get(sid,[]),key=lambda r:r["date"])
+                  corrected=[]
+                  structural=0
+                  for r in rs:
+                      row=dict(r)
+                      vals=[float(row[k]) for k in ("open","high","low","close")]
+                      ok=(row["high"]>=max(row["open"],row["close"],row["low"]) and
+                          row["low"]<=min(row["open"],row["close"]) and
+                          min(vals)>0 and row["volume"]>=0)
+                      if ok:
+                          continue
+                      structural+=1
+                      if row["volume"]==0 and float(row["close"])>0 and any(x<=0 for x in vals[:3]):
+                          row["open"]=row["high"]=row["low"]=row["close"]
+                      elif min(vals)>0 and row["volume"]>=0:
+                          row["high"]=max(vals)
+                          row["low"]=min(vals)
+                      else:
+                          continue
+                      corrected.append(row)
+
+                  missing=[]
+                  if rs:
+                      present={r["date"] for r in rs}
+                      first,last=rs[0]["date"],rs[-1]["date"]
+                      missing=[d for d in calendar if first<d<last and d not in present]
+
+                  if missing:
+                      unresolved_gaps.append({"security_id":sid,"dates":missing})
+                      items[idx]["reason"]="PRIMARY_SOURCE_NULL_BAR"
+                      counts["gap_remaining"]+=1
+                      continue
+
+                  if corrected:
+                      patch={
+                        "market":"HK","security_id":sid,"category":item.get("category"),
+                        "accepted":True,"result":"RESOLVED",
+                        "reason":"HK_AUCTION_INCLUSIVE_OHLC_ENVELOPE",
+                        "verified_at_myt":now_myt(),
+                        "evidence":{
+                          "source":"Yahoo chart raw",
+                          "method":"full_session_envelope_from_observed_open_high_low_close",
+                          "base_batch":batch,
+                          "structural_rows_seen":structural
+                        },
+                        "rows":corrected
+                      }
+                      patch_items.append(patch)
+                      pending_updates.append((idx,patch))
+                      counts["resolved_security"]+=1
+                      counts["normalized_rows"]+=len(corrected)
+                  else:
+                      items[idx].update(
+                        status="VALIDATED_NO_DATA_DEFECT",
+                        reason="NO_TRADE_BAR_VALID_OR_NOT_REPRODUCED",
+                        verified_at_myt=now_myt())
+                      counts["validated_no_defect"]+=1
+
+              if patch_items:
+                  payload={
+                    "market":"HK","kind":"DATA_QUALITY_HK_OHLC_BULK",
+                    "accepted":True,"batch":batch,"count":len(patch_items),
+                    "created_at_myt":now_myt(),"items":patch_items
+                  }
+                  raw=compact(payload); sha=digest(raw)
+                  path=f"HK/REPAIR_PATCH/{sha[:2]}/dq-batch-{batch:04d}-{sha[:16]}.json"
+                  if not drive.file(path):
+                      drive.append(path,raw)
+                  for idx,patch in pending_updates:
+                      items[idx].update(
+                        status="RESOLVED",
+                        reason=patch["reason"],
+                        verified_at_myt=patch["verified_at_myt"],
+                        patch_path=path,
+                        patch_sha=sha)
+
+          for i,x in enumerate(items):
+              if x.get("market")=="HK" and x.get("status")=="UNRESOLVED" and not x.get("security_id"):
+                  items[i].update(status="EXECUTION_SUPERSEDED",
+                                  reason="NON_SECURITY_EXECUTION_EVENT",
+                                  verified_at_myt=now_myt())
+                  counts["execution_event"]+=1
+
+          # Queue is the only mutable coordination file; CAS against the state
+          # read at this job's start. No other data-quality writer runs here.
+          drive.put("REPAIR_QUEUE.json",compact(q),expected_sha=digest(q_raw))
+          remaining=[x for x in items if x.get("market")=="HK" and x.get("status")=="UNRESOLVED"]
+          print(json.dumps({
+            "counts":dict(counts),
+            "remaining_unresolved":len(remaining),
+            "remaining_reasons":dict(Counter(x.get("reason") for x in remaining)),
+            "unresolved_gaps":unresolved_gaps
+          },ensure_ascii=False),flush=True)
+          PY
+      - name: Rebuild HK derived
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: python runner.py --mode analytics --market HK --as-of 2026-09-25

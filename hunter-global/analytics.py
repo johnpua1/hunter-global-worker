@@ -120,7 +120,7 @@ def indicators(rows: list[dict], benchmark: list[dict] | None = None) -> dict:
         "price_vs_ma": {n: last / value - 1 if value else None for n, value in ma.items()},
         "low_distance": low_distance, "percentile_52w":
             (last - low52) / (high52 - low52) if high52 > low52 else None,
-        "drawdown_52w": last / high52 - 1,
+        "drawdown_52w": last / high52 - 1 if high52 else None,
         "bottom_structure": "STAGE_LOW" if low_zone else "NONE",
         "bottom_confirmation": bottom_confirmed,
         "bottom_label": "阶段低位，收盘确认" if low_zone and bottom_confirmed else

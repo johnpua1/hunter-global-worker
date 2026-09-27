@@ -1,5 +1,5 @@
 name: Hunter Phase 1 one-time finalize
-# retry-after-lazy-cache-test-fix-v2: 2026-09-27
+# retry-after-health-redirect-fix: 2026-09-27
 
 on:
   push:

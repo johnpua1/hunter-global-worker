@@ -323,4 +323,4 @@ jobs:
           print(receipt, flush=True)
           PY
 
-# retry-after-lightweight-resume-gate: 2026-09-27
+# retry-after-no-base-file-check: 2026-09-27

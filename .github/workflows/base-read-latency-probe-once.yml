@@ -1,0 +1,51 @@
+name: Hunter BASE read latency probe once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/base-read-latency-probe-once.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Probe sealed BASE read latency
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import time, concurrent.futures
+          from runner import Drive
+
+          paths=[f"US/BASE/batch-{n:04d}.ndjson.gz" for n in (22,23,24,25)]
+
+          d=Drive()
+          t=time.monotonic()
+          seq=[]
+          for p in paths:
+              s=time.monotonic(); b=d.read(p); seq.append((p,len(b),round(time.monotonic()-s,3)))
+          print("SEQUENTIAL",seq,"TOTAL",round(time.monotonic()-t,3),flush=True)
+
+          def one(p):
+              d=Drive()
+              s=time.monotonic(); b=d.read(p)
+              return (p,len(b),round(time.monotonic()-s,3))
+
+          t=time.monotonic()
+          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+              par=list(pool.map(one,paths))
+          print("PARALLEL",par,"TOTAL",round(time.monotonic()-t,3),flush=True)
+          PY

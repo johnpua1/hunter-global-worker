@@ -54,17 +54,32 @@ def now_myt() -> str:
 
 
 def retry_http(session, method: str, url: str, **kwargs):
+    retryable = {429, 500, 502, 503, 504}
+    last_error = None
     for attempt in range(5):
         try:
             response = session.request(method, url, timeout=45, **kwargs)
-            if response.status_code not in (429, 500, 502, 503, 504):
-                response.raise_for_status()
-                return response
-            raise requests.HTTPError(f"HTTP {response.status_code}")
-        except (requests.RequestException, OSError):
+        except (requests.RequestException, OSError) as exc:
+            last_error = exc
             if attempt == 4:
                 raise
             time.sleep(min(30, 2**attempt + random.random()))
+            continue
+
+        # Non-retryable HTTP failures (for example 401/403/404) are
+        # deterministic for this request and must fail immediately. Only
+        # throttling/transient server statuses are retried.
+        if response.status_code not in retryable:
+            response.raise_for_status()
+            return response
+
+        last_error = requests.HTTPError(f"HTTP {response.status_code}", response=response)
+        if attempt == 4:
+            raise last_error
+        time.sleep(min(30, 2**attempt + random.random()))
+
+    if last_error is not None:
+        raise last_error
     raise AssertionError("unreachable")
 
 

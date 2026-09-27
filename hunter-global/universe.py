@@ -138,7 +138,10 @@ def refresh(drive: Drive, market: str):
                                "category": "IDENTITY_REVIEW", "problem": "NAME_CHANGED",
                                "status": "OPEN", "recorded_at_myt": now_myt()})
                 continue
-            sec.update({**entry, "listing_status": "ACTIVE", "identity_review": False,
+            next_status = ("QUARANTINED_DATA_GAP"
+                           if sec.get("listing_status") == "QUARANTINED_DATA_GAP"
+                           else "ACTIVE")
+            sec.update({**entry, "listing_status": next_status, "identity_review": False,
                         "official_listing_evidence": {
                             "source_hash": digest(sources["ListOfSecurities.xlsx" if market == "HK"
                                                          else "nasdaqlisted.txt" if entry["exchange"] == "NASDAQ"

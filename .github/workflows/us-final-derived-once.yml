@@ -1,0 +1,30 @@
+name: Hunter US final derived once
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/us-final-derived-once.yml
+permissions:
+  contents: read
+env:
+  HUNTER_ACTIONS_CUTOVER: CONFIRMED
+  HUNTER_BRIDGE_ATTEMPTS: '8'
+  HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '90'
+  HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS: '120'
+  DERIVED_READ_WORKERS: '4'
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Rebuild final US derived from current active universe
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: python runner.py --mode analytics --market US --as-of 2026-09-25

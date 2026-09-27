@@ -12,6 +12,7 @@ from options import current_status, label
 from repair import decide
 from repair import run_repair
 from market_calendar import materialize
+from derived import read_files
 from runner import compact, parse_lines_gz
 
 
@@ -161,6 +162,23 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(result["processed"], 52)
         self.assertEqual(drive.writes, ["REPAIR_QUEUE.json"] * 3)
         self.assertEqual(run_repair(drive, "US")["processed"], 0)
+
+    def test_derived_reads_flat_and_sharded_repair_patches(self):
+        class ShardDrive:
+            def list(self, folder):
+                if folder == "US/REPAIR_PATCH":
+                    return [
+                        {"name": "aa", "mimeType": "application/vnd.google-apps.folder"},
+                        {"name": "legacy.json", "mimeType": "application/json"},
+                    ]
+                if folder == "US/REPAIR_PATCH/aa":
+                    return [{"name": "aabb.json", "mimeType": "application/json"}]
+                raise AssertionError(folder)
+
+        self.assertEqual(
+            read_files(ShardDrive(), "US", "REPAIR_PATCH", ".json"),
+            ["US/REPAIR_PATCH/aa/aabb.json", "US/REPAIR_PATCH/legacy.json"],
+        )
 
     @patch("market_calendar.closed_dates_since", return_value=[])
     @patch("market_calendar.load_market")

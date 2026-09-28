@@ -144,10 +144,24 @@ def load_composed(drive: Drive, market: str, target_ids: set[str], queue: dict):
         sid = security["security_id"]
         if sid in target_ids:
             batch_for_sid[sid] = index // 100 + 1
-    for batch in sorted(set(batch_for_sid.values())):
-        for row in parse_lines_gz(drive.read(f"{market}/BASE/batch-{batch:04d}.ndjson.gz")):
+    batches = sorted(set(batch_for_sid.values()))
+
+    def read_base_batch(batch: int):
+        reader = Drive()
+        rows = []
+        for row in parse_lines_gz(
+            reader.read(f"{market}/BASE/batch-{batch:04d}.ndjson.gz")
+        ):
             if row["security_id"] in target_ids:
-                base_by_sid[row["security_id"]].append(row)
+                rows.append(row)
+        return rows
+
+    if batches:
+        workers = min(6, len(batches))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            for rows in pool.map(read_base_batch, batches):
+                for row in rows:
+                    base_by_sid[row["security_id"]].append(row)
 
     # The closeout target is frozen at 445. Do not enumerate and read the
     # entire historical REPAIR_PATCH tree just to discover sidecars belonging

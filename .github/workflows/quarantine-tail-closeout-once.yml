@@ -1,8 +1,10 @@
-name: Hunter quarantine tail closeout once\n# trigger: 2026-09-28T09:00+08:00
+name: Hunter quarantine tail closeout once
 on:
   push:
     branches: [main]
     paths:
+      - hunter-global/quarantine_tail.py
+      - hunter-global/universe.py
       - .github/workflows/quarantine-tail-closeout-once.yml
 permissions:
   contents: read

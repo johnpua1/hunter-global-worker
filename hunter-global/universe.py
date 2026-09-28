@@ -68,12 +68,18 @@ def parse_hk(sources):
     sheet.reset_dimensions()
     rows = sheet.iter_rows(values_only=True)
     next(rows); stamp = next(rows)
-    if "Updated as at" not in str(stamp[0]):
+    stamp_text = str(stamp[0] or "")
+    if "Updated as at" not in stamp_text:
         raise RuntimeError("OFFICIAL_HK_TIMESTAMP_MISSING")
+    try:
+        source_as_of = dt.datetime.strptime(
+            stamp_text.split("Updated as at", 1)[1].strip(), "%d/%m/%Y").date().isoformat()
+    except (IndexError, ValueError) as exc:
+        raise RuntimeError("OFFICIAL_HK_TIMESTAMP_INVALID") from exc
     headings = [str(x) if x else "" for x in next(rows)]
     idx = {key: headings.index(key) for key in
-           ("Stock Code", "Name of Securities", "Category", "Sub-Category", "ISIN",
-            "Trading Currency")}
+           ("Stock Code", "Name of Securities", "Category", "Sub-Category", "Board Lot",
+            "ISIN", "Trading Currency")}
     result = {}
     for row in rows:
         category = str(row[idx["Category"]] or "").strip()
@@ -92,9 +98,17 @@ def parse_hk(sources):
         if "PREF" in name.upper():
             continue
         code = str(row[idx["Stock Code"]]).zfill(5)
+        raw_lot = str(row[idx["Board Lot"]] or "").replace(",", "").strip()
+        try:
+            board_lot = int(float(raw_lot))
+        except ValueError:
+            board_lot = None
+        if not board_lot or board_lot <= 0:
+            raise RuntimeError("OFFICIAL_HK_BOARD_LOT_INVALID:" + code)
         result[code] = {"ticker": f"{int(code):04d}.HK", "exchange": "HKEX",
                         "name": row[idx["Name of Securities"]], "isin": row[idx["ISIN"]],
-                        "source_symbol": code}
+                        "source_symbol": code, "board_lot_size": board_lot,
+                        "board_lot_as_of": source_as_of, "board_lot_source": HK_URL}
     if len(result) < 1000:
         raise RuntimeError("OFFICIAL_HK_LIST_INCOMPLETE")
     return result

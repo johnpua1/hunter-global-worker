@@ -1,0 +1,36 @@
+name: Hunter quarantine tail closeout once
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/quarantine-tail-closeout-once.yml
+permissions:
+  contents: read
+concurrency:
+  group: hunter-quarantine-tail-closeout
+  cancel-in-progress: false
+env:
+  HUNTER_ACTIONS_CUTOVER: CONFIRMED
+  HUNTER_BRIDGE_ATTEMPTS: '8'
+  HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '90'
+  HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS: '120'
+  HUNTER_HTTP_RETRY_ATTEMPTS: '6'
+  HUNTER_HTTP_TIMEOUT_SECONDS: '45'
+jobs:
+  closeout:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - name: Syntax guard
+        run: python -m py_compile hunter-global/universe.py hunter-global/quarantine_tail.py
+      - name: Close 445 quarantine tail and HK board lots
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: python quarantine_tail.py --as-of 2026-09-25

@@ -5,6 +5,7 @@ import csv
 import datetime as dt
 import io
 import json
+import re
 from collections import defaultdict
 
 import openpyxl
@@ -37,11 +38,14 @@ def parse_us(sources):
                                   delimiter="|"):
             ticker = row.get("Symbol") or row.get("ACT Symbol")
             name = row.get("Security Name", "")
+            non_common = re.search(
+                r"\\bWARRANTS?\\b|\\bPREFERRED\\b|\\bPREF\\b|\\bPFD\\b|"
+                r"\\bRIGHTS?\\b|\\bUNITS?\\b|\\bREIT\\b|\\bFUND\\b|"
+                r"\\bSENIOR NOTES\\b|\\bSUBORDINATED NOTES\\b|\\bNOTES DUE\\b|"
+                r"\\bDEBENTURES?\\b|\\bMORTGAGE BONDS?\\b|\\bTRUST PREFERRED\\b",
+                name, re.I)
             if (not ticker or row.get("ETF") != "N" or row.get("Test Issue") != "N"
-                    or any(word in name.upper() for word in
-                           ("WARRANT", "PREFERRED", "PREF ", " PFD", "RIGHT", " UNIT", " REIT", " FUND",
-                            "SENIOR NOTES", "SUBORDINATED NOTES", "NOTES DUE", "DEBENTURE",
-                            "MORTGAGE BOND", "TRUST PREFERRED"))):
+                    or non_common):
                 continue
             exchange = "NASDAQ" if filename.startswith("nasdaq") else {
                 "N": "NYSE", "A": "NYSE_AMERICAN", "P": "NYSE_ARCA"}.get(row.get("Exchange"))

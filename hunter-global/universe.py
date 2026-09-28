@@ -39,13 +39,16 @@ def parse_us(sources):
             ticker = row.get("Symbol") or row.get("ACT Symbol")
             name = row.get("Security Name", "")
             non_common = re.search(
-                r"\\bWARRANTS?\\b|\\bPREFERRED\\b|\\bPREF\\b|\\bPFD\\b|"
+                r"\\bWARRANTS?\\b|\\bPREFERRED\\b|\\bPREFERENCE\\b|\\bPREF\\b|\\bPFD\\b|"
                 r"\\bRIGHTS?\\b|\\bUNITS?\\b|\\bREIT\\b|\\bFUND\\b|"
                 r"\\bSENIOR NOTES\\b|\\bSUBORDINATED NOTES\\b|\\bNOTES DUE\\b|"
                 r"\\bDEBENTURES?\\b|\\bMORTGAGE BONDS?\\b|\\bTRUST PREFERRED\\b",
                 name, re.I)
+            spac = (re.search(r"\\bSPAC\\b", name, re.I) or
+                    (re.search(r"\\bACQUISITION\\b", name, re.I) and
+                     re.search(r"\\b(CLASS A|ORDINARY SHARES?|COMMON STOCK)\\b", name, re.I)))
             if (not ticker or row.get("ETF") != "N" or row.get("Test Issue") != "N"
-                    or non_common):
+                    or non_common or spac):
                 continue
             exchange = "NASDAQ" if filename.startswith("nasdaq") else {
                 "N": "NYSE", "A": "NYSE_AMERICAN", "P": "NYSE_ARCA"}.get(row.get("Exchange"))

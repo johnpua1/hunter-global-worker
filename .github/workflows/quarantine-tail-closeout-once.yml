@@ -1,4 +1,4 @@
-name: Hunter quarantine tail closeout once
+name: Hunter quarantine tail closeout once\n# trigger: 2026-09-28T09:00+08:00
 on:
   push:
     branches: [main]

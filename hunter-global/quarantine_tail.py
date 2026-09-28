@@ -341,8 +341,19 @@ def process_market(drive: Drive, market: str, doc: dict, manifest_targets: list[
     by_sid = {s["security_id"]: s for s in doc["securities"]}
     target_ids = {t["security_id"] for t in manifest_targets}
     target_original = {t["security_id"]: t["original_status"] for t in manifest_targets}
-    state, composed = load_composed(drive, market, target_ids, queue)
-    reasons = queue_reasons(queue, target_ids)
+    pending_target_ids = {
+        sid for sid in target_ids
+        if not (
+            by_sid.get(sid)
+            and by_sid[sid].get("tail_closeout_version") == VERSION
+            and by_sid[sid].get("listing_status") not in TARGET_STATES
+        )
+    }
+    if pending_target_ids:
+        state, composed = load_composed(drive, market, pending_target_ids, queue)
+    else:
+        state, composed = load_market(drive, market), {}
+    reasons = queue_reasons(queue, pending_target_ids)
 
     plans = {}
     for sid in sorted(target_ids):

@@ -23,6 +23,8 @@ LOG = logging.getLogger("hunter.maintenance")
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    from production_guard import check_at_start
+    check_at_start()
     if os.getenv("HUNTER_ACTIONS_CUTOVER") != "CONFIRMED":
         raise RuntimeError("SINGLE_WRITER_NOT_CONFIRMED")
     drive = Drive()
@@ -48,4 +50,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        from production_guard import safe_error_summary
+        LOG.error("HUNTER_EXECUTION_FAILED worker=%s myt=%s reason=%s",
+                  os.getenv("CLOUD_RUN_JOB", "local"), dt.datetime.now(TZ).isoformat(timespec="seconds"),
+                  safe_error_summary(exc))
+        raise

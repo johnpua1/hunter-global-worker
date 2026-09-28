@@ -10,7 +10,7 @@ permissions:
   contents: read
 concurrency:
   group: hunter-quarantine-tail-closeout
-  cancel-in-progress: false
+  cancel-in-progress: true
 env:
   HUNTER_ACTIONS_CUTOVER: CONFIRMED
   HUNTER_BRIDGE_ATTEMPTS: '8'

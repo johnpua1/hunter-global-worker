@@ -14,7 +14,7 @@ import re
 from collections import Counter, defaultdict
 
 from analytics import compose
-from derived import build as build_derived, read_files
+from derived import build as build_derived
 from foundation import daily_segments
 from runner import Drive, compact, digest, fetch_security, load_market, now_myt, parse_lines_gz
 from universe import HK_URL, parse_hk, parse_us
@@ -136,7 +136,7 @@ def structural(row: dict) -> bool:
     )
 
 
-def load_composed(drive: Drive, market: str, target_ids: set[str]):
+def load_composed(drive: Drive, market: str, target_ids: set[str], queue: dict):
     state = load_market(drive, market)
     base_by_sid = defaultdict(list)
     batch_for_sid = {}
@@ -149,8 +149,17 @@ def load_composed(drive: Drive, market: str, target_ids: set[str]):
             if row["security_id"] in target_ids:
                 base_by_sid[row["security_id"]].append(row)
 
+    # The closeout target is frozen at 445. Do not enumerate and read the
+    # entire historical REPAIR_PATCH tree just to discover sidecars belonging
+    # to these targets. Accepted repair queue entries already carry the stable
+    # patch_path written by repair.py; read only those target-bound sidecars.
+    patch_paths = sorted({
+        item.get("patch_path")
+        for item in queue.get("items", [])
+        if item.get("security_id") in target_ids and item.get("patch_path")
+    })
     patches = defaultdict(list)
-    for path in read_files(drive, market, "REPAIR_PATCH", ".json"):
+    for path in patch_paths:
         payload = drive.json(path)
         items = payload.get("items") if isinstance(payload, dict) else None
         if isinstance(items, list):
@@ -332,7 +341,7 @@ def process_market(drive: Drive, market: str, doc: dict, manifest_targets: list[
     by_sid = {s["security_id"]: s for s in doc["securities"]}
     target_ids = {t["security_id"] for t in manifest_targets}
     target_original = {t["security_id"]: t["original_status"] for t in manifest_targets}
-    state, composed = load_composed(drive, market, target_ids)
+    state, composed = load_composed(drive, market, target_ids, queue)
     reasons = queue_reasons(queue, target_ids)
 
     plans = {}

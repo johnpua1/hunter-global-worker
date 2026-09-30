@@ -645,7 +645,7 @@ def run_mini(drive: Drive, markets: tuple[str, ...]):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("probe", "mini", "base", "daily", "auto",
+    parser.add_argument("--mode", choices=("probe", "mini", "base", "daily", "daily-core", "auto",
                                            "repair", "universe", "options", "analytics",
                                            "bootstrap", "calendar"), default="probe")
     parser.add_argument("--market", choices=MARKETS, help="Run one market in an independent job")
@@ -714,6 +714,9 @@ def main():
         result = run_foundation_daily(drive, market, workers)
         LOG.info("daily market=%s sessions=%d written=%d", market, len(result),
                  sum(item.get("written", 0) for item in result))
+        if args.mode == "daily-core":
+            LOG.info("DAILY_CORE_DONE market=%s", market)
+            continue
         if not result:
             LOG.info("NO_NEW_SESSION market=%s", market)
             continue

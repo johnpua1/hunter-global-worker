@@ -29,19 +29,32 @@ jobs:
           APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
         run: |
           python - <<'PY'
-          import requests, uuid
+          import gzip, io, json, requests, uuid, zlib
           from tests.release_bridge import Drive, sample_2026_09_25, submit
-          from runner import lines_gz
           drive = Drive()
           drive.health()
           row = sample_2026_09_25(drive, "US")
-          payload = lines_gz([row])
-          run = uuid.uuid4().hex
-          path = f"_BRIDGE_TEST/DAILY/US/2026-09-25/{run}/part-0001.ndjson.gz"
-          result = submit(requests.Session(), drive.url, drive.key, "append", path, payload)
-          print("BRIDGE_DAILY_PROBE_OK=" + str(bool(result.get("ok"))).lower())
-          print("BRIDGE_DAILY_PROBE_ERROR=" + str(result.get("error") or "NONE"))
-          if not result.get("ok"):
+          raw = (json.dumps(row, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+          variants = {}
+          variants["mtime0"] = gzip.compress(raw, mtime=0)
+          variants["default"] = gzip.compress(raw)
+          buf = io.BytesIO()
+          with gzip.GzipFile(filename="payload.ndjson.gz", mode="wb", fileobj=buf) as gz:
+              gz.write(raw)
+          variants["named"] = buf.getvalue()
+          co = zlib.compressobj(level=9, wbits=31)
+          variants["zlib31"] = co.compress(raw) + co.flush()
+          passed = []
+          for label, payload in variants.items():
+              run = uuid.uuid4().hex
+              path = f"_BRIDGE_TEST/DAILY/US/2026-09-25/{run}/part-0001.ndjson.gz"
+              result = submit(requests.Session(), drive.url, drive.key, "append", path, payload)
+              print(f"BRIDGE_GZIP_{label}_OK=" + str(bool(result.get("ok"))).lower())
+              print(f"BRIDGE_GZIP_{label}_ERROR=" + str(result.get("error") or "NONE"))
+              if result.get("ok"):
+                  passed.append(label)
+          print("BRIDGE_GZIP_PASS_VARIANTS=" + ",".join(passed))
+          if not passed:
               raise SystemExit(2)
           PY
       - name: Catch up US DAILY

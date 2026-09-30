@@ -152,9 +152,15 @@ def append_daily_date(drive: Drive, market: str, date: str, securities: list[dic
         results = list(pool.map(lambda s: fetch_security(
             s, [d for d in calendar if (last[s["security_id"]] or "0000") < d <= date],
             date, daily=True), target))
-    available_today = sum((s["security_id"], date) in keys for s in active)
-    available_today += sum(any(r["date"] == date for r in result[0])
-                           for result in results)
+    # Count bars already stored for this date from either immutable BASE or DAILY.
+    # A same-date NEW_LISTING bootstrap must not treat BASE-backed securities as missing.
+    preexisting_today = sum(
+        last.get(s["security_id"]) is not None and last[s["security_id"]] >= date
+        for s in active
+    )
+    fetched_today = sum(any(r["date"] == date for r in result[0])
+                        for result in results)
+    available_today = preexisting_today + fetched_today
     if active and date in calendar and (len(active) - available_today) / len(active) >= .80:
         # No individual repair flood during source-wide outages. A confirmed
         # exchange halt is a separate, evidence-backed status.

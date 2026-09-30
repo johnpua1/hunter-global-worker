@@ -43,7 +43,11 @@ context.Utilities = {
   DigestAlgorithm: {SHA_256: 'SHA_256'},
   computeDigest(_algorithm, data) { return bytes(crypto.createHash('sha256').update(Buffer.from(data)).digest()); },
   newBlob(data, mime, name) { return blob(data, mime, name); },
-  ungzip(value) { return blob(zlib.gunzipSync(Buffer.from(value.getBytes()))); },
+  ungzip(value) {
+    assert.equal(value.mime, 'application/x-gzip');
+    assert.equal(value.name, 'daily-payload.ndjson.gz');
+    return blob(zlib.gunzipSync(Buffer.from(value.getBytes())));
+  },
   base64Decode(data) { return bytes(Buffer.from(data, 'base64')); },
   getUuid() { return String(++counter); },
 };

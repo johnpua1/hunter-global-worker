@@ -35,6 +35,14 @@ jobs:
           drive.health()
           row = sample_2026_09_25(drive, "US")
           raw = (json.dumps(row, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+          tiny = {"security_id":"US-TEST","date":"2026-09-25","trade_date":"2026-09-25",
+                  "open":1.0,"high":1.0,"low":1.0,"close":1.0,"volume":1}
+          tiny_raw = (json.dumps(tiny, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+          tiny_path = f"_BRIDGE_TEST/DAILY/US/2026-09-25/{uuid.uuid4().hex}/part-0001.ndjson.gz"
+          tiny_result = submit(requests.Session(), drive.url, drive.key, "append", tiny_path,
+                               gzip.compress(tiny_raw))
+          print("BRIDGE_TINY_OK=" + str(bool(tiny_result.get("ok"))).lower())
+          print("BRIDGE_TINY_ERROR=" + str(tiny_result.get("error") or "NONE"))
           variants = {}
           variants["mtime0"] = gzip.compress(raw, mtime=0)
           variants["default"] = gzip.compress(raw)

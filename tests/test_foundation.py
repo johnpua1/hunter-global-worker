@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hunter-global"))
 from analytics import compose, excursions, indicators, split_adjust
-from foundation import append_daily_date, run_daily
+from foundation import append_daily_date, read_existing, run_daily
 from options import current_status, label
 from repair import decide
 from repair import run_repair
@@ -46,6 +46,13 @@ class MemoryDrive:
             raise RuntimeError("APPEND_CONFLICT")
         self.data[path] = data
         self.writes.append(path)
+
+
+class LegacyBridgeDrive(MemoryDrive):
+    def append(self, path, data, mime=None):
+        if "/DAILY/" in path and path.endswith(".ndjson.gz"):
+            raise RuntimeError("BRIDGE_DAILY_PAYLOAD_INVALID")
+        return super().append(path, data, mime)
 
 
 def row(date, close, sid="US-000001", anchor="2026-01-01"):
@@ -134,6 +141,29 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(second["written"], 0)
         self.assertEqual(len([x for x in drive.writes[before:] if "/DAILY/" in x]), 0)
         self.assertEqual(len(parse_lines_gz(drive.data["US/DAILY/2026-01-02/part-0001.ndjson.gz"])), 1)
+
+    @patch("foundation.fetch_security")
+    def test_daily_falls_back_for_legacy_bridge_gzip_validator(self, fetch):
+        drive = LegacyBridgeDrive()
+        security = {"market": "US", "security_id": "US-000001", "ticker": "AAPL"}
+        fetch.return_value = ([row("2026-01-02", 101)], ["PASS_DAILY"], [], None)
+        result = append_daily_date(
+            drive, "US", "2026-01-02", [security],
+            {security["security_id"]: "2026-01-01"}, set(), 1, ["2026-01-01"])
+        self.assertEqual(result["status"], "COMPLETE")
+        fallback = "US/DAILY/2026-01-02/part-0001.ndjson.gzip"
+        self.assertIn(fallback, drive.data)
+        self.assertEqual(len(parse_lines_gz(drive.data[fallback])), 1)
+
+    def test_read_existing_accepts_legacy_bridge_fallback_suffix(self):
+        drive = MemoryDrive()
+        security = {"market": "US", "security_id": "US-000001", "ticker": "AAPL"}
+        path = "US/DAILY/2026-01-02/part-0001.ndjson.gzip"
+        drive.data[path] = lines_gz([row("2026-01-02", 101)])
+        with patch("foundation.daily_segments", return_value=["2026-01-02"]):
+            last, keys = read_existing(drive, "US", [security], "2026-01-01")
+        self.assertEqual(last["US-000001"], "2026-01-02")
+        self.assertIn(("US-000001", "2026-01-02"), keys)
 
     @patch("foundation.fetch_security")
     def test_daily_no_targets_is_noop_not_market_outage(self, fetch):

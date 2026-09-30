@@ -160,7 +160,8 @@ class FoundationTests(unittest.TestCase):
         security = {"market": "US", "security_id": "US-000001", "ticker": "AAPL"}
         path = "US/DAILY/2026-01-02/part-0001.ndjson.gzip"
         drive.data[path] = lines_gz([row("2026-01-02", 101)])
-        last, keys = read_existing(drive, "US", [security], "2026-01-01")
+        with patch("foundation.daily_segments", return_value=["2026-01-02"]):
+            last, keys = read_existing(drive, "US", [security], "2026-01-01")
         self.assertEqual(last["US-000001"], "2026-01-02")
         self.assertIn(("US-000001", "2026-01-02"), keys)
 

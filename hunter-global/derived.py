@@ -23,8 +23,9 @@ def calculate_anchors(rows, anchors):
     return result
 
 
-def read_files(drive: Drive, market: str, folder: str, suffix: str):
+def read_files(drive: Drive, market: str, folder: str, suffix):
     """Read direct files plus one shard level without exceeding Bridge list caps."""
+    suffixes = (suffix,) if isinstance(suffix, str) else tuple(suffix)
     base = f"{market}/{folder}"
     try:
         entries = drive.list(base)
@@ -38,9 +39,9 @@ def read_files(drive: Drive, market: str, folder: str, suffix: str):
         if entry.get("mimeType") == "application/vnd.google-apps.folder":
             shard = f"{base}/{name}"
             for child in drive.list(shard):
-                if child["name"].endswith(suffix):
+                if child["name"].endswith(suffixes):
                     paths.append(f"{shard}/{child['name']}")
-        elif name.endswith(suffix):
+        elif name.endswith(suffixes):
             paths.append(f"{base}/{name}")
     return paths
 
@@ -50,7 +51,7 @@ def build(drive: Drive, market: str, date: str):
     universe = current_universe(drive, market)
     daily = defaultdict(list)
     for day in daily_segments(drive, market):
-        for path in read_files(drive, market, "DAILY/" + day, ".ndjson.gz"):
+        for path in read_files(drive, market, "DAILY/" + day, (".ndjson.gz", ".ndjson.gzip")):
             for row in parse_lines_gz(drive.read(path)):
                 if row.get("trade_date", row["date"]) <= date:
                     daily[row["security_id"]].append(row)

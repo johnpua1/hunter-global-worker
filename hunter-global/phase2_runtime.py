@@ -333,7 +333,7 @@ def compose_prices(drive,market,wanted):
         for item in items:
             if item.get('security_id') in wanted:patches[item['security_id']].append(item)
     for day in daily_segments(drive,market):
-        for path in read_files(drive,market,'DAILY/'+day,'.ndjson.gz'):
+        for path in read_files(drive,market,'DAILY/'+day,('.ndjson.gz','.ndjson.gzip')):
             for row in parse_lines_gz(drive.read(path)):
                 if row['security_id'] in wanted:daily[row['security_id']].append(row)
     actions=[]

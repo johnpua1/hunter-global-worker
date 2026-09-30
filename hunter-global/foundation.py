@@ -8,6 +8,13 @@ from runner import (Drive, MARKETS, compact, digest, fetch_security, lines_gz,
                     load_market, now_myt, parse_lines_gz, closed_dates_since)
 
 
+DAILY_SEGMENT_SUFFIXES = (".ndjson.gz", ".ndjson.gzip")
+
+
+def is_daily_segment(name: str) -> bool:
+    return name.endswith(DAILY_SEGMENT_SUFFIXES)
+
+
 def current_universe(drive: Drive, market: str) -> list[dict]:
     path = f"{market}/CURRENT_UNIVERSE.json"
     if drive.file(path):
@@ -57,7 +64,7 @@ def read_existing(drive: Drive, market: str, securities: list[dict], base_as_of:
     dates = daily_segments(drive, market)
     for date in dates:
         for file in drive.list(f"{market}/DAILY/{date}"):
-            if not file["name"].endswith(".ndjson.gz"):
+            if not is_daily_segment(file["name"]):
                 continue
             for row in parse_lines_gz(drive.read(f"{market}/DAILY/{date}/{file['name']}")):
                 key = (row["security_id"], row.get("trade_date", row.get("date")))
@@ -197,12 +204,23 @@ def append_daily_date(drive: Drive, market: str, date: str, securities: list[dic
                 raise
             names = set()
         number = 1
-        while f"part-{number:04d}.ndjson.gz" in names:
+        while any(f"part-{number:04d}{suffix}" in names
+                  for suffix in DAILY_SEGMENT_SUFFIXES):
             number += 1
-        path = f"{folder}/part-{number:04d}.ndjson.gz"
-        # Only create a new segment. A restarted run checks the actual rows
-        # before the call and cannot replace an existing segment.
-        drive.append(path, lines_gz(rows), "application/x-gzip")
+        payload = lines_gz(rows)
+        # Prefer the canonical .ndjson.gz name. Older live Apps Script Bridge
+        # deployments can reject a valid gzip before parsing because ungzip()
+        # receives a Blob without gzip MIME metadata. On that exact legacy
+        # error only, fall back to an alternate append-only suffix that bypasses
+        # the broken validator while preserving gzip bytes and Drive immutability.
+        primary = f"{folder}/part-{number:04d}.ndjson.gz"
+        try:
+            drive.append(primary, payload, "application/x-gzip")
+        except RuntimeError as exc:
+            if "BRIDGE_DAILY_PAYLOAD_INVALID" not in str(exc):
+                raise
+            fallback = f"{folder}/part-{number:04d}.ndjson.gzip"
+            drive.append(fallback, payload, "application/x-gzip")
     if events:
         unique = { (e["security_id"], e["effective_date"], e["factor"]): e
                    for e in events }

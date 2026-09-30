@@ -198,7 +198,9 @@ function bridgeDailyKeys_(path, bytes) {
   var market = match[1], date = match[2];
   var rows;
   try {
-    rows = Utilities.ungzip(Utilities.newBlob(bytes)).getDataAsString('UTF-8')
+    rows = Utilities.ungzip(
+        Utilities.newBlob(bytes, 'application/x-gzip', 'daily-payload.ndjson.gz'))
+        .getDataAsString('UTF-8')
         .split('\n').filter(function (line) { return line.length > 0; })
         .map(function (line) { return JSON.parse(line); });
   } catch (err) { throw new Error('DAILY_PAYLOAD_INVALID'); }

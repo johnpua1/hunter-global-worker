@@ -149,6 +149,27 @@ class FoundationTests(unittest.TestCase):
         self.assertNotIn("US/CONTROL/DAILY_RUN_2026-09-25.json", drive.data)
         fetch.assert_not_called()
 
+    @patch("foundation.fetch_security")
+    def test_base_date_new_listing_bootstrap_counts_base_as_available(self, fetch):
+        drive = MemoryDrive()
+        existing = {"market": "US", "security_id": "US-000001", "ticker": "AAPL",
+                    "listing_status": "ACTIVE"}
+        new_listing = {"market": "US", "security_id": "US-000002", "ticker": "NEWX",
+                       "listing_status": "ACTIVE", "security_id_origin": "NEW_LISTING"}
+        fetch.return_value = ([row("2026-09-25", 50, sid="US-000002")],
+                              ["PASS_DAILY"], [], None)
+        last = {"US-000001": "2026-09-25", "US-000002": None}
+        keys = set()
+
+        result = append_daily_date(
+            drive, "US", "2026-09-25", [existing, new_listing],
+            last, keys, 1, ["2026-09-25"])
+
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual(result["available"], 2)
+        self.assertEqual(result["written"], 1)
+        self.assertNotEqual(result["status"], "MARKET_WIDE_DATA_UNAVAILABLE")
+
     @patch("foundation.append_daily_date")
     @patch("foundation.closed_dates_since", return_value=[])
     @patch("foundation.read_existing")

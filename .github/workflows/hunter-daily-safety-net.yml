@@ -48,7 +48,7 @@ jobs:
           APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
           HUNTER_ACTIONS_CUTOVER: CONFIRMED
           FETCH_WORKERS: '6'
-        run: python runner.py --mode auto --market US
+        run: python runner.py --mode daily-core --market US
 
   hk:
     if: >-
@@ -73,7 +73,7 @@ jobs:
           APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
           HUNTER_ACTIONS_CUTOVER: CONFIRMED
           FETCH_WORKERS: '6'
-        run: python runner.py --mode auto --market HK
+        run: python runner.py --mode daily-core --market HK
 
   keepalive:
     if: github.event_name == 'schedule' && github.event.schedule == '5 0 1 * *'

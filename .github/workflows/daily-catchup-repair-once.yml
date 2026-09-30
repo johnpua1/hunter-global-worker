@@ -27,7 +27,23 @@ jobs:
         env:
           APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
           APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
-        run: python tests/release_bridge.py
+        run: |
+          python - <<'PY'
+          import requests, uuid
+          from tests.release_bridge import Drive, sample_2026_09_25, submit
+          from runner import lines_gz
+          drive = Drive()
+          drive.health()
+          row = sample_2026_09_25(drive, "US")
+          payload = lines_gz([row])
+          run = uuid.uuid4().hex
+          path = f"_BRIDGE_TEST/DAILY/US/2026-09-25/{run}/part-0001.ndjson.gz"
+          result = submit(requests.Session(), drive.url, drive.key, "append", path, payload)
+          print("BRIDGE_DAILY_PROBE_OK=" + str(bool(result.get("ok"))).lower())
+          print("BRIDGE_DAILY_PROBE_ERROR=" + str(result.get("error") or "NONE"))
+          if not result.get("ok"):
+              raise SystemExit(2)
+          PY
       - name: Catch up US DAILY
         working-directory: hunter-global
         env:

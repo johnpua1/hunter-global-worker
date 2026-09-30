@@ -12,6 +12,7 @@ import gzip
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import sys
@@ -287,6 +288,15 @@ def fetch_security(security: dict, calendar: list[str], as_of: str,
             vals = {key: (quote_data.get(key) or [None] * len(dates))[i]
                     for key in ("open", "high", "low", "close", "volume")}
             if any(vals[key] is None for key in vals):
+                continue
+            # Yahoo can occasionally emit NaN/Infinity-like numeric values.
+            # Python's json encoder would serialize those as non-standard JSON,
+            # which Apps Script JSON.parse rejects inside the DAILY gzip validator.
+            try:
+                numeric = [float(vals[key]) for key in vals]
+            except (TypeError, ValueError):
+                continue
+            if not all(math.isfinite(value) for value in numeric):
                 continue
             if market == "HK":
                 # Yahoo HK daily bars can combine auction open/close prices with

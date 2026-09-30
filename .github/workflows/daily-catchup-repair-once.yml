@@ -1,0 +1,41 @@
+name: Hunter DAILY catch-up repair once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.repair-trigger/hunter-daily-catchup-20260930'
+
+permissions:
+  contents: read
+
+jobs:
+  catchup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: python -m pip install -r hunter-global/requirements.txt
+      - name: Regression gate
+        run: python -m unittest tests.test_foundation.FoundationTests.test_base_date_new_listing_bootstrap_counts_base_as_available
+      - name: Catch up US DAILY
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+          HUNTER_ACTIONS_CUTOVER: CONFIRMED
+          FETCH_WORKERS: '6'
+        run: python runner.py --mode auto --market US
+      - name: Catch up HK DAILY
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+          HUNTER_ACTIONS_CUTOVER: CONFIRMED
+          FETCH_WORKERS: '6'
+        run: python runner.py --mode auto --market HK

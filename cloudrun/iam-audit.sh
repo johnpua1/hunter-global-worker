@@ -5,12 +5,12 @@ set +x
 PROJECT_ID="${GCP_PROJECT_ID:-rgs-hunter-global}"
 REGION="${GCP_REGION:-us-central1}"
 IAM_MODE="${HUNTER_IAM_MODE:-legacy}"
-TRIGGER_AUTHORITY="${HUNTER_TRIGGER_AUTHORITY:-APPS_SCRIPT}"
+TRIGGER_AUTHORITY="${HUNTER_TRIGGER_AUTHORITY:-MIXED_LOCKED}"
 JOBS=(hunter-us-daily hunter-hk-daily hunter-maintenance hunter-monthly-v2)
 FAIL=0
 
 case "$IAM_MODE" in legacy|scoped) ;; *) echo "INVALID_IAM_MODE=$IAM_MODE"; exit 2 ;; esac
-case "$TRIGGER_AUTHORITY" in APPS_SCRIPT|CLOUD_SCHEDULER) ;; *) echo "INVALID_TRIGGER_AUTHORITY=$TRIGGER_AUTHORITY"; exit 2 ;; esac
+case "$TRIGGER_AUTHORITY" in MIXED_LOCKED) ;; *) echo "INVALID_TRIGGER_AUTHORITY=$TRIGGER_AUTHORITY"; exit 2 ;; esac
 
 command -v gcloud >/dev/null
 gcloud projects describe "$PROJECT_ID" --format='value(projectId)' >/dev/null

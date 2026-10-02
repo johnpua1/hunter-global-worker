@@ -51,15 +51,55 @@ unset BOOTSTRAP_JSON LEGACY_KEY
 
 if ! gcloud secrets describe "$MONTH_KEY_SECRET" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
   gcloud secrets create "$MONTH_KEY_SECRET" --replication-policy=automatic --project "$GCP_PROJECT_ID" >/dev/null
+  printf '%s' "$MONTH_KEY" | gcloud secrets versions add "$MONTH_KEY_SECRET" \
+    --data-file=- --project "$GCP_PROJECT_ID" >/dev/null
+else
+  CURRENT_MONTH_KEY="$(gcloud secrets versions access latest --secret "$MONTH_KEY_SECRET" \
+    --project "$GCP_PROJECT_ID" 2>/dev/null || true)"
+  if [[ "$CURRENT_MONTH_KEY" != "$MONTH_KEY" ]]; then
+    printf '%s' "$MONTH_KEY" | gcloud secrets versions add "$MONTH_KEY_SECRET" \
+      --data-file=- --project "$GCP_PROJECT_ID" >/dev/null
+  fi
+  unset CURRENT_MONTH_KEY
 fi
-printf '%s' "$MONTH_KEY" | gcloud secrets versions add "$MONTH_KEY_SECRET"   --data-file=- --project "$GCP_PROJECT_ID" >/dev/null
 unset MONTH_KEY
 
 if ! gcloud iam service-accounts describe "$SA" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
-  gcloud iam service-accounts create "$SA_ID"     --display-name='Hunter V2 monthly recertification' --project "$GCP_PROJECT_ID" >/dev/null
+  gcloud iam service-accounts create "$SA_ID" \
+    --display-name='Hunter V2 monthly recertification' --project "$GCP_PROJECT_ID" >/dev/null
 fi
+
+# Google IAM can return the newly created service account from the create
+# command before policy backends can resolve that principal. Wait for the
+# account to become readable, then retry Secret Manager bindings until the
+# principal has propagated. This makes reruns safe after a partial deployment.
+SA_VISIBLE=0
+for attempt in $(seq 1 12); do
+  if gcloud iam service-accounts describe "$SA" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
+    SA_VISIBLE=1
+    break
+  fi
+  sleep 5
+done
+if [[ "$SA_VISIBLE" != "1" ]]; then
+  echo "SERVICE_ACCOUNT_PROPAGATION_TIMEOUT:$SA" >&2
+  exit 1
+fi
+
 for secret in "$URL_SECRET" "$MONTH_KEY_SECRET"; do
-  gcloud secrets add-iam-policy-binding "$secret" --project "$GCP_PROJECT_ID"     --member="serviceAccount:$SA" --role=roles/secretmanager.secretAccessor >/dev/null
+  BOUND=0
+  for attempt in $(seq 1 12); do
+    if gcloud secrets add-iam-policy-binding "$secret" --project "$GCP_PROJECT_ID" \
+      --member="serviceAccount:$SA" --role=roles/secretmanager.secretAccessor >/dev/null 2>&1; then
+      BOUND=1
+      break
+    fi
+    sleep 5
+  done
+  if [[ "$BOUND" != "1" ]]; then
+    echo "SECRET_IAM_BINDING_PROPAGATION_TIMEOUT:$secret:$SA" >&2
+    exit 1
+  fi
 done
 
 IMAGE="${REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/hunter-worker/runner:${MERGED_MAIN_SHA}"

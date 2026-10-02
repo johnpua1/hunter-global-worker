@@ -41,6 +41,17 @@ function doPost(e) {
       return bridgeJson_({ok: true, trigger: listMonthlyTrigger(),
                           job: status(cfg.monthJob)});
     }
+    if (op === 'topology_status') {
+      if (scope !== 'LEGACY') throw new Error('TOPOLOGY_STATUS_LEGACY_ONLY');
+      return bridgeJson_({ok:true, daily:listHunterDailyTriggers(),
+                          monthly:listMonthlyTrigger(), jobs:inspectHunterJobs()});
+    }
+    if (op === 'enforce_topology_triggers') {
+      if (scope !== 'LEGACY') throw new Error('TOPOLOGY_ENFORCE_LEGACY_ONLY');
+      var daily = installHunterDailyTriggers();
+      var monthly = installFirstMonthlyTrigger();
+      return bridgeJson_({ok:true, daily:daily, monthly:monthly});
+    }
     var path = bridgePath_(body.path || '');
     bridgeScopeAuthorize_(scope, op, path);
     if (op === 'folder') {
@@ -368,6 +379,7 @@ function hunterCloudConfig_() {
     region: props.getProperty('GCP_REGION') || 'us-central1',
     usJob: props.getProperty('HUNTER_US_JOB') || 'hunter-us-daily',
     hkJob: props.getProperty('HUNTER_HK_JOB') || 'hunter-hk-daily',
+    maintJob: props.getProperty('HUNTER_MAINT_JOB') || 'hunter-maintenance',
     monthJob: props.getProperty('HUNTER_MONTH_JOB') || 'hunter-monthly-v2'
   };
 }
@@ -406,9 +418,10 @@ function hunterJobName_(marketOrJob) {
   var value = String(marketOrJob || '').toUpperCase();
   if (value === 'US') return cfg.usJob;
   if (value === 'HK') return cfg.hkJob;
+  if (value === 'MAINT') return cfg.maintJob;
   if (value === 'MONTH') return cfg.monthJob;
   if (marketOrJob === cfg.usJob || marketOrJob === cfg.hkJob ||
-      marketOrJob === cfg.monthJob) return String(marketOrJob);
+      marketOrJob === cfg.maintJob || marketOrJob === cfg.monthJob) return String(marketOrJob);
   throw new Error('UNKNOWN_HUNTER_JOB:' + marketOrJob);
 }
 
@@ -475,7 +488,7 @@ function hunterJobConfig_(job) {
 
 function inspectHunterJobs() {
   return {US: hunterJobConfig_('US'), HK: hunterJobConfig_('HK'),
-          MONTH: hunterJobConfig_('MONTH')};
+          MAINT: hunterJobConfig_('MAINT'), MONTH: hunterJobConfig_('MONTH')};
 }
 
 function runHunterJob_(job) {

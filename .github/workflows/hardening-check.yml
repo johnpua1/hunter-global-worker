@@ -20,7 +20,7 @@ jobs:
       - name: Bridge authorization tests
         run: node tests/test_bridge.js
       - name: Shell syntax
-        run: bash -n cloudrun/deploy.sh cloudrun/schedule.sh cloudrun/phase1.sh cloudrun/iam-audit.sh
+        run: bash -n cloudrun/deploy.sh cloudrun/deploy-quarterly.sh cloudrun/schedule.sh cloudrun/phase1.sh cloudrun/iam-audit.sh
       - name: Python dependencies
         run: python -m pip install -r hunter-global/requirements.txt
       - name: Python syntax

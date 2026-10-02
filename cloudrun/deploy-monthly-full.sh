@@ -30,10 +30,11 @@ if ! npx -y "$CLASP" show-authorized-user --json >/dev/null 2>&1; then
   npx -y "$CLASP" login --no-localhost
 fi
 
-BRIDGE_URL="$(gcloud secrets versions access latest --secret "$URL_SECRET" --project "$GCP_PROJECT_ID")"
+SECRET_BRIDGE_URL="$(gcloud secrets versions access latest --secret "$URL_SECRET" --project "$GCP_PROJECT_ID")"
+BRIDGE_URL="$SECRET_BRIDGE_URL"
 export BRIDGE_URL
-DEPLOYMENT_ID="$(printf '%s' "$BRIDGE_URL" | sed -n 's#^https://script.google.com/macros/s/\([^/]*\)/exec$#\1#p')"
-test -n "$DEPLOYMENT_ID"
+SECRET_DEPLOYMENT_ID="$(printf '%s' "$SECRET_BRIDGE_URL" | sed -n 's#^https://script.google.com/macros/s/\([^/]*\)/exec$#\1#p')"
+test -n "$SECRET_DEPLOYMENT_ID"
 
 SCRIPTS="$(npx -y "$CLASP" list-scripts)"
 SCRIPT_ID="$(printf '%s\n' "$SCRIPTS" | python -c 'import re,sys
@@ -68,13 +69,22 @@ cp "$ROOT/bridge/appsscript.json" "$SCRIPT_DIR/appsscript.json"
 python "$ROOT/cloudrun/normalize-clasp-dir.py" "$SCRIPT_DIR"
 npx -y "$CLASP" push --force
 
-# Do not gate redeploy on parsing `clasp list-deployments` text output. clasp
-# 3.4.1 officially supports redeploying an existing Apps Script deployment by
-# passing its deployment ID directly; the redeploy command itself is the
-# authoritative success/failure check.
-npx -y "$CLASP" list-deployments || true
-npx -y "$CLASP" create-deployment --deploymentId "$DEPLOYMENT_ID" \
+# Resolve the actual versioned deployment from clasp itself. Ignore @HEAD
+# (development deployment). Prefer the ID currently stored in Secret Manager
+# when it is still present; otherwise take the highest versioned deployment.
+DEPLOYMENTS="$(npx -y "$CLASP" list-deployments)"
+printf '%s\n' "$DEPLOYMENTS"
+DEPLOYMENT_ID="$(printf '%s\n' "$DEPLOYMENTS" | \
+  python "$ROOT/cloudrun/resolve-clasp-deployment.py" --preferred "$SECRET_DEPLOYMENT_ID")"
+test -n "$DEPLOYMENT_ID"
+
+# clasp 3.x exposes a dedicated update-deployment command. Use the resolved
+# versioned deployment directly instead of create-deployment --deploymentId.
+npx -y "$CLASP" update-deployment "$DEPLOYMENT_ID" \
   --description "Hunter V2 monthly bridge ${MERGED_MAIN_SHA}"
+
+BRIDGE_URL="https://script.google.com/macros/s/${DEPLOYMENT_ID}/exec"
+export BRIDGE_URL
 
 python - <<'PY'
 import json, os, time, urllib.request
@@ -93,6 +103,14 @@ for _ in range(8):
     time.sleep(3)
 raise SystemExit("Bridge health verification failed: "+repr(last))
 PY
+
+# If Secret Manager pointed to a stale deployment URL, publish the verified
+# live URL as a new secret version only after the health check passes.
+if [[ "$BRIDGE_URL" != "$SECRET_BRIDGE_URL" ]]; then
+  printf '%s' "$BRIDGE_URL" | gcloud secrets versions add "$URL_SECRET" \
+    --data-file=- --project "$GCP_PROJECT_ID" >/dev/null
+  echo "BRIDGE_URL_SECRET_UPDATED=PASS"
+fi
 
 cd "$ROOT"
 bash cloudrun/deploy-monthly.sh

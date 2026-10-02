@@ -76,8 +76,35 @@ gcloud run jobs "$ACTION" "$JOB"   --image "$IMAGE" --region "$REGION" --project
 # quarterly worker only after all G178 checks pass.
 gcloud run jobs execute "$JOB" --region "$REGION" --project "$GCP_PROJECT_ID"   --args='--mode,quarterly,--snapshot,SNAPSHOT_2026-10-01,--validation'   --task-timeout=60m --wait
 
-# Install the next one-shot Apps Script trigger only after validation succeeds.
+# Fail closed on the committed pointer before arming any future trigger.
 LEGACY_KEY="$(gcloud secrets versions access latest --secret "$LEGACY_KEY_SECRET" --project "$GCP_PROJECT_ID")"
+POINTER_JSON="$(BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" python - <<'PY'
+import base64, json, os, urllib.request
+body=json.dumps({"op":"read","key":os.environ["LEGACY_KEY"],"path":"ACTIVE_POINTER"}).encode()
+req=urllib.request.Request(os.environ["BRIDGE_URL"],data=body,
+    headers={"Content-Type":"application/json"},method="POST")
+with urllib.request.urlopen(req,timeout=60) as r:
+    outer=json.load(r)
+if not outer.get("ok") or not outer.get("data_base64"):
+    raise SystemExit("ACTIVE_POINTER read failed: "+str(outer.get("error")))
+doc=json.loads(base64.b64decode(outer["data_base64"]))
+expected={
+    "quarter_file":"QUARTER_2026Q4",
+    "snapshot":"SNAPSHOT_2026-10-01",
+    "long_direction_signal":"无合格信号",
+    "short_direction_signal":"无合格信号",
+    "long_vertical_baseline":"MARKET_DRIFT_ONLY",
+    "short_vertical_baseline":"OOS_ONLY",
+}
+bad={k:{"got":doc.get(k),"expected":v} for k,v in expected.items() if doc.get(k)!=v}
+if bad:
+    raise SystemExit("ACTIVE_POINTER validation failed: "+json.dumps(bad,ensure_ascii=False))
+print(json.dumps(doc,ensure_ascii=False,separators=(",",":")))
+PY
+)"
+
+# Install the next one-shot Apps Script trigger only after validation and
+# ACTIVE_POINTER readback both succeed.
 TRIGGER_JSON="$(BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" python - <<'PY'
 import json, os, urllib.request
 body=json.dumps({"op":"install_quarter_trigger","key":os.environ["LEGACY_KEY"]}).encode()
@@ -103,4 +130,4 @@ print(json.dumps(data,separators=(",",":")))
 PY
 )"
 unset LEGACY_KEY BRIDGE_URL
-printf 'VALIDATION=PASS\nJOB=%s\nTRIGGER=%s\nSTATUS=%s\n' "$JOB" "$TRIGGER_JSON" "$STATUS_JSON"
+printf 'VALIDATION=PASS\nJOB=%s\nACTIVE_POINTER=%s\nTRIGGER=%s\nSTATUS=%s\n' "$JOB" "$POINTER_JSON" "$TRIGGER_JSON" "$STATUS_JSON"

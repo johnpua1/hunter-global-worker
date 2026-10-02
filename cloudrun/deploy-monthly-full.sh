@@ -8,6 +8,7 @@ CLASP="@google/clasp@3.4.1"
 WORK_ROOT="${HOME}/hunter-monthly-release"
 SCRIPT_DIR="${WORK_ROOT}/apps-script"
 URL_SECRET="APPS_SCRIPT_WEBAPP_URL"
+LEGACY_KEY_SECRET="APPS_SCRIPT_SHARED_KEY"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 MERGED_MAIN_SHA="$(git rev-parse HEAD)"
@@ -85,31 +86,61 @@ npx -y "$CLASP" update-deployment "$DEPLOYMENT_ID" \
 
 BRIDGE_URL="https://script.google.com/macros/s/${DEPLOYMENT_ID}/exec"
 export BRIDGE_URL
+LEGACY_KEY="$(gcloud secrets versions access latest --secret "$LEGACY_KEY_SECRET" --project "$GCP_PROJECT_ID")"
 
-python - <<'PY'
-import json, os, time, urllib.request
-url=os.environ["BRIDGE_URL"]
-last=None
-for _ in range(8):
-    try:
-        with urllib.request.urlopen(url,timeout=30) as r:
-            body=json.load(r)
-        if body=={"ok":True,"service":"HUNTER_GLOBAL_BRIDGE"}:
-            print("BRIDGE_DEPLOYMENT=PASS")
-            raise SystemExit(0)
-        last=body
-    except Exception as exc:
-        last=repr(exc)
-    time.sleep(3)
-raise SystemExit("Bridge health verification failed: "+repr(last))
+bridge_get_ok() {
+  BRIDGE_URL="$BRIDGE_URL" python - <<'PY'
+import json, os, urllib.request
+with urllib.request.urlopen(os.environ["BRIDGE_URL"], timeout=30) as r:
+    body=json.load(r)
+raise SystemExit(0 if body=={"ok":True,"service":"HUNTER_GLOBAL_BRIDGE"} else 1)
 PY
+}
 
-# If Secret Manager pointed to a stale deployment URL, publish the verified
-# live URL as a new secret version only after the health check passes.
+bridge_post_ok() {
+  BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" \
+    python "$ROOT/cloudrun/apps-script-post.py" --op file \
+      --path "US/CONTROL/DAILY_CHECKPOINT.json" --raw | \
+    python -c 'import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if d.get("ok") else 1)'
+}
+
+bridge_ready() {
+  for attempt in $(seq 1 12); do
+    if bridge_get_ok && bridge_post_ok; then
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+if ! bridge_ready; then
+  echo "Existing Apps Script deployment failed GET/POST verification; creating a fresh Web App deployment."
+  npx -y "$CLASP" create-deployment \
+    --description "Hunter V2 monthly bridge fresh ${MERGED_MAIN_SHA}"
+  DEPLOYMENTS="$(npx -y "$CLASP" list-deployments)"
+  printf '%s\n' "$DEPLOYMENTS"
+  DEPLOYMENT_ID="$(printf '%s\n' "$DEPLOYMENTS" | \
+    python "$ROOT/cloudrun/resolve-clasp-deployment.py")"
+  BRIDGE_URL="https://script.google.com/macros/s/${DEPLOYMENT_ID}/exec"
+  export BRIDGE_URL
+  if ! bridge_ready; then
+    echo "BRIDGE_WEBAPP_GET_POST_VALIDATION_FAILED:$BRIDGE_URL" >&2
+    exit 1
+  fi
+fi
+
+echo "BRIDGE_DEPLOYMENT=PASS"
+echo "BRIDGE_POST=PASS"
+unset LEGACY_KEY
+
+# Publish only a deployment URL that passed both GET and authenticated POST.
 if [[ "$BRIDGE_URL" != "$SECRET_BRIDGE_URL" ]]; then
   printf '%s' "$BRIDGE_URL" | gcloud secrets versions add "$URL_SECRET" \
     --data-file=- --project "$GCP_PROJECT_ID" >/dev/null
   echo "BRIDGE_URL_SECRET_UPDATED=PASS"
+else
+  echo "BRIDGE_URL_SECRET_CURRENT=PASS"
 fi
 
 cd "$ROOT"

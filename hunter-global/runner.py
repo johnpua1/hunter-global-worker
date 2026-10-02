@@ -718,8 +718,19 @@ def main():
     workers = max(1, min(10, int(os.getenv("FETCH_WORKERS", "6"))))
     if args.mode == "monthly":
         from monthly_v2 import run_monthly
-        LOG.info("monthly result=%s",
-                 run_monthly(drive, snapshot_name=args.snapshot, validation=args.validation))
+        from hk_monthly import run_hk_monthly
+        us_result = run_monthly(
+            drive, snapshot_name=args.snapshot, validation=args.validation
+        )
+        hk_result = run_hk_monthly(drive, validation=args.validation)
+        if not args.validation:
+            if us_result["month"].replace("MONTH_", "") != hk_result["month"].replace("HK_MONTH_", ""):
+                raise RuntimeError(
+                    "MONTHLY_US_HK_MONTH_MISMATCH:"
+                    + us_result["month"] + ":" + hk_result["month"]
+                )
+        LOG.info("monthly US result=%s", us_result)
+        LOG.info("monthly HK result=%s", hk_result)
         return
     if args.mode == "base":
         raise RuntimeError("BASE_SEALED")

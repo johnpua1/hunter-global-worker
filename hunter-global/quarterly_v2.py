@@ -176,7 +176,8 @@ def _metric_for_signal(rows: list[dict], state: list[int], side: int, h: int,
                        split: dict[str,Any], segment: str, seed_key: str) -> dict:
     sig: dict[str, list[int]] = defaultdict(list)
     base: dict[str, list[int]] = defaultdict(list)
-    parts=seed_key.split("|")\n    signal_name = parts[2] if seed_key.startswith("D1|") else parts[1]
+    parts=seed_key.split("|")
+    signal_name = parts[2] if seed_key.startswith("D1|") else parts[1]
     minimum = {"S1":50, "S4":50, "S2":49, "S3":199}[signal_name]
     for i, row in enumerate(rows):
         if i < minimum or _segment(row["date"], split) != segment:

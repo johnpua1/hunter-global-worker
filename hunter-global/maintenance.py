@@ -23,6 +23,9 @@ LOG = logging.getLogger("hunter.maintenance")
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    job = os.getenv("CLOUD_RUN_JOB")
+    if job and job != "hunter-maintenance":
+        raise RuntimeError(f"TOPOLOGY_RUNTIME_MISMATCH:{job}:expected=hunter-maintenance")
     from production_guard import check_at_start
     check_at_start()
     if os.getenv("HUNTER_ACTIONS_CUTOVER") != "CONFIRMED":

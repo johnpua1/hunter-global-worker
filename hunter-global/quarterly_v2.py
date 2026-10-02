@@ -547,6 +547,9 @@ def _build_snapshot(drive, asof: str) -> tuple[str,list[list[dict]],list[dict]]:
         bench=_load_snapshot_bench(drive,snapshot)
         return snapshot,groups,bench
 
+    from analytics import compose, split_adjust
+    from derived import read_files
+
     universe=drive.json("US/CURRENT_UNIVERSE.json")
     active={x["security_id"]:x for x in universe["securities"] if x.get("listing_status")=="ACTIVE"}
     base_asof=universe.get("as_of")
@@ -555,7 +558,7 @@ def _build_snapshot(drive, asof: str) -> tuple[str,list[list[dict]],list[dict]]:
         name=item["name"]
         if not (len(name)==10 and name[4]=="-" and name[7]=="-"):
             continue
-        if base_asof and name<=base_asof or name>asof:
+        if (base_asof and name<=base_asof) or name>asof:
             continue
         for f in drive.list("US/DAILY/"+name):
             if f["name"].endswith((".gz",".gzip")):
@@ -563,41 +566,63 @@ def _build_snapshot(drive, asof: str) -> tuple[str,list[list[dict]],list[dict]]:
                     if row.get("security_id") in active:
                         daily[row["security_id"]][row.get("date") or row.get("trade_date")]=row
 
+    patches=defaultdict(list)
+    for path in read_files(drive,"US","REPAIR_PATCH",".json"):
+        payload=drive.json(path)
+        items=payload.get("items") if isinstance(payload,dict) else None
+        if isinstance(items,list):
+            for patch in items:
+                if patch.get("security_id") in active:
+                    patches[patch["security_id"]].append(patch)
+        elif isinstance(payload,dict) and payload.get("security_id") in active:
+            patches[payload["security_id"]].append(payload)
+    events=[]
+    for path in read_files(drive,"US","CORPORATE_ACTIONS",".json"):
+        events.extend(drive.json(path))
+
     drive.folder(snapshot,create=True)
     uni_doc={"schema":"HUNTER_QUARTER_SNAPSHOT_V1","snapshot_name":snapshot,
              "market":"US","as_of":asof,"active_count":len(active),
              "securities":[active[k] for k in sorted(active)]}
     drive.put(snapshot+"/US_ACTIVE_UNIVERSE.json",_compact(uni_doc),immutable=True)
 
-    groups=[]
     part_manifest=[]
     base_files=sorted(x["name"] for x in drive.list("US/BASE") if x["name"].endswith(".ndjson.gz"))
     seen=set()
+    total_rows=0
     for part_no,name in enumerate(base_files,1):
-        by=defaultdict(dict)
+        by=defaultdict(list)
         for row in _parse_gz_ndjson(drive.read("US/BASE/"+name)):
             sid=row.get("security_id")
             if sid in active:
-                by[sid][row["date"]]=row
+                by[sid].append(row)
         out=[]
         for sid in sorted(by):
-            by[sid].update(daily.get(sid,{}))
-            rows=sorted(by[sid].values(),key=lambda x:x["date"])[-501:]
-            groups.append(rows); seen.add(sid); out.extend(rows)
+            rows=compose(by[sid],patches[sid],list(daily.get(sid,{}).values()))
+            rows=[r for r in split_adjust(rows,events)
+                  if (r.get("trade_date") or r.get("date"))<=asof]
+            if rows:
+                seen.add(sid); out.extend(rows)
         payload=_write_gz_ndjson(out)
         pname=f"US_ACTIVE_OHLC_PART_{part_no:04d}.ndjson.gz"
         drive.put(snapshot+"/"+pname,payload,"application/x-gzip",immutable=True)
+        total_rows+=len(out)
         part_manifest.append({"name":pname,"rows":len(out),"bytes":len(payload),"sha256":_sha(payload)})
-    # New listings with no historical BASE are still frozen with all available DAILY.
+
+    # ACTIVE new listings without BASE history are frozen with every available
+    # canonical DAILY/repair row; quarterly snapshots never truncate to 501.
     tail=[]
     for sid in sorted(set(active)-seen):
-        rows=sorted(daily.get(sid,{}).values(),key=lambda x:x["date"])[-501:]
+        rows=compose([],patches[sid],list(daily.get(sid,{}).values()))
+        rows=[r for r in split_adjust(rows,events)
+              if (r.get("trade_date") or r.get("date"))<=asof]
         if rows:
-            groups.append(rows); tail.extend(rows)
+            tail.extend(rows)
     if tail:
         payload=_write_gz_ndjson(tail)
         pname=f"US_ACTIVE_OHLC_PART_{len(part_manifest)+1:04d}.ndjson.gz"
         drive.put(snapshot+"/"+pname,payload,"application/x-gzip",immutable=True)
+        total_rows+=len(tail)
         part_manifest.append({"name":pname,"rows":len(tail),"bytes":len(payload),"sha256":_sha(payload)})
 
     bench_name=f"BENCHMARK_ETF_12_501_{asof.replace('-','')}.ndjson.gz"
@@ -612,10 +637,11 @@ def _build_snapshot(drive, asof: str) -> tuple[str,list[list[dict]],list[dict]]:
     bench=_parse_gz_ndjson(bench_bytes)
     manifest={"schema":"HUNTER_QUARTER_SNAPSHOT_V1","snapshot":snapshot,"market":"US","as_of":asof,
               "semantic":"IMMUTABLE_READ_ONLY_BY_NAME_AND_SHA256","active_count":len(active),
+              "stock_ohlc_rows":total_rows,"stock_ohlc_scope":"ALL_CANONICAL_AVAILABLE_THROUGH_ASOF",
               "parts":part_manifest,"benchmark_etfs":list(BENCHMARK_ETFS),
               "benchmark_sha256":_sha(bench_bytes)}
     drive.put(snapshot+"/MANIFEST.json",_compact(manifest),immutable=True)
-    return snapshot,groups,bench
+    return snapshot,_load_snapshot_groups(drive,snapshot),bench
 
 
 def _quarter_name(asof: str) -> str:

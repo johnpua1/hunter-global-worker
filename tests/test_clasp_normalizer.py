@@ -31,10 +31,12 @@ class ClaspNormalizerTests(unittest.TestCase):
             self.assertFalse((root / "Other.ts").exists())
             self.assertIn(("Gateway.js", "Gateway.gs"), removed)
 
-    def test_deploy_does_not_parse_list_deployments_as_a_gate(self):
+    def test_deploy_resolves_and_updates_versioned_deployment(self):
         script = (ROOT / "cloudrun" / "deploy-monthly-full.sh").read_text(encoding="utf-8")
         self.assertNotIn('list-deployments | grep', script)
-        self.assertIn('create-deployment --deploymentId "$DEPLOYMENT_ID"', script)
+        self.assertNotIn('create-deployment --deploymentId', script)
+        self.assertIn('resolve-clasp-deployment.py', script)
+        self.assertIn('update-deployment "$DEPLOYMENT_ID"', script)
 
     def test_deploy_removes_clone_gateway_before_copy_and_checks_before_push(self):
         script = (ROOT / "cloudrun" / "deploy-monthly-full.sh").read_text(encoding="utf-8")

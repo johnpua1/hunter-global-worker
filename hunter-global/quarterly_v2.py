@@ -176,7 +176,7 @@ def _metric_for_signal(rows: list[dict], state: list[int], side: int, h: int,
                        split: dict[str,Any], segment: str, seed_key: str) -> dict:
     sig: dict[str, list[int]] = defaultdict(list)
     base: dict[str, list[int]] = defaultdict(list)
-    signal_name = seed_key.split("|")[1] if seed_key.startswith("D1|") else seed_key.split("|")[1]
+    parts=seed_key.split("|")\n    signal_name = parts[2] if seed_key.startswith("D1|") else parts[1]
     minimum = {"S1":50, "S4":50, "S2":49, "S3":199}[signal_name]
     for i, row in enumerate(rows):
         if i < minimum or _segment(row["date"], split) != segment:
@@ -279,7 +279,7 @@ def direction_backtest(etf_rows: list[dict], split: dict[str,Any]) -> dict:
                 for side_name,side in (("LONG",1),("SHORT",-1)):
                     for segment in ("IS","FINAL_OOS"):
                         m=_metric_for_signal(rows,states[ticker][signal],side,h,split,segment,
-                            f"D1|{signal}|{h}|{side_name}|{segment}")
+                            f"D1|{ticker}|{signal}|{h}|{side_name}|{segment}")
                         candidates.append({"ticker":ticker,"signal":signal,"H":h,
                                            "side":side_name,"segment":segment,**m})
 

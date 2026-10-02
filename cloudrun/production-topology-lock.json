@@ -1,0 +1,87 @@
+{
+  "schema": "HUNTER_PRODUCTION_TOPOLOGY_LOCK_V1",
+  "status": "LOCKED",
+  "change_policy": "EXPLICIT_PUA_ONLY",
+  "region": "us-central1",
+  "jobs": [
+    {
+      "id": "US_DAILY",
+      "name": "hunter-us-daily",
+      "entrypoint": "/app/runner.py",
+      "args": [
+        "--mode",
+        "auto",
+        "--market",
+        "US"
+      ],
+      "trigger": {
+        "authority": "APPS_SCRIPT",
+        "handler": "dailyUS",
+        "timezone": "Asia/Kuala_Lumpur",
+        "window_myt": "06:00-07:00"
+      },
+      "writer_scope": "US"
+    },
+    {
+      "id": "HK_DAILY",
+      "name": "hunter-hk-daily",
+      "entrypoint": "/app/runner.py",
+      "args": [
+        "--mode",
+        "auto",
+        "--market",
+        "HK"
+      ],
+      "trigger": {
+        "authority": "APPS_SCRIPT",
+        "handler": "dailyHK",
+        "timezone": "Asia/Kuala_Lumpur",
+        "window_myt": "18:00-19:00"
+      },
+      "writer_scope": "HK"
+    },
+    {
+      "id": "MAINTENANCE",
+      "name": "hunter-maintenance",
+      "entrypoint": "/app/maintenance.py",
+      "args": [],
+      "trigger": {
+        "authority": "CLOUD_SCHEDULER",
+        "scheduler": "hunter-maintenance",
+        "cron": "0 20 * * *",
+        "timezone": "Asia/Kuala_Lumpur"
+      },
+      "writer_scope": "MAINT"
+    },
+    {
+      "id": "US_MONTHLY",
+      "name": "hunter-monthly-v2",
+      "entrypoint": "/app/runner.py",
+      "args": [
+        "--mode",
+        "monthly"
+      ],
+      "trigger": {
+        "authority": "APPS_SCRIPT",
+        "handler": "monthlyV2",
+        "mode": "ONE_SHOT_REARM",
+        "first_check_day": 2,
+        "time_myt": "08:00",
+        "gate": "US_DAILY_FIRST_COMPLETED_SESSION_OF_MONTH"
+      },
+      "writer_scope": "MONTH"
+    }
+  ],
+  "invariants": [
+    "EXACTLY_FOUR_PRODUCTION_JOBS",
+    "NO_QUARTERLY_EXECUTION_PATH",
+    "NO_DUAL_TRIGGER_AUTHORITY",
+    "US_HK_DAILY_APPS_SCRIPT_ONLY",
+    "MAINTENANCE_CLOUD_SCHEDULER_ONLY",
+    "MONTHLY_APPS_SCRIPT_ONLY",
+    "IMAGE_TAG_MUST_EQUAL_RELEASE_SHA",
+    "ACTIVE_POINTER_MONTH_WRITER_ONLY",
+    "BASE_SEALED",
+    "FAIL_CLOSED_ON_DRIFT"
+  ]
+}

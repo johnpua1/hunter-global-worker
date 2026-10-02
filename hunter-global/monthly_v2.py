@@ -721,7 +721,7 @@ def _month_name(asof: str) -> str:
     return f"MONTH_{d.year}-{d.month:02d}"
 
 
-def run_monthly(drive, snapshot_name: str | None = None, validation: bool = False) -> dict:
+def run_monthly(drive, snapshot_name: str | None = None, validation: bool = False,\n                commit_pointer: bool = True) -> dict:
     checkpoint=drive.json("US/CONTROL/DAILY_CHECKPOINT.json")
     asof=checkpoint.get("last_completed_date") or checkpoint.get("as_of")
     if not asof:
@@ -817,21 +817,22 @@ def run_monthly(drive, snapshot_name: str | None = None, validation: bool = Fals
             if prior.get(key) != comparable.get(key):
                 raise RuntimeError("ACTIVE_POINTER_SAME_MONTH_CONFLICT:"+key)
         pointer=prior
-    else:
+    elif commit_pointer:
         drive.put("ACTIVE_POINTER",_compact(pointer),
                   expected_sha=_sha(prior_raw) if prior_raw is not None else None)
 
-    notice_path="US/CONTROL/MONTH_NOTICE.json"
-    notice_raw=drive.read(notice_path) if drive.file(notice_path) else None
-    notice={"schema":"INVESTMENT_V2_MONTH_NOTICE_V2","month_file":month,
-            "pending":True,"pointer_version":pointer["version"],
-            "created_at_myt":now,"previous":pointer["previous"],
-            "current":{"long_direction_signal":pointer["long_direction_signal"],
-                       "short_direction_signal":pointer["short_direction_signal"],
-                       "long_vertical_baseline":pointer["long_vertical_baseline"],
-                       "short_vertical_baseline":pointer["short_vertical_baseline"],
-                       "direction_detail":pointer["direction_detail"]}}
-    drive.put(notice_path,_compact(notice),
-              expected_sha=_sha(notice_raw) if notice_raw is not None else None)
+    if commit_pointer:
+        notice_path="US/CONTROL/MONTH_NOTICE.json"
+        notice_raw=drive.read(notice_path) if drive.file(notice_path) else None
+        notice={"schema":"INVESTMENT_V2_MONTH_NOTICE_V2","month_file":month,
+                "pending":True,"pointer_version":pointer["version"],
+                "created_at_myt":now,"previous":pointer["previous"],
+                "current":{"long_direction_signal":pointer["long_direction_signal"],
+                           "short_direction_signal":pointer["short_direction_signal"],
+                           "long_vertical_baseline":pointer["long_vertical_baseline"],
+                           "short_vertical_baseline":pointer["short_vertical_baseline"],
+                           "direction_detail":pointer["direction_detail"]}}
+        drive.put(notice_path,_compact(notice),
+                  expected_sha=_sha(notice_raw) if notice_raw is not None else None)
     return {"month":month,"snapshot":snapshot,"pointer":pointer,
             "validation":validation_result}

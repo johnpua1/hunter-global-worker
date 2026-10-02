@@ -27,6 +27,7 @@ G178_IS_END = "2025-09-30"
 G178_OOS_START = "2025-10-01"
 G178_OOS_END = "2026-09-22"
 G178_IS_RATIO = 249 / 494
+G178_EVAL_RATIO = 494 / 501
 VALIDATION_SNAPSHOT = "SNAPSHOT_2026-10-01"
 VALIDATION_MANIFEST_SHA = "6dcd6cb9b5abccaa2bc265a1e4a7678ed7edc4c0653c67e2b7f54eeef10260c5"
 
@@ -82,14 +83,20 @@ def _dynamic_split(dates: list[str]) -> dict[str, str]:
     dates = sorted(dict.fromkeys(dates))
     if len(dates) < 100:
         raise RuntimeError("QUARTER_SPLIT_INSUFFICIENT_DATES")
-    cut = max(1, min(len(dates)-1, round(len(dates) * G178_IS_RATIO)))
+    # G178 labelled 494 of the 501 benchmark sessions: 249 IS + 245
+    # Final-OOS, leaving the latest 7 sessions outside the research split.
+    # Preserve both proportions when the rolling benchmark window is recut.
+    eval_n = max(2, min(len(dates), round(len(dates) * G178_EVAL_RATIO)))
+    cut = max(1, min(eval_n-1, round(eval_n * G178_IS_RATIO)))
     return {
         "mode": "G178_RATIO_RECUT",
         "ratio_is": G178_IS_RATIO,
+        "ratio_evaluated": G178_EVAL_RATIO,
         "is_start": dates[0],
         "is_end": dates[cut-1],
         "oos_start": dates[cut],
-        "oos_end": dates[-1],
+        "oos_end": dates[eval_n-1],
+        "unlabelled_tail_sessions": len(dates)-eval_n,
     }
 
 

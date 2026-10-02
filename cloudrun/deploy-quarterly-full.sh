@@ -4,22 +4,24 @@ set +x
 
 : "${GCP_PROJECT_ID:=rgs-hunter-global}"
 REGION="${GCP_REGION:-us-central1}"
-REPO_URL="https://github.com/johnpua1/hunter-global-worker.git"
 CLASP="@google/clasp@3.4.1"
 WORK_ROOT="${HOME}/hunter-quarterly-release"
-REPO_DIR="${WORK_ROOT}/repo"
 SCRIPT_DIR="${WORK_ROOT}/apps-script"
 URL_SECRET="APPS_SCRIPT_WEBAPP_URL"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+MERGED_MAIN_SHA="$(git rev-parse HEAD)"
+if [[ -n "${EXPECTED_SHA:-}" && "$MERGED_MAIN_SHA" != "$EXPECTED_SHA" ]]; then
+  echo "HEAD mismatch: expected $EXPECTED_SHA, got $MERGED_MAIN_SHA" >&2
+  exit 1
+fi
+export MERGED_MAIN_SHA GCP_PROJECT_ID GCP_REGION="$REGION"
 
 gcloud config set project "$GCP_PROJECT_ID" >/dev/null
 gcloud auth list --filter=status:ACTIVE --format='value(account)' | grep -q . || gcloud auth login --no-launch-browser
 
 rm -rf "$WORK_ROOT"
-mkdir -p "$WORK_ROOT"
-git clone --depth=1 "$REPO_URL" "$REPO_DIR"
-cd "$REPO_DIR"
-MERGED_MAIN_SHA="$(git rev-parse HEAD)"
-export MERGED_MAIN_SHA GCP_PROJECT_ID GCP_REGION="$REGION"
+mkdir -p "$SCRIPT_DIR"
 
 # clasp OAuth is user-scoped and is the only interactive step. Reuse an
 # existing login when available; otherwise print the Google authorization URL
@@ -48,8 +50,8 @@ mkdir -p "$SCRIPT_DIR"
 cd "$SCRIPT_DIR"
 npx -y "$CLASP" clone-script "$SCRIPT_ID"
 test -f .clasp.json
-cp "$REPO_DIR/bridge/Gateway.gs" "$SCRIPT_DIR/Gateway.gs"
-cp "$REPO_DIR/bridge/appsscript.json" "$SCRIPT_DIR/appsscript.json"
+cp "$ROOT/bridge/Gateway.gs" "$SCRIPT_DIR/Gateway.gs"
+cp "$ROOT/bridge/appsscript.json" "$SCRIPT_DIR/appsscript.json"
 
 # Preserve every other remote project file obtained by clone-script; only the
 # two version-controlled bridge files above are replaced.
@@ -76,5 +78,5 @@ for _ in range(8):
 raise SystemExit("Bridge health verification failed: "+repr(last))
 PY
 
-cd "$REPO_DIR"
+cd "$ROOT"
 bash cloudrun/deploy-quarterly.sh

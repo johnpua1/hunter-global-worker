@@ -205,7 +205,7 @@ def direction_backtest(etf_rows: list[dict], split: dict[str,str]) -> dict:
                     for segment in ("IS","FINAL_OOS"):
                         warmup = {"S1":50,"S2":49,"S3":199,"S4":50}[signal]
                         m = _metric_for_signal(rows, states[ticker][signal], side, h, split, segment,
-                                               f"{ticker}|{signal}|{h}|{side_name}|{segment}",
+                                               f"D1|{ticker}|{signal}|{h}|{side_name}|{segment}",
                                                warmup)
                         candidates.append({"ticker":ticker,"signal":signal,"H":h,
                                            "side":side_name,"segment":segment,**m})

@@ -647,9 +647,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("probe", "mini", "base", "daily", "daily-core", "auto",
                                            "repair", "universe", "options", "analytics",
-                                           "bootstrap", "calendar"), default="probe")
+                                           "bootstrap", "calendar", "quarterly"), default="probe")
     parser.add_argument("--market", choices=MARKETS, help="Run one market in an independent job")
     parser.add_argument("--as-of", help="Explicit historical close for calendar/derived")
+    parser.add_argument("--snapshot", help="Use an existing immutable SNAPSHOT_<date> for quarterly mode")
+    parser.add_argument("--validation", action="store_true",
+                        help="Require exact G178 validation statuses in quarterly mode")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     from production_guard import check_at_start
@@ -668,6 +671,11 @@ def main():
     if os.getenv("HUNTER_ACTIONS_CUTOVER") != "CONFIRMED":
         raise RuntimeError("SINGLE_WRITER_NOT_CONFIRMED: disable Apps Script triggers first")
     workers = max(1, min(10, int(os.getenv("FETCH_WORKERS", "6"))))
+    if args.mode == "quarterly":
+        from quarterly_v2 import run_quarterly
+        LOG.info("quarterly result=%s",
+                 run_quarterly(drive, snapshot_name=args.snapshot, validation=args.validation))
+        return
     if args.mode == "base":
         raise RuntimeError("BASE_SEALED")
     if args.mode == "repair":

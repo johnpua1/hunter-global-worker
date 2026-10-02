@@ -30,7 +30,8 @@ if ! npx -y "$CLASP" show-authorized-user --json >/dev/null 2>&1; then
   npx -y "$CLASP" login --no-localhost
 fi
 
-BRIDGE_URL="$(gcloud secrets versions access latest --secret "$URL_SECRET" --project "$GCP_PROJECT_ID")"\nexport BRIDGE_URL
+BRIDGE_URL="$(gcloud secrets versions access latest --secret "$URL_SECRET" --project "$GCP_PROJECT_ID")"
+export BRIDGE_URL
 DEPLOYMENT_ID="$(printf '%s' "$BRIDGE_URL" | sed -n 's#^https://script.google.com/macros/s/\([^/]*\)/exec$#\1#p')"
 test -n "$DEPLOYMENT_ID"
 

@@ -38,6 +38,13 @@ class ClaspNormalizerTests(unittest.TestCase):
         self.assertIn('resolve-clasp-deployment.py', script)
         self.assertIn('update-deployment "$DEPLOYMENT_ID"', script)
 
+    def test_monthly_deploy_retries_service_account_propagation(self):
+        script = (ROOT / "cloudrun" / "deploy-monthly.sh").read_text(encoding="utf-8")
+        self.assertIn('SERVICE_ACCOUNT_PROPAGATION_TIMEOUT', script)
+        self.assertIn('SECRET_IAM_BINDING_PROPAGATION_TIMEOUT', script)
+        self.assertIn('for attempt in $(seq 1 12)', script)
+        self.assertIn('gcloud secrets add-iam-policy-binding "$secret"', script)
+
     def test_deploy_removes_clone_gateway_before_copy_and_checks_before_push(self):
         script = (ROOT / "cloudrun" / "deploy-monthly-full.sh").read_text(encoding="utf-8")
         rm_pos = script.index('rm -f "$SCRIPT_DIR/Gateway.js" "$SCRIPT_DIR/Gateway.ts" "$SCRIPT_DIR/Gateway.gs"')

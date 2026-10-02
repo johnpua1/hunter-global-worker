@@ -25,6 +25,8 @@ for secret in "$URL_SECRET" "$LEGACY_KEY_SECRET"; do
   gcloud secrets versions list "$secret" --project "$GCP_PROJECT_ID"     --filter='state=ENABLED' --format='value(name)' | grep -q .
 done
 
+BRIDGE_URL="$(gcloud secrets versions access latest --secret "$URL_SECRET" --project "$GCP_PROJECT_ID")"
+
 # Reuse the monthly Bridge credential when a previous partial deployment
 # already created it. Only bootstrap on a true first install.
 MONTH_SECRET_READY=0
@@ -36,7 +38,6 @@ if gcloud secrets describe "$MONTH_KEY_SECRET" --project "$GCP_PROJECT_ID" >/dev
 fi
 
 if [[ "$MONTH_SECRET_READY" != "1" ]]; then
-  BRIDGE_URL="$(gcloud secrets versions access latest --secret "$URL_SECRET" --project "$GCP_PROJECT_ID")"
   LEGACY_KEY="$(gcloud secrets versions access latest --secret "$LEGACY_KEY_SECRET" --project "$GCP_PROJECT_ID")"
   BOOTSTRAP_JSON="$(BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" \
     python "$ROOT/cloudrun/apps-script-post.py" --op bootstrap_month_key --raw)"

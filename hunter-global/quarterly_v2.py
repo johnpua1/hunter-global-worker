@@ -186,10 +186,12 @@ def direction_backtest(etf_rows: list[dict], split: dict[str,str]) -> dict:
     for row in etf_rows:
         if row.get("ticker") in INDEXES:
             by_ticker[row["ticker"]].append(row)
+    positions = {}
     for ticker in INDEXES:
         by_ticker[ticker].sort(key=lambda x:x["date"])
         if len(by_ticker[ticker]) < 200:
             raise RuntimeError("D1_INDEX_HISTORY_MISSING:"+ticker)
+        positions[ticker] = {row["date"]: i for i,row in enumerate(by_ticker[ticker])}
 
     candidates = []
     states = {}
@@ -214,46 +216,102 @@ def direction_backtest(etf_rows: list[dict], split: dict[str,str]) -> dict:
         eligible.sort(key=lambda x:(-x["wr"], -x["delta"], x["ticker"], x["signal"], x["H"]))
         if eligible:
             frozen[side] = eligible[0]
-            f = eligible[0]
+            fz = eligible[0]
             oos = next(x for x in candidates if x["segment"]=="FINAL_OOS" and
-                       x["side"]==side and x["ticker"]==f["ticker"] and
-                       x["signal"]==f["signal"] and x["H"]==f["H"])
+                       x["side"]==side and x["ticker"]==fz["ticker"] and
+                       x["signal"]==fz["signal"] and x["H"]==fz["H"])
             standalone[side] = {**oos, "pass": bool(oos["wr"] is not None and oos["wr"] >= .55
                 and oos["delta_ci"][0] is not None and oos["delta_ci"][0] > 0)}
 
+    all_dates = [r["date"] for r in by_ticker["SPY"]
+                 if split["oos_start"] <= r["date"] <= split["oos_end"]]
     online = {s:standalone[s] for s in ("LONG","SHORT") if standalone[s] and standalone[s]["pass"]}
-    # Convergence replay.  D2 only emits a direction when exactly one loaded
-    # signal is active.  Recompute each loaded direction on emitted dates.
     replay_rounds = []
-    while True:
-        if not online:
-            replay_rounds.append({"long_days":0,"short_days":0,"coverage":0.0})
-            break
-        all_dates = sorted(set(r["date"] for rows in by_ticker.values() for r in rows
-                               if split["oos_start"] <= r["date"] <= split["oos_end"]))
-        emitted = {"LONG":[],"SHORT":[]}
+
+    def active_on(side: str, rec: dict, date: str) -> bool:
+        i = positions[rec["ticker"]].get(date)
+        if i is None:
+            return False
+        want = 1 if side == "LONG" else -1
+        return states[rec["ticker"]][rec["signal"]][i] == want
+
+    def outcome(rec: dict, side: str, date: str) -> int | None:
+        rows = by_ticker[rec["ticker"]]
+        i = positions[rec["ticker"]].get(date)
+        if i is None:
+            return None
+        entry_i, exit_i = i + 1, i + 1 + int(rec["H"])
+        if exit_i >= len(rows):
+            return None
+        entry = float(rows[entry_i]["open"])
+        final = float(rows[exit_i]["close"])
+        if not (entry > 0 and math.isfinite(entry) and math.isfinite(final)):
+            return None
+        return int(final > entry) if side == "LONG" else int(final < entry)
+
+    for round_no in (1,2):
+        emitted = {"LONG":[], "SHORT":[]}
         for date in all_dates:
-            active=[]
-            for side, rec in online.items():
-                rows=by_ticker[rec["ticker"]]
-                pos=next((i for i,r in enumerate(rows) if r["date"]==date),None)
-                if pos is not None:
-                    want=1 if side=="LONG" else -1
-                    if states[rec["ticker"]][rec["signal"]][pos]==want:
-                        active.append(side)
-            if len(active)==1:
+            active = [side for side,rec in online.items() if active_on(side,rec,date)]
+            if len(active) == 1:
                 emitted[active[0]].append(date)
-        replay_rounds.append({"long_days":len(emitted["LONG"]),"short_days":len(emitted["SHORT"]),
-                              "coverage":(len(emitted["LONG"])+len(emitted["SHORT"]))/len(all_dates) if all_dates else 0.0})
-        # The standalone acceptance is already the stricter gate in the G178
-        # calibration; replay can only remove, never add/replace a direction.
-        break
-    final_online = sorted(online)
+
+        metrics = {}
+        deleted = []
+        for side,rec in list(online.items()):
+            sig_by: dict[str,list[int]] = defaultdict(list)
+            base_by: dict[str,list[int]] = defaultdict(list)
+            for date in emitted[side]:
+                value = outcome(rec,side,date)
+                if value is not None:
+                    sig_by[date].append(value)
+            for date in all_dates:
+                value = outcome(rec,side,date)
+                if value is not None:
+                    base_by[date].append(value)
+            sv=[v for xs in sig_by.values() for v in xs]
+            bv=[v for xs in base_by.values() for v in xs]
+            wr=sum(sv)/len(sv) if sv else None
+            bwr=sum(bv)/len(bv) if bv else None
+            delta=wr-bwr if wr is not None and bwr is not None else None
+            low,high=_block_bootstrap_delta(
+                sig_by,base_by,
+                f"REPLAY|{round_no}|{rec['ticker']}|{rec['signal']}|{rec['H']}|{side}|FINAL_OOS"
+            ) if sv and bv else (None,None)
+            metrics[side]={"n":len(sv),"benchmark_n":len(bv),"wr":wr,
+                           "benchmark_wr":bwr,"delta":delta,"delta_ci":[low,high]}
+            if low is None or low <= 0:
+                deleted.append(side)
+
+        counts={"LONG":len(emitted["LONG"]),"SHORT":len(emitted["SHORT"])}
+        counts["NONE"]=max(0,len(all_dates)-counts["LONG"]-counts["SHORT"])
+        counts["total"]=len(all_dates)
+        counts["coverage"]=(counts["LONG"]+counts["SHORT"])/len(all_dates) if all_dates else 0.0
+        replay_rounds.append({"round":round_no,"active_in":sorted(online),
+                              "metrics":metrics,"counts":counts,"deleted":sorted(deleted)})
+        if not deleted:
+            break
+        for side in deleted:
+            online.pop(side,None)
+        if not online:
+            break
+
+    final_online=sorted(online)
+    daily_direction={}
+    for date in all_dates:
+        active=[side for side,rec in online.items() if active_on(side,rec,date)]
+        daily_direction[date]=active[0] if len(active)==1 else "NONE"
+
+    final_metrics=(replay_rounds[-1]["metrics"] if replay_rounds else {})
+    def final_record(side: str):
+        if side not in online:
+            return "无合格信号"
+        return {**online[side], "replay":final_metrics.get(side)}
+
     return {"split":split,"candidates":candidates,"is_selected":frozen,
             "final_oos_standalone":standalone,"replay_rounds":replay_rounds,
-            "final_online":final_online,
-            "LONG":"无合格信号" if "LONG" not in final_online else standalone["LONG"],
-            "SHORT":"无合格信号" if "SHORT" not in final_online else standalone["SHORT"]}
+            "final_online":final_online,"daily_direction":daily_direction,
+            "LONG":final_record("LONG"),"SHORT":final_record("SHORT")}
 
 
 def _vertical_p(side: str, s0: float, st: float) -> float:

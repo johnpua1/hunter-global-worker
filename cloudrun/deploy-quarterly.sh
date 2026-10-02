@@ -69,7 +69,7 @@ ACTION=create
 if gcloud run jobs describe "$JOB" --region "$REGION" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
   ACTION=update
 fi
-gcloud run jobs "$ACTION" "$JOB"   --image "$IMAGE" --region "$REGION" --project "$GCP_PROJECT_ID"   --service-account "$SA" --cpu 1 --memory 2Gi --tasks 1   --task-timeout 60m --max-retries 0   --set-env-vars 'HUNTER_ACTIONS_CUTOVER=CONFIRMED,FETCH_WORKERS=10'   --set-secrets "APPS_SCRIPT_WEBAPP_URL=${URL_SECRET}:latest,APPS_SCRIPT_SHARED_KEY=${QUARTER_KEY_SECRET}:latest"   --args='--mode,quarterly'
+gcloud run jobs "$ACTION" "$JOB"   --image "$IMAGE" --region "$REGION" --project "$GCP_PROJECT_ID"   --service-account "$SA" --cpu 2 --memory 8Gi --tasks 1   --task-timeout 60m --max-retries 0   --set-env-vars 'HUNTER_ACTIONS_CUTOVER=CONFIRMED,FETCH_WORKERS=10'   --set-secrets "APPS_SCRIPT_WEBAPP_URL=${URL_SECRET}:latest,APPS_SCRIPT_SHARED_KEY=${QUARTER_KEY_SECRET}:latest"   --args='--mode,quarterly'
 
 # Immediate real-data regression. This execution overrides args only and leaves
 # the production job definition unchanged. ACTIVE_POINTER is committed by the

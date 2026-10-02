@@ -25,6 +25,10 @@ function doPost(e) {
     if (op === 'folder') {
       if (body.create === true && /^(US|HK)\/BASE(?:\/|$)/.test(path))
         throw new Error('BASE_SEALED');
+      if (body.create === true &&
+          (/^SNAPSHOT_\d{4}-\d{2}-\d{2}(?:\/|$)/.test(path) ||
+           /^QUARTER_\d{4}Q[1-4](?:\/|$)/.test(path)) &&
+          scope !== 'QUARTER') throw new Error('QUARTER_WRITER_ONLY');
       var folder = bridgeFolder_(root, path, body.create === true);
       return bridgeJson_({ok: true, folder: {id: path, name: folder.getName()}});
     }
@@ -83,6 +87,7 @@ function bridgeAuthScope_(props, presented) {
     ['US', props.getProperty('BRIDGE_US_KEY')],
     ['HK', props.getProperty('BRIDGE_HK_KEY')],
     ['MAINT', props.getProperty('BRIDGE_MAINT_KEY')],
+    ['QUARTER', props.getProperty('BRIDGE_QUARTER_KEY')],
     ['LEGACY', props.getProperty('BRIDGE_SHARED_KEY')]
   ];
   for (var i = 0; i < keys.length; i++) {
@@ -95,6 +100,13 @@ function bridgeScopeAuthorize_(scope, op, path) {
   if (['folder','list','file','read','put','append'].indexOf(op) < 0)
     throw new Error('SCOPE_OP_DENIED');
   if (!path) throw new Error('SCOPE_ROOT_DENIED');
+  if (scope === 'QUARTER') {
+    if (/^US(?:\/|$)/.test(path) ||
+        /^SNAPSHOT_\d{4}-\d{2}-\d{2}(?:\/|$)/.test(path) ||
+        /^QUARTER_\d{4}Q[1-4](?:\/|$)/.test(path) ||
+        path === 'ACTIVE_POINTER') return;
+    throw new Error('SCOPE_PATH_DENIED');
+  }
   if (scope === 'US') {
     if (/^US(?:\/|$)/.test(path) || path === 'REPAIR_QUEUE.json') return;
     throw new Error('SCOPE_PATH_DENIED');
@@ -137,9 +149,13 @@ function bridgeRepairQueueScopeGuard_(scope, oldFile, bytes) {
 function bridgePath_(path) {
   if (typeof path !== 'string' || path.length > 240) throw new Error('INVALID_PATH');
   if (!path) return '';
-  if (path === 'REPAIR_QUEUE.json' || path === 'BASE_COMPLETE.json') return path;
+  if (path === 'REPAIR_QUEUE.json' || path === 'BASE_COMPLETE.json' ||
+      path === 'ACTIVE_POINTER') return path;
   var parts = path.split('/');
-  if (!/^(US|HK|_BRIDGE_TEST)$/.test(parts[0]) ||
+  var root = parts[0];
+  var quarterlyRoot = /^SNAPSHOT_\d{4}-\d{2}-\d{2}$/.test(root) ||
+      /^QUARTER_\d{4}Q[1-4]$/.test(root);
+  if ((!/^(US|HK|_BRIDGE_TEST)$/.test(root) && !quarterlyRoot) ||
       parts.length > 8 || parts.some(function (p) {
         return !p || p === '.' || p === '..' || !/^[A-Za-z0-9_.-]+$/.test(p);
       })) throw new Error('PATH_OUTSIDE_ROOT');
@@ -163,7 +179,8 @@ function bridgeFolder_(root, path, create) {
 function bridgeFile_(root, path) {
   if (!path) throw new Error('INVALID_FILE_PATH');
   var split = path.lastIndexOf('/');
-  if (split < 0 && path !== 'REPAIR_QUEUE.json' && path !== 'BASE_COMPLETE.json')
+  if (split < 0 && path !== 'REPAIR_QUEUE.json' && path !== 'BASE_COMPLETE.json' &&
+      path !== 'ACTIVE_POINTER')
     throw new Error('INVALID_FILE_PATH');
   var folder;
   try { folder = bridgeFolder_(root, split < 0 ? '' : path.slice(0, split), false); }
@@ -181,9 +198,15 @@ function bridgeSha_(bytes) {
   var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes);
   return digest.map(function (b) { return ('0' + (b & 255).toString(16)).slice(-2); }).join('');
 }
-function bridgeWritePolicy_(path, op) {
+function bridgeWritePolicy_(path, op, scope) {
   // Check the path before creating folders, staging a blob, or accepting an
   // identical-byte no-op. BASE is sealed even against an idempotent write.
+  var quarterlyControlled = path === 'ACTIVE_POINTER' ||
+      /^SNAPSHOT_\d{4}-\d{2}-\d{2}(?:\/|$)/.test(path) ||
+      /^QUARTER_\d{4}Q[1-4](?:\/|$)/.test(path) ||
+      path === 'US/CONTROL/QUARTER_NOTICE.json';
+  if (quarterlyControlled && scope !== 'QUARTER') throw new Error('QUARTER_WRITER_ONLY');
+  if (scope === 'QUARTER' && !quarterlyControlled) throw new Error('QUARTER_SCOPE_WRITE_DENIED');
   if (/^(US|HK)\/BASE\//.test(path)) throw new Error('BASE_SEALED');
   if (/^(US|HK)\/DAILY\//.test(path) && op !== 'append')
     throw new Error('DAILY_APPEND_ONLY');
@@ -219,8 +242,9 @@ function bridgeDailyKeys_(path, bytes) {
 }
 function bridgePut_(root, path, body, op, scope) {
   scope = scope || 'LEGACY';
-  bridgeWritePolicy_(path, op);
-  if (!path || (path.indexOf('/') < 0 && path !== 'REPAIR_QUEUE.json' && path !== 'BASE_COMPLETE.json'))
+  bridgeWritePolicy_(path, op, scope);
+  if (!path || (path.indexOf('/') < 0 && path !== 'REPAIR_QUEUE.json' && path !== 'BASE_COMPLETE.json' &&
+      path !== 'ACTIVE_POINTER'))
     throw new Error('INVALID_FILE_PATH');
   if (!/^[a-f0-9]{64}$/.test(body.sha256 || '') ||
       typeof body.data_base64 !== 'string' || body.data_base64.length > 14000000)
@@ -293,7 +317,8 @@ function hunterCloudConfig_() {
     project: props.getProperty('GCP_PROJECT_ID') || 'rgs-hunter-global',
     region: props.getProperty('GCP_REGION') || 'us-central1',
     usJob: props.getProperty('HUNTER_US_JOB') || 'hunter-us-daily',
-    hkJob: props.getProperty('HUNTER_HK_JOB') || 'hunter-hk-daily'
+    hkJob: props.getProperty('HUNTER_HK_JOB') || 'hunter-hk-daily',
+    quarterJob: props.getProperty('HUNTER_QUARTER_JOB') || 'hunter-quarterly-v2'
   };
 }
 
@@ -331,7 +356,9 @@ function hunterJobName_(marketOrJob) {
   var value = String(marketOrJob || '').toUpperCase();
   if (value === 'US') return cfg.usJob;
   if (value === 'HK') return cfg.hkJob;
-  if (marketOrJob === cfg.usJob || marketOrJob === cfg.hkJob) return String(marketOrJob);
+  if (value === 'QUARTER') return cfg.quarterJob;
+  if (marketOrJob === cfg.usJob || marketOrJob === cfg.hkJob ||
+      marketOrJob === cfg.quarterJob) return String(marketOrJob);
   throw new Error('UNKNOWN_HUNTER_JOB:' + marketOrJob);
 }
 
@@ -397,7 +424,8 @@ function hunterJobConfig_(job) {
 }
 
 function inspectHunterJobs() {
-  return {US: hunterJobConfig_('US'), HK: hunterJobConfig_('HK')};
+  return {US: hunterJobConfig_('US'), HK: hunterJobConfig_('HK'),
+          QUARTER: hunterJobConfig_('QUARTER')};
 }
 
 function runHunterJob_(job) {
@@ -414,6 +442,7 @@ function runHunterJob_(job) {
 
 function runUS() { return runHunterJob_('US'); }
 function runHK() { return runHunterJob_('HK'); }
+function runQuarterly() { return runHunterJob_('QUARTER'); }
 
 function dailyUS() { return runUS(); }
 function dailyHK() { return runHK(); }
@@ -553,4 +582,94 @@ function installAndVerify() {
 
 function verifyHunterDaily() {
   return installAndVerify();
+}
+
+/**
+ * V2 quarterly trigger.  The first live trigger is installed for the morning
+ * after the first US trading session.  Subsequent runs re-arm one quarter
+ * ahead.  If DAILY has not finished, retry the next MYT morning instead of
+ * running against a stale checkpoint.
+ */
+function hunterQuarterlyTriggerDate_(year, month1, day) {
+  return new Date(Date.UTC(year, month1 - 1, day, 0, 0, 0)); // 08:00 MYT
+}
+
+function clearQuarterlyTriggers_() {
+  ScriptApp.getProjectTriggers().forEach(function (trigger) {
+    if (trigger.getHandlerFunction() === 'quarterlyV2') ScriptApp.deleteTrigger(trigger);
+  });
+}
+
+function installQuarterlyTriggerAt(dateObj) {
+  ScriptApp.requireScopes(ScriptApp.AuthMode.FULL, [
+    'https://www.googleapis.com/auth/cloud-platform',
+    'https://www.googleapis.com/auth/script.external_request',
+    'https://www.googleapis.com/auth/drive',
+    'https://www.googleapis.com/auth/script.scriptapp'
+  ]);
+  clearQuarterlyTriggers_();
+  var trigger = ScriptApp.newTrigger('quarterlyV2').timeBased().at(dateObj).create();
+  PropertiesService.getScriptProperties().setProperty(
+      'HUNTER_QUARTER_NEXT_TRIGGER', dateObj.toISOString());
+  return {handler:'quarterlyV2', triggerId:trigger.getUniqueId(),
+          at:dateObj.toISOString(), myt:Utilities.formatDate(dateObj,'Asia/Kuala_Lumpur','yyyy-MM-dd HH:mm')};
+}
+
+function installFirstQuarterlyTrigger() {
+  // First US session of 2027Q1 = 2027-01-04; DAILY completes next MYT morning.
+  return installQuarterlyTriggerAt(hunterQuarterlyTriggerDate_(2027, 1, 5));
+}
+
+function hunterQuarterExpectedMonth_(dateText) {
+  var m = Number(String(dateText || '').slice(5,7));
+  return [1,4,7,10].indexOf(m) >= 0;
+}
+
+function hunterQuarterFirstWeek_(dateText) {
+  var d = Number(String(dateText || '').slice(8,10));
+  return d >= 1 && d <= 7;
+}
+
+function hunterQuarterNextCandidate_(checkpointDate) {
+  var y = Number(checkpointDate.slice(0,4));
+  var m = Number(checkpointDate.slice(5,7));
+  var nextM = m + 3;
+  if (nextM > 12) { nextM -= 12; y += 1; }
+  // Candidate starts on the second calendar day of the quarter. The handler
+  // self-retries by one day until DAILY proves the first US session is written.
+  return hunterQuarterlyTriggerDate_(y, nextM, 2);
+}
+
+function quarterlyV2() {
+  var props = PropertiesService.getScriptProperties();
+  var rootId = props.getProperty('HUNTER_GLOBAL_FOLDER_ID');
+  if (!rootId) throw new Error('ROOT_NOT_CONFIGURED');
+  var root = DriveApp.getFolderById(rootId);
+  var us = bridgeFolder_(root, 'US/CONTROL', false);
+  var files = us.getFilesByName('DAILY_CHECKPOINT.json');
+  if (!files.hasNext()) throw new Error('US_DAILY_CHECKPOINT_MISSING');
+  var checkpoint = JSON.parse(files.next().getBlob().getDataAsString('UTF-8'));
+  var dateText = String(checkpoint.last_completed_date || checkpoint.as_of || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateText)) throw new Error('US_DAILY_CHECKPOINT_DATE_INVALID');
+
+  if (!hunterQuarterExpectedMonth_(dateText) || !hunterQuarterFirstWeek_(dateText)) {
+    var retry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    retry.setUTCHours(0,0,0,0); // 08:00 MYT
+    return {ok:true, skipped:true, reason:'WAIT_FIRST_US_SESSION_DAILY',
+            checkpoint:dateText, next:installQuarterlyTriggerAt(retry)};
+  }
+  var result = runQuarterly();
+  installQuarterlyTriggerAt(hunterQuarterNextCandidate_(dateText));
+  return {ok:true, skipped:false, checkpoint:dateText, run:result};
+}
+
+function listQuarterlyTrigger() {
+  var rows = ScriptApp.getProjectTriggers().filter(function (trigger) {
+    return trigger.getHandlerFunction() === 'quarterlyV2';
+  }).map(function (trigger) {
+    return {handler:trigger.getHandlerFunction(), triggerId:trigger.getUniqueId(),
+            eventType:String(trigger.getEventType()), source:String(trigger.getTriggerSource())};
+  });
+  return {count:rows.length, triggers:rows,
+          configuredAt:PropertiesService.getScriptProperties().getProperty('HUNTER_QUARTER_NEXT_TRIGGER') || null};
 }

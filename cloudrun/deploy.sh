@@ -7,10 +7,10 @@ set +x
 : "${GCP_PROJECT_ID:?Set the existing standard Google Cloud project ID}"
 : "${MERGED_MAIN_SHA:?Set the verified merged main SHA}"
 REGION=us-central1
-IAM_MODE="${HUNTER_IAM_MODE:-legacy}"
+IAM_MODE="${HUNTER_IAM_MODE:-scoped}"
 case "$IAM_MODE" in
-  legacy|scoped) ;;
-  *) echo "HUNTER_IAM_MODE must be legacy or scoped" >&2; exit 2 ;;
+  scoped) ;;
+  *) echo "HUNTER_IAM_MODE is locked to scoped; legacy shared runtime identity is retired" >&2; exit 2 ;;
 esac
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"

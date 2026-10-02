@@ -138,9 +138,9 @@ def _direction_state(rows: list[dict]) -> dict[str, list[int]]:
     s1 = [0] * len(rows)
     state = 0
     for i in range(1, len(rows)):
-        cross = 1 if macd[i] > 0 >= macd[i-1] else (-1 if macd[i] < 0 <= macd[i-1] else 0)
+        cross = 1 if hist[i] > 0 >= hist[i-1] else (-1 if hist[i] < 0 <= hist[i-1] else 0)
         if cross:
-            state = cross if (hist[i] > 0 if cross > 0 else hist[i] < 0) else 0
+            state = cross
         s1[i] = state
     s2, s3, s4 = [0]*len(rows), [0]*len(rows), [0]*len(rows)
     for i, close in enumerate(closes):
@@ -154,11 +154,12 @@ def _direction_state(rows: list[dict]) -> dict[str, list[int]]:
 
 
 def _metric_for_signal(rows: list[dict], state: list[int], side: int, h: int,
-                       split: dict[str,str], segment: str, seed_key: str) -> dict:
+                       split: dict[str,str], segment: str, seed_key: str,
+                       available_from: int) -> dict:
     sig: dict[str, list[int]] = defaultdict(list)
     base: dict[str, list[int]] = defaultdict(list)
     for i, row in enumerate(rows):
-        if _segment(row["date"], split) != segment:
+        if i < available_from or _segment(row["date"], split) != segment:
             continue
         entry_i, exit_i = i + 1, i + 1 + h
         if exit_i >= len(rows):
@@ -202,8 +203,10 @@ def direction_backtest(etf_rows: list[dict], split: dict[str,str]) -> dict:
             for h in HORIZONS:
                 for side_name, side in (("LONG",1),("SHORT",-1)):
                     for segment in ("IS","FINAL_OOS"):
+                        warmup = {"S1":50,"S2":49,"S3":199,"S4":50}[signal]
                         m = _metric_for_signal(rows, states[ticker][signal], side, h, split, segment,
-                                               f"{ticker}|{signal}|{h}|{side_name}|{segment}")
+                                               f"{ticker}|{signal}|{h}|{side_name}|{segment}",
+                                               warmup)
                         candidates.append({"ticker":ticker,"signal":signal,"H":h,
                                            "side":side_name,"segment":segment,**m})
 

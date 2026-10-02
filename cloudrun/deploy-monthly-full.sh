@@ -51,11 +51,21 @@ mkdir -p "$SCRIPT_DIR"
 cd "$SCRIPT_DIR"
 npx -y "$CLASP" clone-script "$SCRIPT_ID"
 test -f .clasp.json
+
+# clasp can clone Apps Script sources as .js while this repository owns the
+# replacement as .gs. A directory containing both Gateway.js and Gateway.gs is
+# rejected as "Conflicting files found". Normalize any duplicate script
+# basenames first, then replace the managed Gateway source with exactly one
+# extension.
+python "$ROOT/cloudrun/normalize-clasp-dir.py" "$SCRIPT_DIR" --normalize
+rm -f "$SCRIPT_DIR/Gateway.js" "$SCRIPT_DIR/Gateway.ts" "$SCRIPT_DIR/Gateway.gs"
 cp "$ROOT/bridge/Gateway.gs" "$SCRIPT_DIR/Gateway.gs"
 cp "$ROOT/bridge/appsscript.json" "$SCRIPT_DIR/appsscript.json"
 
-# Preserve every other remote project file obtained by clone-script; only the
-# two version-controlled bridge files above are replaced.
+# Preserve unrelated remote files (for example Code.js and KeylessBuild.js),
+# but fail closed if any basename still exists with more than one script
+# extension before push.
+python "$ROOT/cloudrun/normalize-clasp-dir.py" "$SCRIPT_DIR"
 npx -y "$CLASP" push --force
 npx -y "$CLASP" list-deployments | grep -F "$DEPLOYMENT_ID" >/dev/null
 npx -y "$CLASP" create-deployment --deploymentId "$DEPLOYMENT_ID" \

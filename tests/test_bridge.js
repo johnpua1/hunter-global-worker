@@ -11,12 +11,14 @@ const scopedProps = {getProperty(name) {
     BRIDGE_US_KEY: 'us-key',
     BRIDGE_HK_KEY: 'hk-key',
     BRIDGE_MAINT_KEY: 'maint-key',
+    BRIDGE_QUARTER_KEY: 'quarter-key',
     BRIDGE_SHARED_KEY: 'legacy-key',
   })[name] || null;
 }};
 assert.equal(context.bridgeAuthScope_(scopedProps, 'us-key'), 'US');
 assert.equal(context.bridgeAuthScope_(scopedProps, 'hk-key'), 'HK');
 assert.equal(context.bridgeAuthScope_(scopedProps, 'maint-key'), 'MAINT');
+assert.equal(context.bridgeAuthScope_(scopedProps, 'quarter-key'), 'QUARTER');
 assert.equal(context.bridgeAuthScope_(scopedProps, 'legacy-key'), 'LEGACY');
 assert.throws(() => context.bridgeAuthScope_(scopedProps, 'wrong-key'), /UNAUTHORIZED/);
 assert.doesNotThrow(() => context.bridgeScopeAuthorize_('US', 'read', 'US/CURRENT_UNIVERSE.json'));
@@ -26,6 +28,11 @@ assert.throws(() => context.bridgeScopeAuthorize_('HK', 'read', 'US/CURRENT_UNIV
 assert.doesNotThrow(() => context.bridgeScopeAuthorize_('MAINT', 'read', 'US/CURRENT_UNIVERSE.json'));
 assert.doesNotThrow(() => context.bridgeScopeAuthorize_('MAINT', 'read', 'HK/CURRENT_UNIVERSE.json'));
 assert.throws(() => context.bridgeScopeAuthorize_('US', 'append', '_BRIDGE_TEST/DAILY/US/x.ndjson.gz'), /SCOPE_PATH_DENIED/);
+assert.doesNotThrow(() => context.bridgeScopeAuthorize_('QUARTER', 'read_chunk', 'SNAPSHOT_2026-10-01/US_ACTIVE_OHLC.csv.gz'));
+assert.doesNotThrow(() => context.bridgeScopeAuthorize_('QUARTER', 'read', 'US/CONTROL/DAILY_CHECKPOINT.json'));
+assert.throws(() => context.bridgeScopeAuthorize_('QUARTER', 'read', 'HK/CURRENT_UNIVERSE.json'), /SCOPE_PATH_DENIED/);
+assert.doesNotThrow(() => context.bridgeWritePolicy_('ACTIVE_POINTER', 'put', 'QUARTER'));
+assert.throws(() => context.bridgeWritePolicy_('ACTIVE_POINTER', 'put', 'LEGACY'), /QUARTER_WRITER_ONLY/);
 assert.throws(() => context.bridgeWritePolicy_('US/BASE/batch-0001.ndjson.gz', 'put'), /BASE_SEALED/);
 assert.throws(() => context.bridgeWritePolicy_('HK/BASE/batch-0001.ndjson.gz', 'append'), /BASE_SEALED/);
 assert.throws(() => context.bridgeWritePolicy_('HK/DAILY/2026-09-27/part-0001.ndjson.gz', 'put'), /DAILY_APPEND_ONLY/);

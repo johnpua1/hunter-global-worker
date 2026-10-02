@@ -59,6 +59,15 @@ class ProductionTopologyLockTests(unittest.TestCase):
         self.assertIn('job != "hunter-maintenance"', maint)
         self.assertIn("TOPOLOGY_RUNTIME_MISMATCH", maint)
 
+    def test_live_enforcer_updates_all_four_images_only(self):
+        source = (ROOT / "cloudrun" / "enforce-four-job-topology.sh").read_text(encoding="utf-8")
+        self.assertIn('gcloud builds submit "$ROOT" --tag "$IMAGE"', source)
+        for job in ("hunter-us-daily","hunter-hk-daily","hunter-maintenance","hunter-monthly-v2"):
+            self.assertIn(job, source)
+        self.assertIn('gcloud run jobs update "$job" --image "$IMAGE"', source)
+        self.assertIn('"USImage"', source)
+        self.assertIn('"MONTHImage"', source)
+
     def test_schedule_script_is_maintenance_only(self):
         source = (ROOT / "cloudrun" / "schedule.sh").read_text(encoding="utf-8")
         self.assertNotIn("upsert_schedule hunter-us-daily", source)

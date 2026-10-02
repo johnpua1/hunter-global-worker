@@ -718,7 +718,7 @@ def _g178_validation(direction: dict, baseline: dict) -> dict:
 
 def _month_name(asof: str) -> str:
     d=dt.date.fromisoformat(asof)
-    return f"MONTH_{d.year}Q{(d.month-1)//3+1}"
+    return f"MONTH_{d.year}-{d.month:02d}"
 
 
 def run_monthly(drive, snapshot_name: str | None = None, validation: bool = False) -> dict:
@@ -784,7 +784,7 @@ def run_monthly(drive, snapshot_name: str | None = None, validation: bool = Fals
         return {k:direction[side].get(k) for k in
                 ("ticker","signal","H","wr","benchmark_wr","delta","delta_ci","n")}
 
-    same_month=bool(prior and prior.get("month_file")==month and
+    same_month = bool(prior and prior.get("month_file")==month and
                       prior.get("snapshot")==snapshot and prior.get("as_of")==asof)
     pointer={"schema":"INVESTMENT_V2_ACTIVE_POINTER_V3",
              "version":int(prior.get("version",1)) if same_month else

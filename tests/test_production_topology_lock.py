@@ -49,6 +49,16 @@ class ProductionTopologyLockTests(unittest.TestCase):
         self.assertIn('"monthly"', source)
         self.assertNotIn('if args.mode == "quarterly":', source)
 
+    def test_runtime_guards_bind_job_names_to_entry_modes(self):
+        runner = (ROOT / "hunter-global" / "runner.py").read_text(encoding="utf-8")
+        maint = (ROOT / "hunter-global" / "maintenance.py").read_text(encoding="utf-8")
+        self.assertIn('"hunter-us-daily": ("auto", "US")', runner)
+        self.assertIn('"hunter-hk-daily": ("auto", "HK")', runner)
+        self.assertIn('"hunter-monthly-v2": ("monthly", None)', runner)
+        self.assertIn("TOPOLOGY_RUNTIME_MISMATCH", runner)
+        self.assertIn('job != "hunter-maintenance"', maint)
+        self.assertIn("TOPOLOGY_RUNTIME_MISMATCH", maint)
+
     def test_schedule_script_is_maintenance_only(self):
         source = (ROOT / "cloudrun" / "schedule.sh").read_text(encoding="utf-8")
         self.assertNotIn("upsert_schedule hunter-us-daily", source)

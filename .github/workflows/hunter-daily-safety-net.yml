@@ -2,12 +2,13 @@ name: Hunter DAILY safety net
 
 on:
   schedule:
-    # Safety net after the existing Apps Script / Cloud Run US window.
-    # 08:15 MYT Tue-Sat = 00:15 UTC Tue-Sat.
-    - cron: '15 0 * * 2-6'
-    # Safety net after the existing Apps Script / Cloud Run HK window.
-    # 19:30 MYT Mon-Fri = 11:30 UTC Mon-Fri.
-    - cron: '30 11 * * 1-5'
+    # Idempotent US fallback after the primary Apps Script / Cloud Run window.
+    # Repeat hourly so one delayed scheduler event cannot create a full-day gap.
+    # 08:15-12:15 MYT Tue-Sat = 00:15-04:15 UTC Tue-Sat.
+    - cron: '15 0-4 * * 2-6'
+    # Idempotent HK fallback after the primary Apps Script / Cloud Run window.
+    # 19:30-23:30 MYT Mon-Fri = 11:30-15:30 UTC Mon-Fri.
+    - cron: '30 11-15 * * 1-5'
     # Keep a public-repo scheduled workflow from being disabled for inactivity.
     - cron: '5 0 1 * *'
   workflow_dispatch:
@@ -27,7 +28,7 @@ permissions:
 jobs:
   us:
     if: >-
-      (github.event_name == 'schedule' && github.event.schedule == '15 0 * * 2-6') ||
+      (github.event_name == 'schedule' && github.event.schedule == '15 0-4 * * 2-6') ||
       (github.event_name == 'workflow_dispatch' && (inputs.market == 'US' || inputs.market == 'BOTH'))
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -49,10 +50,16 @@ jobs:
           HUNTER_ACTIONS_CUTOVER: CONFIRMED
           FETCH_WORKERS: '6'
         run: python runner.py --mode daily-core --market US
+      - name: Verify US DAILY health
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: python daily_health.py --market US
 
   hk:
     if: >-
-      (github.event_name == 'schedule' && github.event.schedule == '30 11 * * 1-5') ||
+      (github.event_name == 'schedule' && github.event.schedule == '30 11-15 * * 1-5') ||
       (github.event_name == 'workflow_dispatch' && (inputs.market == 'HK' || inputs.market == 'BOTH'))
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -74,6 +81,12 @@ jobs:
           HUNTER_ACTIONS_CUTOVER: CONFIRMED
           FETCH_WORKERS: '6'
         run: python runner.py --mode daily-core --market HK
+      - name: Verify HK DAILY health
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: python daily_health.py --market HK
 
   keepalive:
     if: github.event_name == 'schedule' && github.event.schedule == '5 0 1 * *'

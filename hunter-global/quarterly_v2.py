@@ -319,71 +319,122 @@ def _vertical_p(side: str, s0: float, st: float) -> float:
     return max(0.0, min(1.0, move/(s0*.05)))
 
 
-def _stock_signals(rows: list[dict], split: dict[str,str]) -> Iterable[tuple[str,str,float]]:
-    if len(rows) < 70:
+def _stock_signals(rows: list[dict], split: dict[str,str],
+                   target_map: dict[str,str]) -> Iterable[tuple[str,str,str,float,bool]]:
+    if len(rows) < 501:
         return
+    rows=sorted(rows,key=lambda x:x["date"])
     closes=[float(r["close"]) for r in rows]
+    dates=[r["date"] for r in rows]
+    by_date={r["date"]:r for r in rows}
     e8,e17,e50=_ema(closes,8),_ema(closes,17),_ema(closes,50)
     macd=[a-b for a,b in zip(e8,e17)]
     sig9=_ema(macd,9)
     hist=[a-b for a,b in zip(macd,sig9)]
-    for i in range(50, len(rows)-20):
-        seg=_segment(rows[i]["date"],split)
-        if not seg:
+    for i in range(50, len(rows)):
+        date=dates[i]
+        seg=_segment(date,split)
+        target=target_map.get(date)
+        if not seg or not target or target not in by_date:
+            continue
+        s0=float(rows[i]["close"])
+        st=float(by_date[target]["close"])
+        if not (s0>0 and math.isfinite(s0) and math.isfinite(st)):
             continue
         long_cross=(macd[i]>0>=macd[i-1] and e17[i]>e50[i] and hist[i]>0)
         short_cross=(macd[i]<0<=macd[i-1] and e17[i]<e50[i] and hist[i]<0)
         if long_cross:
-            yield "LONG",seg,_vertical_p("LONG",closes[i],closes[i+20])
+            yield "LONG",seg,date,_vertical_p("LONG",s0,st),bool(st>s0)
         if short_cross:
-            yield "SHORT",seg,_vertical_p("SHORT",closes[i],closes[i+20])
+            yield "SHORT",seg,date,_vertical_p("SHORT",s0,st),bool(st<s0)
 
 
-def vertical_baseline(stock_groups: Iterable[list[dict]], split: dict[str,str]) -> dict:
-    own={s:{g:[] for g in ("IS","FINAL_OOS")} for s in ("LONG","SHORT")}
-    base={s:{g:[] for g in ("IS","FINAL_OOS")} for s in ("LONG","SHORT")}
+def vertical_baseline(stock_groups: Iterable[list[dict]], split: dict[str,str],
+                      calendar: list[str], d2_by_date: dict[str,str]) -> tuple[dict,dict]:
+    calendar=sorted(dict.fromkeys(calendar))
+    target_map={date:calendar[i+20] for i,date in enumerate(calendar[:-20])}
+    market={side:defaultdict(lambda:[0.0,0]) for side in ("LONG","SHORT")}
+    signals={side:{seg:[] for seg in ("IS","FINAL_OOS")} for side in ("LONG","SHORT")}
+
     for rows in stock_groups:
-        if len(rows) < 70:
-            continue
         rows=sorted(rows,key=lambda x:x["date"])
-        closes=[float(r["close"]) for r in rows]
-        # Benchmark = market-drift opportunity set on the same stock universe.
-        for i in range(50,len(rows)-20):
-            seg=_segment(rows[i]["date"],split)
-            if seg:
-                base["LONG"][seg].append(_vertical_p("LONG",closes[i],closes[i+20]))
-                base["SHORT"][seg].append(_vertical_p("SHORT",closes[i],closes[i+20]))
-        for side,seg,p in _stock_signals(rows,split):
-            own[side][seg].append(p)
+        if len(rows)<501:
+            continue
+        sid=rows[0]["security_id"]
+        by_date={r["date"]:r for r in rows}
+        for date,target in target_map.items():
+            if date not in by_date or target not in by_date:
+                continue
+            s0=float(by_date[date]["close"]); st=float(by_date[target]["close"])
+            if not (s0>0 and math.isfinite(s0) and math.isfinite(st)):
+                continue
+            for side in ("LONG","SHORT"):
+                p=_vertical_p(side,s0,st)
+                market[side][date][0]+=p
+                market[side][date][1]+=1
+        for side,seg,date,p,dwr_ok in _stock_signals(rows,split,target_map):
+            signals[side][seg].append({"security_id":sid,"date":date,"p":p,"dwr":dwr_ok})
 
     out={}
+    same_direction={side:{bucket:{"n":0,"vertical_wr":None,"avg_R":None,"DWR":None}
+                          for bucket in ("SAME","OPPOSITE","NONE")}
+                    for side in ("LONG","SHORT")}
+    same_acc={side:{bucket:[] for bucket in ("SAME","OPPOSITE","NONE")}
+              for side in ("LONG","SHORT")}
+
     for side in ("LONG","SHORT"):
         out[side]={}
-        deltas={}
         for seg in ("IS","FINAL_OOS"):
-            ov,bv=own[side][seg],base[side][seg]
+            own_by_date: dict[str,list[float]]=defaultdict(list)
+            bench_by_date: dict[str,list[float]]=defaultdict(list)
+            paired=[]
+            for item in signals[side][seg]:
+                total,count=market[side].get(item["date"],(0.0,0))
+                if count<=1:
+                    continue
+                bench=(total-item["p"])/(count-1)
+                own_by_date[item["date"]].append(item["p"])
+                bench_by_date[item["date"]].append(bench)
+                paired.append((item,bench))
+            ov=[v for xs in own_by_date.values() for v in xs]
+            bv=[v for xs in bench_by_date.values() for v in xs]
             om=sum(ov)/len(ov) if ov else None
             bm=sum(bv)/len(bv) if bv else None
             delta=om-bm if om is not None and bm is not None else None
-            # Conservative normal approximation for the aggregate mean delta;
-            # the quarterly gate only uses the lower bound sign.
-            if ov and bv:
-                var_o=sum((x-om)**2 for x in ov)/max(1,len(ov)-1)
-                var_b=sum((x-bm)**2 for x in bv)/max(1,len(bv)-1)
-                se=math.sqrt(var_o/len(ov)+var_b/len(bv))
-                ci=[delta-1.96*se,delta+1.96*se]
-            else:
-                ci=[None,None]
-            out[side][seg]={"n":len(ov),"own":om,"benchmark_n":len(bv),
-                            "bench":bm,"delta":delta,"delta_ci":ci}
-            deltas[seg]=(delta,ci)
-        is_delta=deltas["IS"][0]
-        oos_low=deltas["FINAL_OOS"][1][0]
+            low,high=_block_bootstrap_delta(
+                own_by_date,bench_by_date,
+                f"VERTICAL_BASELINE|{side}|{seg}|{split['is_end']}|{split['oos_start']}|{split['oos_end']}"
+            ) if ov and bv else (None,None)
+            out[side][seg]={"n":len(ov),"own":om,"benchmark_n":len(bv),"bench":bm,
+                            "delta":delta,"delta_ci":[low,high],
+                            "unique_dates":len(own_by_date)}
+
+            if seg=="FINAL_OOS":
+                dw=.34 if side=="LONG" else .40
+                for item,_bench in paired:
+                    market_dir=d2_by_date.get(item["date"],"NONE")
+                    bucket=("SAME" if market_dir==side else
+                            "OPPOSITE" if market_dir in ("LONG","SHORT") else "NONE")
+                    same_acc[side][bucket].append(
+                        (item["p"]/dw-1.0, item["dwr"]))
+
+        is_delta=out[side]["IS"]["delta"]
+        oos_low=out[side]["FINAL_OOS"]["delta_ci"][0]
         if oos_low is not None and oos_low>0:
             out[side]["verdict"]="SIGNAL_EDGE_CONFIRMED" if is_delta is not None and is_delta>0 else "OOS_ONLY"
         else:
             out[side]["verdict"]="MARKET_DRIFT_ONLY"
-    return out
+
+    for side in ("LONG","SHORT"):
+        for bucket,vals in same_acc[side].items():
+            if vals:
+                same_direction[side][bucket]={
+                    "n":len(vals),
+                    "vertical_wr":sum(1 for r,_ in vals if r>0)/len(vals),
+                    "avg_R":sum(r for r,_ in vals)/len(vals),
+                    "DWR":sum(1 for _,ok in vals if ok)/len(vals)
+                }
+    return out,same_direction
 
 
 def _parse_gz_ndjson(data: bytes) -> list[dict]:

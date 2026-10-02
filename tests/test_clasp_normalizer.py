@@ -34,7 +34,7 @@ class ClaspNormalizerTests(unittest.TestCase):
     def test_deploy_resolves_and_updates_versioned_deployment(self):
         script = (ROOT / "cloudrun" / "deploy-monthly-full.sh").read_text(encoding="utf-8")
         self.assertNotIn('list-deployments | grep', script)
-        self.assertNotIn('create-deployment --deploymentId', script)
+        self.assertNotIn('npx -y "$CLASP" create-deployment', script)
         self.assertIn('resolve-clasp-deployment.py', script)
         self.assertIn('update-deployment "$DEPLOYMENT_ID"', script)
 

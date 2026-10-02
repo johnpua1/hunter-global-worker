@@ -134,9 +134,11 @@ function bridgeScopeAuthorize_(scope, op, path) {
     throw new Error('SCOPE_OP_DENIED');
   if (!path) throw new Error('SCOPE_ROOT_DENIED');
   if (scope === 'MONTH') {
-    if (/^US(?:\/|$)/.test(path) ||
+    if (/^(US|HK)(?:\/|$)/.test(path) ||
         /^SNAPSHOT_\d{4}-\d{2}-\d{2}(?:\/|$)/.test(path) ||
         /^MONTH_\d{4}-\d{2}(?:\/|$)/.test(path) ||
+        /^HK_SNAPSHOT_\d{4}-\d{2}(?:\/|$)/.test(path) ||
+        /^HK_MONTH_\d{4}-\d{2}(?:\/|$)/.test(path) ||
         path === 'ACTIVE_POINTER') return;
     throw new Error('SCOPE_PATH_DENIED');
   }
@@ -187,7 +189,9 @@ function bridgePath_(path) {
   var parts = path.split('/');
   var root = parts[0];
   var monthlyRoot = /^SNAPSHOT_\d{4}-\d{2}-\d{2}$/.test(root) ||
-      /^MONTH_\d{4}-\d{2}$/.test(root);
+      /^MONTH_\d{4}-\d{2}$/.test(root) ||
+      /^HK_SNAPSHOT_\d{4}-\d{2}$/.test(root) ||
+      /^HK_MONTH_\d{4}-\d{2}$/.test(root);
   if ((!/^(US|HK|_BRIDGE_TEST)$/.test(root) && !monthlyRoot) ||
       parts.length > 8 || parts.some(function (p) {
         return !p || p === '.' || p === '..' || !/^[A-Za-z0-9_.-]+$/.test(p);
@@ -265,7 +269,10 @@ function bridgeWritePolicy_(path, op, scope) {
   var monthlyControlled = path === 'ACTIVE_POINTER' ||
       /^SNAPSHOT_\d{4}-\d{2}-\d{2}(?:\/|$)/.test(path) ||
       /^MONTH_\d{4}-\d{2}(?:\/|$)/.test(path) ||
-      path === 'US/CONTROL/MONTH_NOTICE.json';
+      /^HK_SNAPSHOT_\d{4}-\d{2}(?:\/|$)/.test(path) ||
+      /^HK_MONTH_\d{4}-\d{2}(?:\/|$)/.test(path) ||
+      path === 'US/CONTROL/MONTH_NOTICE.json' ||
+      path === 'HK/CONTROL/MONTH_NOTICE.json';
   if (monthlyControlled && scope !== 'MONTH') throw new Error('MONTH_WRITER_ONLY');
   if (scope === 'MONTH' && !monthlyControlled) throw new Error('MONTH_SCOPE_WRITE_DENIED');
   if (/^(US|HK)\/BASE\//.test(path)) throw new Error('BASE_SEALED');
@@ -649,8 +656,9 @@ function verifyHunterDaily() {
 
 /**
  * V2 monthly trigger. A one-shot trigger starts at 08:00 MYT on calendar day 2
- * of the target month and retries each morning until US DAILY proves that the
- * first completed US session of that month has been written.
+ * of the target month and retries each morning until BOTH US and HK DAILY have
+ * written a completed session belonging to that month. This prevents a US-only
+ * monthly commit from being treated as a complete monthly refresh.
  */
 function hunterMonthlyTriggerDate_(year, month1, day) {
   return new Date(Date.UTC(year, month1 - 1, day, 0, 0, 0)); // 08:00 MYT
@@ -720,34 +728,42 @@ function monthlyV2() {
   var rootId = props.getProperty('HUNTER_GLOBAL_FOLDER_ID');
   if (!rootId) throw new Error('ROOT_NOT_CONFIGURED');
   var root = DriveApp.getFolderById(rootId);
-  var us = bridgeFolder_(root, 'US/CONTROL', false);
-  var files = us.getFilesByName('DAILY_CHECKPOINT.json');
-  if (!files.hasNext()) throw new Error('US_DAILY_CHECKPOINT_MISSING');
-  var checkpoint = JSON.parse(files.next().getBlob().getDataAsString('UTF-8'));
-  var dateText = String(checkpoint.last_completed_date || checkpoint.as_of || '');
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateText)) throw new Error('US_DAILY_CHECKPOINT_DATE_INVALID');
 
-  if (dateText.slice(0,7) !== expectedMonth) {
-    return {ok:true, skipped:true, reason:'WAIT_FIRST_US_SESSION_DAILY',
-            expectedMonth:expectedMonth, checkpoint:dateText,
+  function checkpointDate_(market) {
+    var control = bridgeFolder_(root, market + '/CONTROL', false);
+    var files = control.getFilesByName('DAILY_CHECKPOINT.json');
+    if (!files.hasNext()) throw new Error(market + '_DAILY_CHECKPOINT_MISSING');
+    var checkpoint = JSON.parse(files.next().getBlob().getDataAsString('UTF-8'));
+    var value = String(checkpoint.last_completed_date || checkpoint.as_of || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value))
+      throw new Error(market + '_DAILY_CHECKPOINT_DATE_INVALID');
+    return value;
+  }
+
+  var usDate = checkpointDate_('US');
+  var hkDate = checkpointDate_('HK');
+  if (usDate.slice(0,7) !== expectedMonth || hkDate.slice(0,7) !== expectedMonth) {
+    return {ok:true, skipped:true, reason:'WAIT_FIRST_US_HK_SESSION_DAILY',
+            expectedMonth:expectedMonth, usCheckpoint:usDate, hkCheckpoint:hkDate,
             next:hunterMonthlyRetry_(expectedMonth)};
   }
 
   var active = bridgeFile_(root, 'ACTIVE_POINTER');
   if (active) {
     var pointer = JSON.parse(active.getBlob().getDataAsString('UTF-8'));
-    if (pointer.month_file === 'MONTH_' + expectedMonth) {
-      var alreadyNext = hunterNextMonthCandidate_(dateText);
-      return {ok:true, skipped:true, reason:'MONTH_ALREADY_COMMITTED',
-              checkpoint:dateText,
+    if (pointer.month_file === 'MONTH_' + expectedMonth &&
+        pointer.hk_month_file === 'HK_MONTH_' + expectedMonth) {
+      var alreadyNext = hunterNextMonthCandidate_(usDate);
+      return {ok:true, skipped:true, reason:'MONTH_ALREADY_COMMITTED_US_HK',
+              usCheckpoint:usDate, hkCheckpoint:hkDate,
               next:installMonthlyTriggerAt(alreadyNext.at, alreadyNext.expectedMonth)};
     }
   }
 
   var result = runMonthly();
-  var next = hunterNextMonthCandidate_(dateText);
+  var next = hunterNextMonthCandidate_(usDate);
   installMonthlyTriggerAt(next.at, next.expectedMonth);
-  return {ok:true, skipped:false, checkpoint:dateText, run:result};
+  return {ok:true, skipped:false, usCheckpoint:usDate, hkCheckpoint:hkDate, run:result};
 }
 
 function listMonthlyTrigger() {

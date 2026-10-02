@@ -29,22 +29,13 @@ extract_service_account() {
   python -c '
 import json, sys
 doc=json.load(sys.stdin)
-paths=[
-    ("template","template","serviceAccount"),
-    ("template","template","serviceAccountEmail"),
-    ("template","serviceAccount"),
-    ("template","serviceAccountEmail"),
-]
-for path in paths:
-    cur=doc
-    ok=True
-    for key in path:
-        if not isinstance(cur,dict) or key not in cur:
-            ok=False; break
-        cur=cur[key]
-    if ok and isinstance(cur,str) and cur:
-        print(cur); raise SystemExit(0)
-raise SystemExit(1)
+try:
+    value=doc["spec"]["template"]["spec"]["template"]["spec"]["serviceAccountName"]
+except (KeyError, TypeError):
+    raise SystemExit(1)
+if not isinstance(value,str) or not value:
+    raise SystemExit(1)
+print(value)
 '
 }
 

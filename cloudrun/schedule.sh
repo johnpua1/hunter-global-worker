@@ -32,15 +32,18 @@ upsert_schedule() {
     --max-retry-attempts=0
 }
 
-# Malaysia time (MYT, UTC+8).
-# US Mon-Fri sessions close the following MYT morning, so run Tue-Sat.
-# 07:15 MYT is after the runner's 17:30 America/New_York close gate in both DST and standard time.
-upsert_schedule hunter-us-daily '15 7 * * 2-6' Asia/Kuala_Lumpur hunter-us-daily
+# Production topology lock:
+# US/HK DAILY are Apps Script-triggered. Cloud Scheduler is forbidden for those
+# jobs because dual trigger authority can create duplicate writers.
+for forbidden in hunter-us-daily hunter-hk-daily hunter-monthly-v2; do
+  state="$(gcloud scheduler jobs describe "$forbidden" --location "$REGION"     --project "$GCP_PROJECT_ID" --format='value(state)' 2>/dev/null || true)"
+  if [[ "$state" == "ENABLED" ]]; then
+    echo "DUAL_TRIGGER_RISK:$forbidden:CLOUD_SCHEDULER_ENABLED" >&2
+    exit 1
+  fi
+done
 
-# HK and Malaysia share UTC+8. Run after the runner's 17:30 Asia/Hong_Kong close gate.
-upsert_schedule hunter-hk-daily '45 17 * * 1-5' Asia/Kuala_Lumpur hunter-hk-daily
-
-# Keep maintenance separated from both market writers to reduce write contention.
+# Maintenance is the only production Cloud Scheduler job.
 upsert_schedule hunter-maintenance '0 20 * * *' Asia/Kuala_Lumpur hunter-maintenance
 
-echo 'SCHEDULERS=UPSERTED'
+echo 'SCHEDULERS=LOCKED_MAINTENANCE_ONLY'

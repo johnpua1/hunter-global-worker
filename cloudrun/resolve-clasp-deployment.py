@@ -6,7 +6,7 @@ import argparse
 import re
 import sys
 
-LINE = re.compile(r"^\s*-\s+(\S+)\s+@(\S+)\s*$")
+LINE = re.compile(r"^\s*-\s+(\S+)\s+@(\S+)(?:\s+.*)?$")
 
 
 def resolve(text: str, preferred: str | None = None) -> str:

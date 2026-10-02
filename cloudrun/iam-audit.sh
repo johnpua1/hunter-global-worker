@@ -32,6 +32,7 @@ EXPECTED_US="hunter-us-daily@${PROJECT_ID}.iam.gserviceaccount.com"
 EXPECTED_HK="hunter-hk-daily@${PROJECT_ID}.iam.gserviceaccount.com"
 EXPECTED_MAINT="hunter-maintenance@${PROJECT_ID}.iam.gserviceaccount.com"
 EXPECTED_MONTH="hunter-monthly@${PROJECT_ID}.iam.gserviceaccount.com"
+[[ "${JOB_SA[hunter-monthly-v2]:-}" == "$EXPECTED_MONTH" ]] || { echo "FAIL job=hunter-monthly-v2 reason=SA_NOT_MONTHLY_SCOPED"; FAIL=1; }
 if [[ "$IAM_MODE" == scoped ]]; then
   [[ "${JOB_SA[hunter-us-daily]:-}" == "$EXPECTED_US" ]] || { echo "FAIL job=hunter-us-daily reason=SA_NOT_SCOPED"; FAIL=1; }
   [[ "${JOB_SA[hunter-hk-daily]:-}" == "$EXPECTED_HK" ]] || { echo "FAIL job=hunter-hk-daily reason=SA_NOT_SCOPED"; FAIL=1; }

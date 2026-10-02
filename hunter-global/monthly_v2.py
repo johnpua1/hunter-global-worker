@@ -721,7 +721,8 @@ def _month_name(asof: str) -> str:
     return f"MONTH_{d.year}-{d.month:02d}"
 
 
-def run_monthly(drive, snapshot_name: str | None = None, validation: bool = False,\n                commit_pointer: bool = True) -> dict:
+def run_monthly(drive, snapshot_name: str | None = None, validation: bool = False,
+                commit_pointer: bool = True) -> dict:
     checkpoint=drive.json("US/CONTROL/DAILY_CHECKPOINT.json")
     asof=checkpoint.get("last_completed_date") or checkpoint.get("as_of")
     if not asof:

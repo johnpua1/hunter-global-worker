@@ -521,7 +521,7 @@ def _build_snapshot(drive, asof: str) -> tuple[str,list[list[dict]],list[dict]]:
         if manifest.get("as_of") != asof:
             raise RuntimeError("SNAPSHOT_NAME_ASOF_CONFLICT")
         groups=_load_snapshot_groups(drive,snapshot)
-        bench=_parse_gz_ndjson(drive.read(snapshot+"/BENCHMARK_ETF_12_501.ndjson.gz"))
+        bench=_load_snapshot_bench(drive,snapshot)
         return snapshot,groups,bench
 
     universe=drive.json("US/CURRENT_UNIVERSE.json")
@@ -643,36 +643,47 @@ def run_quarterly(drive, snapshot_name: str | None = None, validation: bool = Fa
         manifest=drive.json(snapshot_name+"/MANIFEST.json")
         if manifest.get("as_of") != asof:
             raise RuntimeError("SNAPSHOT_MANIFEST_ASOF_MISMATCH")
-        if validation and snapshot_name==VALIDATION_SNAPSHOT:
-            # The legacy G178 snapshot contains a >10 MB aggregate file that the
-            # Apps Script bridge intentionally cannot stream.  Its immutable
-            # manifest + accepted G178 recert package are the calibration fixture.
-            direction,baseline=_g178_fixture()
-            snapshot=snapshot_name
-        else:
-            groups=_load_snapshot_groups(drive,snapshot_name)
-            bench=_parse_gz_ndjson(drive.read(snapshot_name+"/BENCHMARK_ETF_12_501.ndjson.gz"))
-            split=_dynamic_split([r["date"] for r in bench if r.get("ticker")=="SPY"])
-            direction=direction_backtest(bench,split)
-            baseline=vertical_baseline(groups,split)
-            snapshot=snapshot_name
+        snapshot=snapshot_name
+        groups=_load_snapshot_groups(drive,snapshot)
+        bench=_load_snapshot_bench(drive,snapshot)
     else:
         snapshot,groups,bench=_build_snapshot(drive,asof)
-        split=_dynamic_split([r["date"] for r in bench if r.get("ticker")=="SPY"])
-        direction=direction_backtest(bench,split)
-        baseline=vertical_baseline(groups,split)
 
-    expected={"LONG":"无合格信号","SHORT":"无合格信号",
-              "LONG_BASELINE":"MARKET_DRIFT_ONLY","SHORT_BASELINE":"OOS_ONLY"}
-    observed={"LONG":direction["LONG"],"SHORT":direction["SHORT"],
-              "LONG_BASELINE":baseline["LONG"]["verdict"],"SHORT_BASELINE":baseline["SHORT"]["verdict"]}
+    spy_dates=sorted(r["date"] for r in bench if r.get("ticker")=="SPY")
+    split=_g178_split() if validation and snapshot==VALIDATION_SNAPSHOT else _dynamic_split(spy_dates)
+    direction=direction_backtest(bench,split)
+    baseline,same_direction=vertical_baseline(
+        groups,split,spy_dates,direction.get("daily_direction",{}))
+    direction["same_direction_test"]=same_direction
+
+    def selected_key(side: str):
+        row=direction.get("is_selected",{}).get(side)
+        return None if not row else [row.get("ticker"),row.get("signal"),row.get("H")]
+    def standalone_pass(side: str):
+        row=direction.get("final_oos_standalone",{}).get(side)
+        return None if row is None else bool(row.get("pass"))
+
+    expected={
+        "LONG":"无合格信号","SHORT":"无合格信号",
+        "IS_LONG":["SPY","S4",10],"IS_SHORT":["IWM","S3",5],
+        "FO_LONG_PASS":False,"FO_SHORT_PASS":False,
+        "LONG_BASELINE":"MARKET_DRIFT_ONLY","SHORT_BASELINE":"OOS_ONLY"
+    }
+    observed={
+        "LONG":direction["LONG"],"SHORT":direction["SHORT"],
+        "IS_LONG":selected_key("LONG"),"IS_SHORT":selected_key("SHORT"),
+        "FO_LONG_PASS":standalone_pass("LONG"),"FO_SHORT_PASS":standalone_pass("SHORT"),
+        "LONG_BASELINE":baseline["LONG"]["verdict"],
+        "SHORT_BASELINE":baseline["SHORT"]["verdict"]
+    }
     if validation and observed != expected:
         raise RuntimeError("G178_VALIDATION_MISMATCH:"+json.dumps(observed,ensure_ascii=False,sort_keys=True))
 
     quarter=_quarter_name(asof)
     prior=drive.json("ACTIVE_POINTER") if drive.file("ACTIVE_POINTER") else None
+    created=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(timespec="seconds")
     result={"schema":"INVESTMENT_V2_QUARTERLY_V1","quarter":quarter,"snapshot":snapshot,
-            "as_of":asof,"created_at_myt":dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(timespec="seconds"),
+            "as_of":asof,"created_at_myt":created,
             "direction":direction,"vertical_baseline":baseline,
             "excluded":{"dw_grid_recomputed":False,"dw_max_long":0.34,"dw_max_short":0.40,
                         "dwr_thr_recomputed":False},
@@ -684,9 +695,13 @@ def run_quarterly(drive, snapshot_name: str | None = None, validation: bool = Fa
     drive.put(quarter+"/VERTICAL_BASELINE.json",_compact(baseline),immutable=True)
 
     def signal_pointer(side: str):
-        return "无合格信号" if direction[side]=="无合格信号" else {
-            k:direction[side].get(k) for k in ("ticker","signal","H","wr","benchmark_wr","delta","delta_ci","n")}
-    pointer={"schema":"INVESTMENT_V2_ACTIVE_POINTER_V1","version":1 if not prior else int(prior.get("version",0))+1,
+        row=direction[side]
+        if row=="无合格信号":
+            return "无合格信号"
+        return {k:row.get(k) for k in ("ticker","signal","H","wr","benchmark_wr","delta","delta_ci","n")}
+
+    pointer={"schema":"INVESTMENT_V2_ACTIVE_POINTER_V1",
+             "version":1 if not prior else int(prior.get("version",0))+1,
              "quarter_file":quarter,"snapshot":snapshot,"as_of":asof,
              "long_direction_signal":signal_pointer("LONG"),
              "short_direction_signal":signal_pointer("SHORT"),
@@ -694,19 +709,28 @@ def run_quarterly(drive, snapshot_name: str | None = None, validation: bool = Fa
              "short_vertical_baseline":baseline["SHORT"]["verdict"],
              "direction_detail":{"LONG":direction.get("final_oos_standalone",{}).get("LONG"),
                                  "SHORT":direction.get("final_oos_standalone",{}).get("SHORT"),
-                                 "coverage":(direction.get("replay_rounds") or [{}])[-1].get("coverage",0.0)},
-             "previous":{"quarter_file":prior.get("quarter_file"),"long_direction_signal":prior.get("long_direction_signal"),
+                                 "coverage":(direction.get("replay_rounds") or [{}])[-1]
+                                            .get("counts",{}).get("coverage",0.0)},
+             "previous":{"quarter_file":prior.get("quarter_file"),
+                         "long_direction_signal":prior.get("long_direction_signal"),
                          "short_direction_signal":prior.get("short_direction_signal"),
                          "long_vertical_baseline":prior.get("long_vertical_baseline"),
                          "short_vertical_baseline":prior.get("short_vertical_baseline")} if prior else None,
-             "writer":"HUNTER_QUARTERLY_V2","written_at_myt":result["created_at_myt"]}
-    # Commit pointer last: all immutable quarter artifacts must already exist.
+             "writer":"HUNTER_QUARTERLY_V2","written_at_myt":created}
     expected_sha=_sha(_compact(prior)) if prior else None
     drive.put("ACTIVE_POINTER",_compact(pointer),expected_sha=expected_sha)
+
+    notice_path="US/CONTROL/QUARTER_NOTICE.json"
     notice={"schema":"INVESTMENT_V2_QUARTER_NOTICE_V1","quarter_file":quarter,"pending":True,
-            "pointer_version":pointer["version"],"created_at_myt":result["created_at_myt"]}
-    old_notice=drive.file("US/CONTROL/QUARTER_NOTICE.json")
-    drive.put("US/CONTROL/QUARTER_NOTICE.json",_compact(notice),
-              expected_sha=(old_notice or {}).get("sha256") if old_notice else None)
-    return {"quarter":quarter,"snapshot":snapshot,"pointer":pointer,"validation":result["validation"],
-            "observed":observed}
+            "pointer_version":pointer["version"],"old":pointer["previous"],
+            "new":{"long_direction_signal":pointer["long_direction_signal"],
+                   "short_direction_signal":pointer["short_direction_signal"],
+                   "long_vertical_baseline":pointer["long_vertical_baseline"],
+                   "short_vertical_baseline":pointer["short_vertical_baseline"],
+                   "direction_detail":pointer["direction_detail"]},
+            "created_at_myt":created}
+    notice_sha=_sha(drive.read(notice_path)) if drive.file(notice_path) else None
+    drive.put(notice_path,_compact(notice),expected_sha=notice_sha)
+    return {"quarter":quarter,"snapshot":snapshot,"pointer":pointer,
+            "validation":result["validation"],"observed":observed}
+

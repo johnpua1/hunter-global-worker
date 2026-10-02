@@ -43,7 +43,14 @@ assert.doesNotThrow(() => context.bridgeScopeAuthorize_('MAINT', 'read', 'HK/CUR
 assert.throws(() => context.bridgeScopeAuthorize_('US', 'append', '_BRIDGE_TEST/DAILY/US/x.ndjson.gz'), /SCOPE_PATH_DENIED/);
 assert.doesNotThrow(() => context.bridgeScopeAuthorize_('MONTH', 'read_chunk', 'SNAPSHOT_2026-10-01/US_ACTIVE_OHLC.csv.gz'));
 assert.doesNotThrow(() => context.bridgeScopeAuthorize_('MONTH', 'read', 'US/CONTROL/DAILY_CHECKPOINT.json'));
-assert.throws(() => context.bridgeScopeAuthorize_('MONTH', 'read', 'HK/CURRENT_UNIVERSE.json'), /SCOPE_PATH_DENIED/);
+assert.doesNotThrow(() => context.bridgeScopeAuthorize_('MONTH', 'read', 'HK/CURRENT_UNIVERSE.json'));
+assert.doesNotThrow(() => context.bridgeScopeAuthorize_('MONTH', 'read', 'HK/BASE/batch-0001.ndjson.gz'));
+assert.equal(context.bridgePath_('HK_SNAPSHOT_2026-10/MANIFEST.json'), 'HK_SNAPSHOT_2026-10/MANIFEST.json');
+assert.equal(context.bridgePath_('HK_MONTH_2026-10/RESULT.json'), 'HK_MONTH_2026-10/RESULT.json');
+assert.doesNotThrow(() => context.bridgeWritePolicy_('HK_SNAPSHOT_2026-10/MANIFEST.json', 'put', 'MONTH'));
+assert.doesNotThrow(() => context.bridgeWritePolicy_('HK_MONTH_2026-10/RESULT.json', 'put', 'MONTH'));
+assert.doesNotThrow(() => context.bridgeWritePolicy_('HK/CONTROL/MONTH_NOTICE.json', 'put', 'MONTH'));
+assert.throws(() => context.bridgeWritePolicy_('HK/CURRENT_UNIVERSE.json', 'put', 'MONTH'), /MONTH_SCOPE_WRITE_DENIED/);
 assert.doesNotThrow(() => context.bridgeWritePolicy_('ACTIVE_POINTER', 'put', 'MONTH'));
 assert.throws(() => context.bridgeWritePolicy_('ACTIVE_POINTER', 'put', 'LEGACY'), /MONTH_WRITER_ONLY/);
 assert.throws(() => context.bridgeWritePolicy_('US/BASE/batch-0001.ndjson.gz', 'put'), /BASE_SEALED/);

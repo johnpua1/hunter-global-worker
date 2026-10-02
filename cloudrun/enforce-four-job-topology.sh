@@ -12,6 +12,12 @@ test "$(git branch --show-current)" = main
 test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
 EXPECTED_JOBS=(hunter-us-daily hunter-hk-daily hunter-maintenance hunter-monthly-v2)
+
+# Known retired legacy job is safe to remove automatically before the exact-four check.
+if gcloud run jobs describe hunter-quarterly-v2 --project "$GCP_PROJECT_ID" --region "$REGION" >/dev/null 2>&1; then
+  gcloud run jobs delete hunter-quarterly-v2 --project "$GCP_PROJECT_ID" --region "$REGION" --quiet >/dev/null
+fi
+
 for job in "${EXPECTED_JOBS[@]}"; do
   gcloud run jobs describe "$job" --project "$GCP_PROJECT_ID" --region "$REGION" >/dev/null
 done
@@ -26,18 +32,40 @@ if (("${#UNEXPECTED_HUNTER_JOBS[@]}")); then
   exit 1
 fi
 
-# Build the locked release once, then update only the image field on the four
-# existing jobs. This preserves each job's current SA, secrets, resources and
-# entry args while making the runtime fail-closed topology guards live.
-IMAGE="${REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/hunter-worker/runner:${EXPECTED_SHA}"
-gcloud builds submit "$ROOT" --tag "$IMAGE" --project "$GCP_PROJECT_ID" --region "$REGION"
-for job in hunter-us-daily hunter-hk-daily hunter-maintenance hunter-monthly-v2; do
-  gcloud run jobs update "$job" --image "$IMAGE" --project "$GCP_PROJECT_ID" --region "$REGION" >/dev/null
+US_SA="hunter-us-daily@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+HK_SA="hunter-hk-daily@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+MAINT_SA="hunter-maintenance@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+MONTH_SA="hunter-monthly@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+
+for sa in "$US_SA" "$HK_SA" "$MAINT_SA" "$MONTH_SA"; do
+  gcloud iam service-accounts describe "$sa" --project "$GCP_PROJECT_ID" >/dev/null
+done
+for secret in APPS_SCRIPT_WEBAPP_URL APPS_SCRIPT_SHARED_KEY_US APPS_SCRIPT_SHARED_KEY_HK APPS_SCRIPT_SHARED_KEY_MAINT APPS_SCRIPT_SHARED_KEY_MONTH; do
+  gcloud secrets describe "$secret" --project "$GCP_PROJECT_ID" >/dev/null
+  gcloud secrets versions list "$secret" --project "$GCP_PROJECT_ID" \
+    --filter='state=ENABLED' --format='value(name)' | grep -q .
 done
 
-if gcloud run jobs describe hunter-quarterly-v2 --project "$GCP_PROJECT_ID" --region "$REGION" >/dev/null 2>&1; then
-  gcloud run jobs delete hunter-quarterly-v2 --project "$GCP_PROJECT_ID" --region "$REGION" --quiet >/dev/null
-fi
+# Build once and self-heal each existing job back to its dedicated runtime
+# identity + scoped Bridge key. CPU/memory/task timeout/entry args are preserved.
+IMAGE="${REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/hunter-worker/runner:${EXPECTED_SHA}"
+gcloud builds submit "$ROOT" --tag "$IMAGE" --project "$GCP_PROJECT_ID" --region "$REGION"
+
+gcloud run jobs update hunter-us-daily --image "$IMAGE" --service-account "$US_SA" \
+  --update-secrets "APPS_SCRIPT_WEBAPP_URL=APPS_SCRIPT_WEBAPP_URL:latest,APPS_SCRIPT_SHARED_KEY=APPS_SCRIPT_SHARED_KEY_US:latest" \
+  --project "$GCP_PROJECT_ID" --region "$REGION" >/dev/null
+
+gcloud run jobs update hunter-hk-daily --image "$IMAGE" --service-account "$HK_SA" \
+  --update-secrets "APPS_SCRIPT_WEBAPP_URL=APPS_SCRIPT_WEBAPP_URL:latest,APPS_SCRIPT_SHARED_KEY=APPS_SCRIPT_SHARED_KEY_HK:latest" \
+  --project "$GCP_PROJECT_ID" --region "$REGION" >/dev/null
+
+gcloud run jobs update hunter-maintenance --image "$IMAGE" --service-account "$MAINT_SA" \
+  --update-secrets "APPS_SCRIPT_WEBAPP_URL=APPS_SCRIPT_WEBAPP_URL:latest,APPS_SCRIPT_SHARED_KEY=APPS_SCRIPT_SHARED_KEY_MAINT:latest" \
+  --project "$GCP_PROJECT_ID" --region "$REGION" >/dev/null
+
+gcloud run jobs update hunter-monthly-v2 --image "$IMAGE" --service-account "$MONTH_SA" \
+  --update-secrets "APPS_SCRIPT_WEBAPP_URL=APPS_SCRIPT_WEBAPP_URL:latest,APPS_SCRIPT_SHARED_KEY=APPS_SCRIPT_SHARED_KEY_MONTH:latest" \
+  --project "$GCP_PROJECT_ID" --region "$REGION" >/dev/null
 
 for forbidden in hunter-us-daily hunter-hk-daily hunter-monthly-v2; do
   state="$(gcloud scheduler jobs describe "$forbidden" --project "$GCP_PROJECT_ID" --location "$REGION" --format='value(state)' 2>/dev/null || true)"

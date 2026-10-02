@@ -129,7 +129,8 @@ def _block_bootstrap_delta(signal_by_date: dict[str, list[int]],
     blocks = [dates[i:i+BLOCK] for i in range(0, len(dates), BLOCK)]
     if not blocks:
         return None, None
-    seed = int(hashlib.sha256(seed_key.encode()).hexdigest()[:16], 16)
+    # Freeze the deterministic SHA-256 key width used by the G178 contract.
+    seed = int(hashlib.sha256(seed_key.encode()).hexdigest()[:8], 16)
     rng = random.Random(seed)
     draws: list[float] = []
     for _ in range(BOOTSTRAPS):
@@ -284,7 +285,7 @@ def direction_backtest(etf_rows: list[dict], split: dict[str,Any]) -> dict:
                 for side_name,side in (("LONG",1),("SHORT",-1)):
                     for segment in ("IS","FINAL_OOS"):
                         m=_metric_for_signal(rows,states[ticker][signal],side,h,split,segment,
-                            f"D1|{ticker}|{signal}|{h}|{side_name}|{segment}")
+                            f"D1-G178|{ticker}|{signal}|{h}|{side_name}|{segment}")
                         candidates.append({"ticker":ticker,"signal":signal,"H":h,
                                            "side":side_name,"segment":segment,**m})
 

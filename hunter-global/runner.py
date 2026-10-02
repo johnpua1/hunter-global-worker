@@ -129,7 +129,7 @@ class Drive:
         attempts = max(1, int(os.getenv("HUNTER_BRIDGE_ATTEMPTS", "8")))
         for attempt in range(attempts):
             try:
-                if op == "read":
+                if op in ("read", "read_chunk"):
                     timeout = float(os.getenv("HUNTER_BRIDGE_READ_TIMEOUT_SECONDS", "30"))
                 else:
                     timeout = float(os.getenv("HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS", "120"))
@@ -145,8 +145,9 @@ class Drive:
                     raise ValueError("BRIDGE_POST_RETURNED_HEALTH:" + op)
                 if not result.get("ok"):
                     raise RuntimeError("BRIDGE_" + str(result.get("error", "UNKNOWN")))
-                required = {"read": ("data_base64", "sha256"), "put": ("file", "sha256"),
-                            "append": ("file", "sha256"),
+                required = {"read": ("data_base64", "sha256"),
+                            "read_chunk": ("data_base64", "sha256", "offset", "length", "size", "eof"),
+                            "put": ("file", "sha256"), "append": ("file", "sha256"),
                             "list": ("files",), "file": ("file",), "folder": ("folder",)}
                 if not all(field in result for field in required[op]):
                     raise ValueError("BRIDGE_RESPONSE_SHAPE:" + op + ":" + ",".join(sorted(result)))
@@ -173,7 +174,29 @@ class Drive:
 
     def read(self, path: str) -> bytes:
         import base64
-        result = self._call("read", path=path.strip("/"))
+        clean = path.strip("/")
+        info = self.file(clean)
+        if info and int(info.get("size") or 0) > 10_000_000:
+            expected = int(info["size"])
+            offset = 0
+            chunks = []
+            while offset < expected:
+                result = self._call("read_chunk", path=clean, offset=offset,
+                                    length=min(6_000_000, expected - offset))
+                if int(result["offset"]) != offset or int(result["size"]) != expected:
+                    raise RuntimeError("BRIDGE_READ_CHUNK_POSITION_MISMATCH:" + path)
+                data = base64.b64decode(result["data_base64"], validate=True)
+                if len(data) != int(result["length"]) or digest(data) != result["sha256"]:
+                    raise RuntimeError("BRIDGE_READ_CHUNK_SHA_MISMATCH:" + path)
+                chunks.append(data)
+                offset += len(data)
+                if result["eof"] and offset != expected:
+                    raise RuntimeError("BRIDGE_READ_CHUNK_EARLY_EOF:" + path)
+            data = b"".join(chunks)
+            if len(data) != expected:
+                raise RuntimeError("BRIDGE_READ_CHUNK_SIZE_MISMATCH:" + path)
+            return data
+        result = self._call("read", path=clean)
         data = base64.b64decode(result["data_base64"], validate=True)
         if digest(data) != result["sha256"]:
             raise RuntimeError("BRIDGE_READ_SHA_MISMATCH:" + path)

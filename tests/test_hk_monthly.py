@@ -1,3 +1,4 @@
+import datetime as dt
 import pathlib
 import sys
 import unittest
@@ -51,8 +52,9 @@ class HKMonthlyTests(unittest.TestCase):
     def test_hk_calendar_accepts_session_status_and_completed_daily(self):
         # Use a large synthetic calendar so the 501-session gate is reached.
         d=FakeDrive()
+        start=dt.date(2024,1,1)
         d.calendar["sessions"]=[
-            {"trade_date":f"{2024 + (i//365):04d}-01-{(i%28)+1:02d}",
+            {"trade_date":(start+dt.timedelta(days=i)).isoformat(),
              "session_status":"OPEN"}
             for i in range(510)
         ]

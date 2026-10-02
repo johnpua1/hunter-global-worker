@@ -647,7 +647,7 @@ function clearMonthlyTriggers_() {
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
     var handler = trigger.getHandlerFunction();
     // Retire any pre-deployment monthly trigger as part of the monthly cutover.
-    if (handler === 'monthlyV2' || handler === 'monthlyV2') ScriptApp.deleteTrigger(trigger);
+    if (handler === 'monthlyV2' || handler === 'quarterlyV2') ScriptApp.deleteTrigger(trigger);
   });
 }
 

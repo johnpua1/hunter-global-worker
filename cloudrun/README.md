@@ -60,3 +60,24 @@ legacy-only.
 Run `cloudrun/iam-audit.sh` from an authenticated Cloud Shell for a read-only
 live IAM audit before and after any scoped cutover.
 
+
+
+## V2 quarterly recertification
+
+`cloudrun/deploy-quarterly.sh` deploys only `hunter-quarterly-v2`. It uses a dedicated
+`hunter-quarterly@` runtime service account and a Bridge credential scoped to
+`SNAPSHOT_* / QUARTER_* / ACTIVE_POINTER / US/CONTROL/QUARTER_NOTICE.json`.
+The script performs a real-data regression against `SNAPSHOT_2026-10-01`
+before it asks the Apps Script bridge to install the next one-shot trigger.
+The validation execution must reproduce: no qualified LONG direction, no
+qualified SHORT direction, LONG baseline `MARKET_DRIFT_ONLY`, SHORT baseline
+`OOS_ONLY`. Failure stops before trigger installation.
+
+Quarterly production freezes the current US ACTIVE universe, full available
+OHLC and the 12 registered benchmark ETFs into immutable
+`SNAPSHOT_<date>`, recalculates D1 and the paired vertical baseline only, writes
+immutable `QUARTER_<year>Q<quarter>` artifacts, then commits `ACTIVE_POINTER`
+last. It never recalculates or replaces the frozen D/W grids, DW_MAX 0.34/0.40,
+or DWR/THR. The next trigger is one-shot and runs at 08:00 MYT after the first
+US session of the next quarter; if DAILY has not advanced to that session, the
+handler re-arms for the next MYT morning instead of using stale data.

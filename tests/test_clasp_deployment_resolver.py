@@ -13,8 +13,8 @@ spec.loader.exec_module(resolver)
 class ClaspDeploymentResolverTests(unittest.TestCase):
     SAMPLE = """Found 3 deployments.
 - DEV123 @HEAD
-- PROD5 @5
-- PROD7 @7
+- PROD5 @5 Hunter V2 monthly bridge old
+- PROD7 @7 Hunter V2 monthly bridge current
 """
 
     def test_prefers_existing_secret_id_when_versioned(self):

@@ -11,7 +11,7 @@ import io
 import json
 import math
 import re
-from collections import defaultdict, deque
+from collections import defaultdict
 from html.parser import HTMLParser
 from typing import Any
 
@@ -120,11 +120,15 @@ def _metrics(values: list[float]) -> dict[str, Any]:
         return {"n": 0, "wr": None, "pf": None, "exp": None}
     wins = [x for x in values if x > 0]
     losses = [x for x in values if x < 0]
-    pf = (sum(wins) / -sum(losses)) if losses else (math.inf if wins else None)
+    # Keep JSON strict. A no-loss sample has mathematically infinite PF; store
+    # the condition separately and let the gate treat it as satisfying PF.
+    no_loss_profit = bool(wins and not losses)
+    pf = (sum(wins) / -sum(losses)) if losses else None
     return {
         "n": len(values),
         "wr": len(wins) / len(values),
         "pf": pf,
+        "pf_infinite": no_loss_profit,
         "exp": sum(values) / len(values),
     }
 
@@ -228,44 +232,32 @@ def _simulate_profile(rows_by_sid: dict[str, list[dict]], eligible: set[str],
 
 def _pre_gate(row: dict[str, Any]) -> bool:
     oos = row["FINAL_OOS"]
-    if oos["n"] < 50 or oos["pf"] is None or oos["pf"] < 1.20:
+    pf_ok = bool(oos.get("pf_infinite")) or (
+        oos["pf"] is not None and oos["pf"] >= 1.20
+    )
+    if oos["n"] < 50 or not pf_ok:
         return False
     req = 0.15 if (oos["wr"] is None or oos["wr"] < 0.45) else 0.10
     return oos["exp"] is not None and oos["exp"] >= req
 
 
 def _stability(grid: list[dict[str, Any]]) -> None:
-    """Apply the frozen non-isolated-neighbour principle only after pre-gates pass."""
-    index = {(x["stop_atr"], x["target_r"], x["max_hold"]): x for x in grid}
-    passing = {key for key, row in index.items() if row["pre_stability_pass"]}
-    seen: set[tuple[float, float, int]] = set()
-    for key in passing:
-        if key in seen:
-            continue
-        component: set[tuple[float, float, int]] = set()
-        queue = deque([key])
-        seen.add(key)
-        while queue:
-            cur = queue.popleft()
-            component.add(cur)
-            si, ti, hi = STOPS.index(cur[0]), TARGETS.index(cur[1]), HOLDS.index(cur[2])
-            neighbours = []
-            for ds, dtg, dh in ((-1,0,0),(1,0,0),(0,-1,0),(0,1,0),(0,0,-1),(0,0,1)):
-                a, b, c = si + ds, ti + dtg, hi + dh
-                if 0 <= a < len(STOPS) and 0 <= b < len(TARGETS) and 0 <= c < len(HOLDS):
-                    neighbours.append((STOPS[a], TARGETS[b], HOLDS[c]))
-            for neighbour in neighbours:
-                if neighbour in passing and neighbour not in seen:
-                    seen.add(neighbour)
-                    queue.append(neighbour)
-        state = "PASS" if len(component) >= 3 else "OVERFIT_RISK"
-        for member in component:
-            index[member]["stability"] = state
+    """Fail closed when the historical HK contract never reached Stability.
 
+    G160/G161 define Stability as a required gate, but every frozen parameter
+    point failed N/PF/Expectancy before Stability was evaluated. There is no
+    separately frozen HK stock-Stability evaluator to reuse. Therefore this
+    monthlyization preserves the historical behavior exactly:
+    - pre-gate FAIL -> NOT_EVALUATED_GATE_ALREADY_FAIL;
+    - pre-gate PASS -> STABILITY_CONTRACT_REQUIRED, not certified.
+    A future explicit HK Stability contract can replace this fail-closed state.
+    """
     for row in grid:
-        if not row["pre_stability_pass"]:
+        if row["pre_stability_pass"]:
+            row["stability"] = "STABILITY_CONTRACT_REQUIRED"
+        else:
             row["stability"] = "NOT_EVALUATED_GATE_ALREADY_FAIL"
-        row["status"] = "PASS" if row["pre_stability_pass"] and row["stability"] == "PASS" else "FAIL"
+        row["status"] = "FAIL"
 
 
 def edge_grid(rows_by_sid: dict[str, list[dict]], eligible: set[str],
@@ -286,7 +278,9 @@ def edge_grid(rows_by_sid: dict[str, list[dict]], eligible: set[str],
                     "FINAL_OOS": oos,
                     "required_exp": required_exp,
                     "n_gate": oos["n"] >= 50,
-                    "pf_gate": oos["pf"] is not None and oos["pf"] >= 1.20,
+                    "pf_gate": bool(oos.get("pf_infinite")) or (
+                        oos["pf"] is not None and oos["pf"] >= 1.20
+                    ),
                     "exp_gate": oos["exp"] is not None and oos["exp"] >= required_exp,
                 }
                 row["pre_stability_pass"] = _pre_gate(row)
@@ -306,6 +300,21 @@ def edge_grid(rows_by_sid: dict[str, list[dict]], eligible: set[str],
         "best_by_oos_expectancy": best,
         "grid": grid,
     }
+
+
+def _hk_open_dates(drive, asof: str) -> list[str]:
+    dates: set[str] = set()
+    for path in read_files(drive, "HK", "MARKET_CALENDAR", ".json"):
+        payload = drive.json(path)
+        rows = payload if isinstance(payload, list) else payload.get("sessions", [])
+        for row in rows:
+            date = str(row.get("date") or row.get("trade_date") or "")
+            status = str(row.get("status") or row.get("session") or row.get("market_status") or "").upper()
+            if date and date <= asof and status == "OPEN":
+                dates.add(date)
+    if len(dates) < WINDOW_BARS:
+        raise RuntimeError("HK_MARKET_CALENDAR_REQUIRES_501_OPEN_SESSIONS")
+    return sorted(dates)
 
 
 def _load_snapshot_groups(drive, snapshot: str) -> tuple[dict[str, list[dict]], dict[str, Any]]:
@@ -654,8 +663,7 @@ def run_hk_monthly(drive, validation: bool = False) -> dict[str, Any]:
     if validation:
         split = _legacy_split()
     else:
-        representative = max(complete_rows.values(), key=len)
-        split = _dynamic_split([r.get("trade_date", r["date"]) for r in representative])
+        split = _dynamic_split(_hk_open_dates(drive, asof))
 
     hkex_rows, short_version = _latest_hkex(asof, validation=validation)
     short_filename = "HKEX_DESIGNATED_SHORT_SELLING_" + short_version["effective_date"].replace("-", "") + ".csv"

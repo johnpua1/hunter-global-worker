@@ -20,6 +20,17 @@ function doPost(e) {
     var root = DriveApp.getFolderById(rootId);
     if (root.getName() !== 'HUNTER_GLOBAL') throw new Error('ROOT_ID_MISMATCH');
     var op = String(body.op || '');
+    if (op === 'bootstrap_quarter_key') {
+      if (scope !== 'LEGACY') throw new Error('QUARTER_KEY_BOOTSTRAP_LEGACY_ONLY');
+      var quarterKey = props.getProperty('BRIDGE_QUARTER_KEY');
+      var created = false;
+      if (!quarterKey) {
+        quarterKey = Utilities.getUuid() + Utilities.getUuid();
+        props.setProperty('BRIDGE_QUARTER_KEY', quarterKey);
+        created = true;
+      }
+      return bridgeJson_({ok: true, key: quarterKey, created: created});
+    }
     var path = bridgePath_(body.path || '');
     bridgeScopeAuthorize_(scope, op, path);
     if (op === 'folder') {

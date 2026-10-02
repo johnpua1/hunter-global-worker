@@ -1,0 +1,33 @@
+name: quarterly-v2-live-regression
+
+on:
+  push:
+    branches:
+      - 'hardening/quarterly-v2-live-regression'
+    paths:
+      - 'hunter-global/quarterly_live_regression.py'
+      - 'hunter-global/quarterly_v2.py'
+      - '.github/workflows/quarterly-v2-live-regression.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: python -m pip install -r hunter-global/requirements.txt
+      - name: Syntax
+        run: python -m py_compile hunter-global/quarterly_v2.py hunter-global/quarterly_live_regression.py
+      - name: G178 real-data read-only regression
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: python quarterly_live_regression.py

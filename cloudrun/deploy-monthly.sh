@@ -25,44 +25,30 @@ for secret in "$URL_SECRET" "$LEGACY_KEY_SECRET"; do
   gcloud secrets versions list "$secret" --project "$GCP_PROJECT_ID"     --filter='state=ENABLED' --format='value(name)' | grep -q .
 done
 
-# Bootstrap one path-scoped monthly Bridge credential through the already
-# deployed Bridge. The legacy credential is held only in shell variables and
-# never printed or passed on a process command line.
-BRIDGE_URL="$(gcloud secrets versions access latest --secret "$URL_SECRET" --project "$GCP_PROJECT_ID")"
-LEGACY_KEY="$(gcloud secrets versions access latest --secret "$LEGACY_KEY_SECRET" --project "$GCP_PROJECT_ID")"
-BOOTSTRAP_JSON="$(BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" python - <<'PY'
-import json, os, urllib.request
-body=json.dumps({"op":"bootstrap_month_key","key":os.environ["LEGACY_KEY"]}).encode()
-req=urllib.request.Request(os.environ["BRIDGE_URL"],data=body,
-    headers={"Content-Type":"application/json"},method="POST")
-with urllib.request.urlopen(req,timeout=60) as r:
-    data=json.load(r)
-if not data.get("ok") or not data.get("key"):
-    raise SystemExit("Bridge monthly bootstrap unavailable. Deploy the current bridge/Gateway.gs Web App first.")
-print(json.dumps({"key":data["key"]},separators=(",",":")))
-PY
-)"
-MONTH_KEY="$(BOOTSTRAP_JSON="$BOOTSTRAP_JSON" python - <<'PY'
-import json,os
-print(json.loads(os.environ["BOOTSTRAP_JSON"])["key"])
-PY
-)"
-unset BOOTSTRAP_JSON LEGACY_KEY
+# Reuse the monthly Bridge credential when a previous partial deployment
+# already created it. Only bootstrap on a true first install.
+MONTH_SECRET_READY=0
+if gcloud secrets describe "$MONTH_KEY_SECRET" --project "$GCP_PROJECT_ID" >/dev/null 2>&1 &&
+   gcloud secrets versions list "$MONTH_KEY_SECRET" --project "$GCP_PROJECT_ID" \
+     --filter='state=ENABLED' --format='value(name)' | grep -q .; then
+  MONTH_SECRET_READY=1
+  echo "MONTH_KEY_SECRET_REUSE=PASS"
+fi
 
-if ! gcloud secrets describe "$MONTH_KEY_SECRET" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
-  gcloud secrets create "$MONTH_KEY_SECRET" --replication-policy=automatic --project "$GCP_PROJECT_ID" >/dev/null
+if [[ "$MONTH_SECRET_READY" != "1" ]]; then
+  BRIDGE_URL="$(gcloud secrets versions access latest --secret "$URL_SECRET" --project "$GCP_PROJECT_ID")"
+  LEGACY_KEY="$(gcloud secrets versions access latest --secret "$LEGACY_KEY_SECRET" --project "$GCP_PROJECT_ID")"
+  BOOTSTRAP_JSON="$(BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" \
+    python "$ROOT/cloudrun/apps-script-post.py" --op bootstrap_month_key --raw)"
+  MONTH_KEY="$(BOOTSTRAP_JSON="$BOOTSTRAP_JSON" python -c 'import json,os; d=json.loads(os.environ["BOOTSTRAP_JSON"]); assert d.get("ok") and d.get("key"), d; print(d["key"])')"
+  unset BOOTSTRAP_JSON LEGACY_KEY
+  if ! gcloud secrets describe "$MONTH_KEY_SECRET" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
+    gcloud secrets create "$MONTH_KEY_SECRET" --replication-policy=automatic --project "$GCP_PROJECT_ID" >/dev/null
+  fi
   printf '%s' "$MONTH_KEY" | gcloud secrets versions add "$MONTH_KEY_SECRET" \
     --data-file=- --project "$GCP_PROJECT_ID" >/dev/null
-else
-  CURRENT_MONTH_KEY="$(gcloud secrets versions access latest --secret "$MONTH_KEY_SECRET" \
-    --project "$GCP_PROJECT_ID" 2>/dev/null || true)"
-  if [[ "$CURRENT_MONTH_KEY" != "$MONTH_KEY" ]]; then
-    printf '%s' "$MONTH_KEY" | gcloud secrets versions add "$MONTH_KEY_SECRET" \
-      --data-file=- --project "$GCP_PROJECT_ID" >/dev/null
-  fi
-  unset CURRENT_MONTH_KEY
+  unset MONTH_KEY
 fi
-unset MONTH_KEY
 
 if ! gcloud iam service-accounts describe "$SA" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
   gcloud iam service-accounts create "$SA_ID" \

@@ -69,7 +69,10 @@ class ProductionTopologyLockTests(unittest.TestCase):
         self.assertIn('gcloud builds submit "$ROOT" --tag "$IMAGE"', source)
         for job in ("hunter-us-daily","hunter-hk-daily","hunter-maintenance","hunter-monthly-v2"):
             self.assertIn(job, source)
-        self.assertIn('gcloud run jobs update "$job" --image "$IMAGE"', source)
+        self.assertIn('gcloud run jobs update hunter-us-daily --image "$IMAGE"', source)
+        self.assertIn('gcloud run jobs update hunter-hk-daily --image "$IMAGE"', source)
+        self.assertIn('gcloud run jobs update hunter-maintenance --image "$IMAGE"', source)
+        self.assertIn('gcloud run jobs update hunter-monthly-v2 --image "$IMAGE"', source)
         self.assertIn('"USImage"', source)
         self.assertIn('"MONTHImage"', source)
         self.assertIn("UNEXPECTED_HUNTER_JOB", source)

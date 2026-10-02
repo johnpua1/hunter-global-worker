@@ -309,9 +309,23 @@ def _hk_open_dates(drive, asof: str) -> list[str]:
         rows = payload if isinstance(payload, list) else payload.get("sessions", [])
         for row in rows:
             date = str(row.get("date") or row.get("trade_date") or "")
-            status = str(row.get("status") or row.get("session") or row.get("market_status") or "").upper()
-            if date and date <= asof and status == "OPEN":
+            status = str(
+                row.get("session_status") or row.get("status") or
+                row.get("session") or row.get("market_status") or ""
+            ).upper()
+            if date and date <= asof and status in ("OPEN", "HALF_DAY"):
                 dates.add(date)
+
+    # The persisted BASE calendar may end at the sealed BASE as-of date.
+    # Every dated HK/DAILY directory is itself evidence of a completed open
+    # exchange session, so extend the calendar with those completed sessions
+    # instead of guessing weekdays or holidays.
+    for item in drive.list("HK/DAILY"):
+        date = str(item.get("name") or "")
+        if (len(date) == 10 and date[4] == "-" and date[7] == "-" and
+                date <= asof):
+            dates.add(date)
+
     if len(dates) < WINDOW_BARS:
         raise RuntimeError("HK_MARKET_CALENDAR_REQUIRES_501_OPEN_SESSIONS")
     return sorted(dates)

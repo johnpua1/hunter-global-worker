@@ -552,6 +552,8 @@ def _build_snapshot(drive, asof: str) -> tuple[str,list[list[dict]],list[dict]]:
 
     universe=drive.json("US/CURRENT_UNIVERSE.json")
     active={x["security_id"]:x for x in universe["securities"] if x.get("listing_status")=="ACTIVE"}
+    candidate_active={sid:sec for sid,sec in active.items()
+                      if sec.get("ticker") not in BENCHMARK_ETFS}
     base_asof=drive.json("US/CHECKPOINT.json")["as_of"]
 
     daily=defaultdict(list)
@@ -561,7 +563,7 @@ def _build_snapshot(drive, asof: str) -> tuple[str,list[list[dict]],list[dict]]:
             continue
         for path in read_files(drive,"US","DAILY/"+name,(".ndjson.gz",".ndjson.gzip")):
             for row in _parse_gz_ndjson(drive.read(path)):
-                if row.get("security_id") in active:
+                if row.get("security_id") in candidate_active:
                     daily[row["security_id"]].append(row)
 
     patches=defaultdict(list)
@@ -571,7 +573,7 @@ def _build_snapshot(drive, asof: str) -> tuple[str,list[list[dict]],list[dict]]:
         if not isinstance(items,list):
             items=[payload] if isinstance(payload,dict) else []
         for patch in items:
-            if patch.get("security_id") in active:
+            if patch.get("security_id") in candidate_active:
                 patches[patch["security_id"]].append(patch)
 
     events=[]
@@ -594,7 +596,7 @@ def _build_snapshot(drive, asof: str) -> tuple[str,list[list[dict]],list[dict]]:
         by=defaultdict(list)
         for row in _parse_gz_ndjson(drive.read("US/BASE/"+name)):
             sid=row.get("security_id")
-            if sid in active:
+            if sid in candidate_active:
                 by[sid].append(row)
         out=[]
         for sid in sorted(by):
@@ -608,7 +610,7 @@ def _build_snapshot(drive, asof: str) -> tuple[str,list[list[dict]],list[dict]]:
         part_manifest.append({"name":pname,"rows":len(out),"bytes":len(payload),"sha256":_sha(payload)})
 
     tail=[]
-    for sid in sorted(set(active)-seen):
+    for sid in sorted(set(candidate_active)-seen):
         rows=split_adjust(compose([],patches[sid],daily[sid]),events)
         rows=[r for r in rows if r.get("trade_date",r["date"])<=asof]
         if rows:
@@ -635,6 +637,8 @@ def _build_snapshot(drive, asof: str) -> tuple[str,list[list[dict]],list[dict]]:
 
     manifest={"schema":"HUNTER_QUARTER_SNAPSHOT_V2","snapshot":snapshot,"market":"US","as_of":asof,
               "semantic":"IMMUTABLE_READ_ONLY_BY_NAME_AND_SHA256","active_count":len(active),
+              "candidate_active_count":len(candidate_active),
+              "candidate_exclusion":"All BENCHMARK ETFs are excluded from stock candidate universe",
               "parts":part_manifest,"benchmark_etfs":list(BENCHMARK_ETFS),
               "benchmark_bars_each":WINDOW_BARS,"benchmark_sha256":_sha(bench_bytes)}
     drive.put(snapshot+"/MANIFEST.json",_compact(manifest),immutable=True)
@@ -719,16 +723,22 @@ def run_quarterly(drive, snapshot_name: str | None = None, validation: bool = Fa
     quarter=_quarter_name(asof)
     prior_raw=drive.read("ACTIVE_POINTER") if drive.file("ACTIVE_POINTER") else None
     prior=json.loads(prior_raw) if prior_raw else None
-    now=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(timespec="seconds")
+
+    result_path=quarter+"/RESULT.json"
+    existing_result=drive.json(result_path) if drive.file(result_path) else None
+    now=(existing_result or {}).get("created_at_myt") or dt.datetime.now(
+        dt.timezone(dt.timedelta(hours=8))).isoformat(timespec="seconds")
     result={"schema":"INVESTMENT_V2_QUARTERLY_V2","quarter":quarter,"snapshot":snapshot,
             "as_of":asof,"created_at_myt":now,"direction":direction,
             "vertical_baseline":baseline,
             "excluded":{"dw_grid_recomputed":False,"dw_max_long":0.34,"dw_max_short":0.40,
                         "dwr_thr_recomputed":False},
             "validation":validation_result}
+    if existing_result is not None and _compact(existing_result) != _compact(result):
+        raise RuntimeError("QUARTER_IMMUTABLE_RESULT_MISMATCH:"+quarter)
 
     drive.folder(quarter,create=True)
-    drive.put(quarter+"/RESULT.json",_compact(result),immutable=True)
+    drive.put(result_path,_compact(result),immutable=True)
     drive.put(quarter+"/DIRECTION_D1.json",_compact(direction),immutable=True)
     drive.put(quarter+"/VERTICAL_BASELINE.json",_compact(baseline),immutable=True)
 
@@ -738,8 +748,11 @@ def run_quarterly(drive, snapshot_name: str | None = None, validation: bool = Fa
         return {k:direction[side].get(k) for k in
                 ("ticker","signal","H","wr","benchmark_wr","delta","delta_ci","n")}
 
+    same_quarter=bool(prior and prior.get("quarter_file")==quarter and
+                      prior.get("snapshot")==snapshot and prior.get("as_of")==asof)
     pointer={"schema":"INVESTMENT_V2_ACTIVE_POINTER_V2",
-             "version":1 if not prior else int(prior.get("version",0))+1,
+             "version":int(prior.get("version",1)) if same_quarter else
+                       (1 if not prior else int(prior.get("version",0))+1),
              "quarter_file":quarter,"snapshot":snapshot,"as_of":asof,
              "long_direction_signal":signal_pointer("LONG"),
              "short_direction_signal":signal_pointer("SHORT"),
@@ -756,8 +769,21 @@ def run_quarterly(drive, snapshot_name: str | None = None, validation: bool = Fa
                          "short_vertical_baseline":prior.get("short_vertical_baseline")} if prior else None,
              "quarter_update_pending":True,
              "writer":"HUNTER_QUARTERLY_V2","written_at_myt":now}
-    drive.put("ACTIVE_POINTER",_compact(pointer),
-              expected_sha=_sha(prior_raw) if prior_raw is not None else None)
+    if same_quarter:
+        comparable=dict(prior)
+        comparable.update({"long_direction_signal":pointer["long_direction_signal"],
+                           "short_direction_signal":pointer["short_direction_signal"],
+                           "long_vertical_baseline":pointer["long_vertical_baseline"],
+                           "short_vertical_baseline":pointer["short_vertical_baseline"],
+                           "direction_detail":pointer["direction_detail"]})
+        for key in ("long_direction_signal","short_direction_signal",
+                    "long_vertical_baseline","short_vertical_baseline","direction_detail"):
+            if prior.get(key) != comparable.get(key):
+                raise RuntimeError("ACTIVE_POINTER_SAME_QUARTER_CONFLICT:"+key)
+        pointer=prior
+    else:
+        drive.put("ACTIVE_POINTER",_compact(pointer),
+                  expected_sha=_sha(prior_raw) if prior_raw is not None else None)
 
     notice_path="US/CONTROL/QUARTER_NOTICE.json"
     notice_raw=drive.read(notice_path) if drive.file(notice_path) else None

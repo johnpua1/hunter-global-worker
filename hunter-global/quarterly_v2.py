@@ -446,19 +446,71 @@ def _write_gz_ndjson(rows: list[dict]) -> bytes:
     return gzip.compress(raw,mtime=0)
 
 
-def _load_snapshot_groups(drive, snapshot: str) -> list[list[dict]]:
+def _parse_gz_csv(data: bytes) -> list[dict]:
+    stream=io.TextIOWrapper(gzip.GzipFile(fileobj=io.BytesIO(data)),encoding="utf-8-sig",newline="")
+    out=[]
+    for row in csv.DictReader(stream):
+        item=dict(row)
+        for key in ("open","high","low","close","volume"):
+            if key in item and item[key] not in ("",None):
+                item[key]=float(item[key])
+        out.append(item)
+    return out
+
+
+def _iter_gz_csv_groups(data: bytes) -> Iterable[list[dict]]:
+    stream=io.TextIOWrapper(gzip.GzipFile(fileobj=io.BytesIO(data)),encoding="utf-8-sig",newline="")
+    current=None
+    group=[]
+    for row in csv.DictReader(stream):
+        sid=row.get("security_id")
+        if not sid:
+            raise RuntimeError("SNAPSHOT_SECURITY_ID_MISSING")
+        item=dict(row)
+        for key in ("open","high","low","close","volume"):
+            if item.get(key) not in ("",None):
+                item[key]=float(item[key])
+        if current is None:
+            current=sid
+        if sid!=current:
+            yield group
+            group=[]
+            current=sid
+        group.append(item)
+    if group:
+        yield group
+
+
+def _load_snapshot_groups(drive, snapshot: str) -> Iterable[list[dict]]:
     files=drive.list(snapshot)
-    parts=sorted(x["name"] for x in files if x["name"].startswith("US_ACTIVE_OHLC_PART_") and x["name"].endswith(".ndjson.gz"))
-    if not parts:
-        raise RuntimeError("SNAPSHOT_PARTS_MISSING:"+snapshot)
-    groups=[]
-    for name in parts:
-        rows=_parse_gz_ndjson(drive.read(snapshot+"/"+name))
-        by=defaultdict(list)
-        for row in rows:
-            by[row["security_id"]].append(row)
-        groups.extend(by.values())
-    return groups
+    names={x["name"] for x in files}
+    parts=sorted(name for name in names
+                 if name.startswith("US_ACTIVE_OHLC_PART_") and name.endswith(".ndjson.gz"))
+    if parts:
+        for name in parts:
+            rows=_parse_gz_ndjson(drive.read(snapshot+"/"+name))
+            by=defaultdict(list)
+            for row in rows:
+                by[row["security_id"]].append(row)
+            for sid in sorted(by):
+                yield by[sid]
+        return
+    legacy="US_ACTIVE_OHLC.csv.gz"
+    if legacy in names:
+        yield from _iter_gz_csv_groups(drive.read(snapshot+"/"+legacy))
+        return
+    raise RuntimeError("SNAPSHOT_OHLC_MISSING:"+snapshot)
+
+
+def _load_snapshot_bench(drive, snapshot: str) -> list[dict]:
+    names={x["name"] for x in drive.list(snapshot)}
+    nd="BENCHMARK_ETF_12_501.ndjson.gz"
+    legacy="BENCHMARK_ETF_12_501.csv.gz"
+    if nd in names:
+        return _parse_gz_ndjson(drive.read(snapshot+"/"+nd))
+    if legacy in names:
+        return _parse_gz_csv(drive.read(snapshot+"/"+legacy))
+    raise RuntimeError("SNAPSHOT_BENCHMARK_MISSING:"+snapshot)
 
 
 def _build_snapshot(drive, asof: str) -> tuple[str,list[list[dict]],list[dict]]:

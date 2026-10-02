@@ -84,6 +84,19 @@ class QuarterlyV2Tests(unittest.TestCase):
         self.assertIn("_load_snapshot_groups",source)
         self.assertIn("vertical_baseline(groups,split)",source)
 
+    def test_metric_warmup_is_independent_of_seed_namespace(self):
+        rows=[]
+        start=dt.date(2025,1,1)
+        for i in range(220):
+            d=(start+dt.timedelta(days=i)).isoformat()
+            rows.append({"date":d,"open":100+i*.1,"close":100.2+i*.1})
+        split={"is_start":rows[0]["date"],"is_end":rows[-1]["date"],
+               "oos_start":"2099-01-01","oos_end":"2099-12-31"}
+        metric=q._metric_for_signal(
+            rows,[1]*len(rows),1,5,split,"IS","S4",
+            "D1-G178|SPY|S4|5|LONG|IS")
+        self.assertGreater(metric["benchmark_n"],0)
+
     def test_vertical_p_is_symmetric(self):
         self.assertAlmostEqual(q._vertical_p("LONG",100,105),1.0)
         self.assertAlmostEqual(q._vertical_p("SHORT",100,95),1.0)

@@ -67,6 +67,7 @@ class ProductionTopologyLockTests(unittest.TestCase):
         self.assertIn('gcloud run jobs update "$job" --image "$IMAGE"', source)
         self.assertIn('"USImage"', source)
         self.assertIn('"MONTHImage"', source)
+        self.assertIn("UNEXPECTED_HUNTER_JOB", source)
 
     def test_schedule_script_is_maintenance_only(self):
         source = (ROOT / "cloudrun" / "schedule.sh").read_text(encoding="utf-8")

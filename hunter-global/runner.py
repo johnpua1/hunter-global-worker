@@ -717,9 +717,10 @@ def main():
         raise RuntimeError("SINGLE_WRITER_NOT_CONFIRMED: disable Apps Script triggers first")
     workers = max(1, min(10, int(os.getenv("FETCH_WORKERS", "6"))))
     if args.mode == "monthly":
-        from monthly_v2 import run_monthly
+        from combined_monthly import run_combined_monthly
         LOG.info("monthly result=%s",
-                 run_monthly(drive, snapshot_name=args.snapshot, validation=args.validation))
+                 run_combined_monthly(drive, snapshot_name=args.snapshot,
+                                      validation=args.validation))
         return
     if args.mode == "base":
         raise RuntimeError("BASE_SEALED")

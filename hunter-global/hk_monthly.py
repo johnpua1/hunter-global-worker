@@ -419,7 +419,9 @@ def _metrics(trades: list[dict], segment: str, field: str = "r_net") -> dict[str
     values = [float(t[field]) for t in trades if t["segment"] == segment and math.isfinite(float(t[field]))]
     wins = [x for x in values if x > 0]
     losses = [x for x in values if x < 0]
-    pf = (sum(wins) / abs(sum(losses))) if losses else (math.inf if wins else None)
+    # Keep JSON/Apps-Script transport finite while preserving the mathematical
+    # meaning of an all-winning sample for threshold comparisons.
+    pf = (sum(wins) / abs(sum(losses))) if losses else (1e308 if wins else None)
     return {
         "n": len(values),
         "wr": (len(wins) / len(values)) if values else None,

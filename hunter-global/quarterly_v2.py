@@ -136,6 +136,8 @@ def _block_bootstrap_delta(signal_by_date: dict[str, list[int]],
         chosen: list[str] = []
         for _j in range(len(blocks)):
             chosen.extend(blocks[rng.randrange(len(blocks))])
+        # Preserve the original timeline length when the final block is partial.
+        chosen = chosen[:len(dates)]
         s = [v for d in chosen for v in signal_by_date.get(d, ())]
         b = [v for d in chosen for v in base_by_date.get(d, ())]
         if s and b:
@@ -155,7 +157,9 @@ def _direction_state(rows: list[dict]) -> dict[str, list[int]]:
     # acceptance run changes state only on a histogram zero-cross.
     s1 = [0] * len(rows)
     state = 0
-    for i in range(1, len(rows)):
+    # G178 freezes S1 at NONE through the 50-session indicator warmup.
+    # Crosses before the first eligible judgment date must not seed S1.
+    for i in range(50, len(rows)):
         if hist[i-1] <= 0 < hist[i]:
             state = 1
         elif hist[i-1] >= 0 > hist[i]:

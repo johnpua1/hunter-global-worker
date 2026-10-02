@@ -59,6 +59,11 @@ class ProductionTopologyLockTests(unittest.TestCase):
         self.assertIn('job != "hunter-maintenance"', maint)
         self.assertIn("TOPOLOGY_RUNTIME_MISMATCH", maint)
 
+    def test_myt_timezone_aliases_are_explicitly_limited(self):
+        source = (ROOT / "cloudrun" / "enforce-four-job-topology.sh").read_text(encoding="utf-8")
+        self.assertIn('{"Asia/Kuala_Lumpur","Asia/Singapore"}', source)
+        self.assertNotIn('startswith("Asia/")', source)
+
     def test_live_enforcer_updates_all_four_images_only(self):
         source = (ROOT / "cloudrun" / "enforce-four-job-topology.sh").read_text(encoding="utf-8")
         self.assertIn('gcloud builds submit "$ROOT" --tag "$IMAGE"', source)

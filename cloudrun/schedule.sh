@@ -2,8 +2,8 @@
 set -euo pipefail
 set +x
 : "${GCP_PROJECT_ID:?Set project ID}"
-if [[ "${HUNTER_TRIGGER_AUTHORITY:-}" != "CLOUD_SCHEDULER" ]]; then
-  echo 'Refusing Scheduler mutation: set HUNTER_TRIGGER_AUTHORITY=CLOUD_SCHEDULER explicitly.' >&2
+if [[ "${HUNTER_TRIGGER_AUTHORITY:-}" != "MAINTENANCE_ONLY" ]]; then
+  echo 'Refusing Scheduler mutation: set HUNTER_TRIGGER_AUTHORITY=MAINTENANCE_ONLY explicitly.' >&2
   exit 64
 fi
 REGION=us-central1

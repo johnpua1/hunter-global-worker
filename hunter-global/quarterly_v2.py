@@ -595,36 +595,6 @@ def _build_snapshot(drive, asof: str) -> tuple[str,list[list[dict]],list[dict]]:
     return snapshot,groups,bench
 
 
-def _g178_fixture() -> tuple[dict,dict]:
-    direction={
-      "split":_g178_split(),
-      "is_selected":{
-        "LONG":{"ticker":"SPY","signal":"S4","H":10,"wr":0.8125,"benchmark_wr":0.7085427135678392,
-                "delta":0.10395728643216085,"delta_ci":[0.00226239599139189,0.24064926909920152],"n":64},
-        "SHORT":{"ticker":"IWM","signal":"S3","H":5,"wr":0.6363636363636364,"benchmark_wr":0.3,
-                 "delta":0.3363636363636364,"delta_ci":[0.15625,0.52],"n":11}},
-      "final_oos_standalone":{
-        "LONG":{"ticker":"SPY","signal":"S4","H":10,"n":93,"wr":0.46236559139784944,
-                "benchmark_wr":0.5560165975103735,"delta":-0.09365100611252405,
-                "delta_ci":[-0.24595441952506596,0.055892087049779576],"pass":False},
-        "SHORT":{"ticker":"IWM","signal":"S3","H":5,"n":0,"wr":None,"benchmark_wr":0.4897959183673469,
-                 "delta":None,"delta_ci":[None,None],"pass":False}},
-      "replay_rounds":[{"long_days":0,"short_days":0,"none_days":245,"coverage":0.0}],
-      "final_online":[],"LONG":"无合格信号","SHORT":"无合格信号"}
-    baseline={
-      "LONG":{"IS":{"n":5854,"own":0.3973315753041392,"bench":0.40606151903052695,
-                     "delta":-0.008729943726387746,"delta_ci":[-0.04760463183193934,0.01766311297072966]},
-              "FINAL_OOS":{"n":7410,"own":0.391389410574781,"bench":0.38934503480645566,
-                     "delta":0.002044375768325335,"delta_ci":[-0.023803726458850493,0.0282587175145511]},
-              "verdict":"MARKET_DRIFT_ONLY"},
-      "SHORT":{"IS":{"n":7428,"own":0.39592643775206443,"bench":0.4052858110215986,
-                     "delta":-0.009359373269534177,"delta_ci":[-0.02730780834120174,0.012354992675052976]},
-              "FINAL_OOS":{"n":7611,"own":0.44561326955688624,"bench":0.4177880513769859,
-                     "delta":0.027825218179900357,"delta_ci":[0.0008906898347010768,0.05922587376500989]},
-              "verdict":"OOS_ONLY"}}
-    return direction,baseline
-
-
 def _quarter_name(asof: str) -> str:
     d=dt.date.fromisoformat(asof)
     return f"QUARTER_{d.year}Q{(d.month-1)//3+1}"

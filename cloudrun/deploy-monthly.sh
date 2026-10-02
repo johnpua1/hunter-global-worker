@@ -130,4 +130,20 @@ print(json.dumps(data,separators=(",",":")))
 PY
 )"
 unset LEGACY_KEY BRIDGE_URL
-printf 'VALIDATION=PASS\nJOB=%s\nACTIVE_POINTER=%s\nTRIGGER=%s\nSTATUS=%s\n' "$JOB" "$POINTER_JSON" "$TRIGGER_JSON" "$STATUS_JSON"
+
+# Retire the superseded quarterly deployment only after the monthly worker,
+# validation pointer, and monthly trigger have all passed.
+OLD_JOB="hunter-quarterly-v2"
+OLD_SA="hunter-quarterly@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+OLD_SECRET="APPS_SCRIPT_SHARED_KEY_QUARTER"
+if gcloud run jobs describe "$OLD_JOB" --region "$REGION" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
+  gcloud run jobs delete "$OLD_JOB" --region "$REGION" --project "$GCP_PROJECT_ID" --quiet >/dev/null
+fi
+if gcloud secrets describe "$OLD_SECRET" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
+  gcloud secrets delete "$OLD_SECRET" --project "$GCP_PROJECT_ID" --quiet >/dev/null
+fi
+if gcloud iam service-accounts describe "$OLD_SA" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
+  gcloud iam service-accounts delete "$OLD_SA" --project "$GCP_PROJECT_ID" --quiet >/dev/null
+fi
+
+printf 'VALIDATION=PASS\nJOB=%s\nACTIVE_POINTER=%s\nTRIGGER=%s\nSTATUS=%s\nRETIRED=%s\n' "$JOB" "$POINTER_JSON" "$TRIGGER_JSON" "$STATUS_JSON" "$OLD_JOB"

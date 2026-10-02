@@ -11,9 +11,20 @@ cd "$ROOT"
 test "$(git branch --show-current)" = main
 test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
-for job in hunter-us-daily hunter-hk-daily hunter-maintenance hunter-monthly-v2; do
+EXPECTED_JOBS=(hunter-us-daily hunter-hk-daily hunter-maintenance hunter-monthly-v2)
+for job in "${EXPECTED_JOBS[@]}"; do
   gcloud run jobs describe "$job" --project "$GCP_PROJECT_ID" --region "$REGION" >/dev/null
 done
+
+mapfile -t LIVE_HUNTER_JOBS < <(gcloud run jobs list --project "$GCP_PROJECT_ID" --region "$REGION" \
+  --format='value(name)' | sed 's#.*/##' | grep '^hunter-' | sort -u || true)
+mapfile -t UNEXPECTED_HUNTER_JOBS < <(comm -23 \
+  <(printf '%s\n' "${LIVE_HUNTER_JOBS[@]}" | sort -u) \
+  <(printf '%s\n' "${EXPECTED_JOBS[@]}" | sort -u))
+if (("${#UNEXPECTED_HUNTER_JOBS[@]}")); then
+  printf 'UNEXPECTED_HUNTER_JOB=%s\n' "${UNEXPECTED_HUNTER_JOBS[@]}" >&2
+  exit 1
+fi
 
 # Build the locked release once, then update only the image field on the four
 # existing jobs. This preserves each job's current SA, secrets, resources and

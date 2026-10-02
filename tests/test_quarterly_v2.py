@@ -4,6 +4,8 @@ import pathlib
 import sys
 import unittest
 
+# CI branch verification for quarterly V2.
+
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/"hunter-global"))
 import quarterly_v2 as q

@@ -804,7 +804,17 @@ def run_monthly(drive, snapshot_name: str | None = None, validation: bool = Fals
                          "long_vertical_baseline":prior.get("long_vertical_baseline"),
                          "short_vertical_baseline":prior.get("short_vertical_baseline")} if prior else None,
              "month_update_pending":True,
-             "writer":"HUNTER_MONTHLY_V2","written_at_myt":now}
+             "writer":"HUNTER_MONTHLY_V2_US_PHASE","written_at_myt":now}
+    # HK monthly is a separate track. The US phase must never erase the last
+    # committed HK authority while the current month's HK recertification is
+    # still pending.
+    for key in (
+        "hk_month_file","hk_snapshot","hk_as_of","hk_long_result",
+        "hk_short_result","hk_shortable_list_version","hk_vertical_overlay",
+        "hk_previous",
+    ):
+        if prior and key in prior:
+            pointer[key]=prior[key]
     if same_month:
         comparable=dict(prior)
         comparable.update({"long_direction_signal":pointer["long_direction_signal"],

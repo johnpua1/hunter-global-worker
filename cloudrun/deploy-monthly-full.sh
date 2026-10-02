@@ -67,7 +67,12 @@ cp "$ROOT/bridge/appsscript.json" "$SCRIPT_DIR/appsscript.json"
 # extension before push.
 python "$ROOT/cloudrun/normalize-clasp-dir.py" "$SCRIPT_DIR"
 npx -y "$CLASP" push --force
-npx -y "$CLASP" list-deployments | grep -F "$DEPLOYMENT_ID" >/dev/null
+
+# Do not gate redeploy on parsing `clasp list-deployments` text output. clasp
+# 3.4.1 officially supports redeploying an existing Apps Script deployment by
+# passing its deployment ID directly; the redeploy command itself is the
+# authoritative success/failure check.
+npx -y "$CLASP" list-deployments || true
 npx -y "$CLASP" create-deployment --deploymentId "$DEPLOYMENT_ID" \
   --description "Hunter V2 monthly bridge ${MERGED_MAIN_SHA}"
 

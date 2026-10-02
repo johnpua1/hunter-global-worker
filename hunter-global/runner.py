@@ -670,7 +670,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("probe", "mini", "base", "daily", "daily-core", "auto",
                                            "repair", "universe", "options", "analytics",
-                                           "bootstrap", "calendar", "quarterly"), default="probe")
+                                           "bootstrap", "calendar", "monthly"), default="probe")
     parser.add_argument("--market", choices=MARKETS, help="Run one market in an independent job")
     parser.add_argument("--as-of", help="Explicit historical close for calendar/derived")
     parser.add_argument("--snapshot", help="Use an existing immutable SNAPSHOT_<date> for monthly mode")

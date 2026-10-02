@@ -646,31 +646,68 @@ def _build_snapshot(drive, asof: str) -> tuple[str,list[list[dict]],list[dict]]:
 
 
 def _g178_validation(direction: dict, baseline: dict) -> dict:
-    """Regression gate against the G178 frozen 2026-10-01 result.
+    """Strict production regression against the frozen G178 2026-10-01 run."""
+    def close(a, b, tol=1e-12):
+        if a is None or b is None:
+            return a is None and b is None
+        return math.isclose(float(a), float(b), rel_tol=0.0, abs_tol=tol)
 
-    The hard requirement is the four production outcomes specified by Pua.
-    D1 IS identities/counts are retained as diagnostic checks so a signal
-    implementation drift is visible even when Final-OOS still rejects both.
-    """
     long_sel=direction.get("is_selected",{}).get("LONG") or {}
     short_sel=direction.get("is_selected",{}).get("SHORT") or {}
     standalone=direction.get("final_oos_standalone",{})
+    long_oos=standalone.get("LONG") or {}
+    short_oos=standalone.get("SHORT") or {}
+
     hard={
+        "long_is_identity":(long_sel.get("ticker"),long_sel.get("signal"),long_sel.get("H"))==("SPY","S4",10),
+        "long_is_core":long_sel.get("n")==64 and long_sel.get("benchmark_n")==199 and
+            close(long_sel.get("wr"),0.8125) and
+            close(long_sel.get("benchmark_wr"),0.7085427135678392) and
+            close(long_sel.get("delta"),0.10395728643216084),
+        "short_is_identity":(short_sel.get("ticker"),short_sel.get("signal"),short_sel.get("H"))==("IWM","S3",5),
+        "short_is_core":short_sel.get("n")==11 and short_sel.get("benchmark_n")==50 and
+            close(short_sel.get("wr"),0.6363636363636364) and
+            close(short_sel.get("benchmark_wr"),0.3) and
+            close(short_sel.get("delta"),0.33636363636363636),
+        "long_final_oos":long_oos.get("n")==93 and long_oos.get("benchmark_n")==241 and
+            close(long_oos.get("wr"),0.46236559139784944) and
+            close(long_oos.get("benchmark_wr"),0.5560165975103735) and
+            close(long_oos.get("delta"),-0.09365100611252403) and long_oos.get("pass") is False,
+        "short_final_oos":short_oos.get("n")==0 and short_oos.get("benchmark_n")==245 and
+            short_oos.get("wr") is None and close(short_oos.get("benchmark_wr"),0.4897959183673469) and
+            short_oos.get("delta") is None and short_oos.get("pass") is False,
+        "final_online_empty":direction.get("final_online")==[],
+        "coverage_zero":close(direction.get("final_replay_counts",{}).get("coverage"),0.0),
         "long_direction_none":direction.get("LONG")=="无合格信号",
         "short_direction_none":direction.get("SHORT")=="无合格信号",
+        "long_baseline_is":baseline["LONG"]["IS"]["n"]==5854 and
+            close(baseline["LONG"]["IS"]["own"],0.3973315753041392) and
+            close(baseline["LONG"]["IS"]["bench"],0.40606151903052695) and
+            close(baseline["LONG"]["IS"]["delta"],-0.008729943726387746),
+        "long_baseline_oos":baseline["LONG"]["FINAL_OOS"]["n"]==7410 and
+            close(baseline["LONG"]["FINAL_OOS"]["own"],0.391389410574781) and
+            close(baseline["LONG"]["FINAL_OOS"]["bench"],0.38934503480645566) and
+            close(baseline["LONG"]["FINAL_OOS"]["delta"],0.002044375768325335),
+        "short_baseline_is":baseline["SHORT"]["IS"]["n"]==7428 and
+            close(baseline["SHORT"]["IS"]["own"],0.39592643775206443) and
+            close(baseline["SHORT"]["IS"]["bench"],0.4052858110215986) and
+            close(baseline["SHORT"]["IS"]["delta"],-0.009359373269534177),
+        "short_baseline_oos":baseline["SHORT"]["FINAL_OOS"]["n"]==7611 and
+            close(baseline["SHORT"]["FINAL_OOS"]["own"],0.44561326955688624) and
+            close(baseline["SHORT"]["FINAL_OOS"]["bench"],0.4177880513769859) and
+            close(baseline["SHORT"]["FINAL_OOS"]["delta"],0.027825218179900357),
         "long_baseline_verdict":baseline["LONG"]["verdict"]=="MARKET_DRIFT_ONLY",
         "short_baseline_verdict":baseline["SHORT"]["verdict"]=="OOS_ONLY",
     }
     diagnostics={
-        "long_is_identity":(long_sel.get("ticker"),long_sel.get("signal"),long_sel.get("H"))==("SPY","S4",10),
-        "short_is_identity":(short_sel.get("ticker"),short_sel.get("signal"),short_sel.get("H"))==("IWM","S3",5),
-        "long_is_n":long_sel.get("n")==64,
-        "short_is_n":short_sel.get("n")==11,
-        "long_is_wr":abs((long_sel.get("wr") or 0)-0.8125)<1e-12,
-        "short_is_wr":abs((short_sel.get("wr") or 0)-0.6363636363636364)<1e-12,
-        "long_final_oos_rejected":bool(standalone.get("LONG")) and standalone["LONG"].get("pass") is False,
-        "short_final_oos_rejected":bool(standalone.get("SHORT")) and standalone["SHORT"].get("pass") is False,
-        "final_online_empty":direction.get("final_online")==[],
+        "long_is_delta_ci":long_sel.get("delta_ci"),
+        "short_is_delta_ci":short_sel.get("delta_ci"),
+        "long_final_oos_delta_ci":long_oos.get("delta_ci"),
+        "short_final_oos_delta_ci":short_oos.get("delta_ci"),
+        "long_baseline_is_delta_ci":baseline["LONG"]["IS"].get("delta_ci"),
+        "long_baseline_oos_delta_ci":baseline["LONG"]["FINAL_OOS"].get("delta_ci"),
+        "short_baseline_is_delta_ci":baseline["SHORT"]["IS"].get("delta_ci"),
+        "short_baseline_oos_delta_ci":baseline["SHORT"]["FINAL_OOS"].get("delta_ci"),
     }
     return {"pass":all(hard.values()),"hard_checks":hard,"diagnostics":diagnostics,
             "expected":{"LONG":"无合格信号","SHORT":"无合格信号",
@@ -678,7 +715,6 @@ def _g178_validation(direction: dict, baseline: dict) -> dict:
             "observed":{"LONG":direction.get("LONG"),"SHORT":direction.get("SHORT"),
                         "LONG_BASELINE":baseline["LONG"]["verdict"],
                         "SHORT_BASELINE":baseline["SHORT"]["verdict"]}}
-
 
 def _quarter_name(asof: str) -> str:
     d=dt.date.fromisoformat(asof)

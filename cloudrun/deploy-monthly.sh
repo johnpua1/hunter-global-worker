@@ -104,13 +104,11 @@ gcloud run jobs execute "$JOB" --region "$REGION" --project "$GCP_PROJECT_ID"   
 
 # Fail closed on the committed pointer before arming any future trigger.
 LEGACY_KEY="$(gcloud secrets versions access latest --secret "$LEGACY_KEY_SECRET" --project "$GCP_PROJECT_ID")"
-POINTER_JSON="$(BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" python - <<'PY'
-import base64, json, os, urllib.request
-body=json.dumps({"op":"read","key":os.environ["LEGACY_KEY"],"path":"ACTIVE_POINTER"}).encode()
-req=urllib.request.Request(os.environ["BRIDGE_URL"],data=body,
-    headers={"Content-Type":"application/json"},method="POST")
-with urllib.request.urlopen(req,timeout=60) as r:
-    outer=json.load(r)
+POINTER_OUTER="$(BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" \
+  python "$ROOT/cloudrun/apps-script-post.py" --op read --path ACTIVE_POINTER --raw)"
+POINTER_JSON="$(POINTER_OUTER="$POINTER_OUTER" python - <<'PY'
+import base64, json, os
+outer=json.loads(os.environ["POINTER_OUTER"])
 if not outer.get("ok") or not outer.get("data_base64"):
     raise SystemExit("ACTIVE_POINTER read failed: "+str(outer.get("error")))
 doc=json.loads(base64.b64decode(outer["data_base64"]))
@@ -131,30 +129,10 @@ PY
 
 # Install the next one-shot Apps Script trigger only after validation and
 # ACTIVE_POINTER readback both succeed.
-TRIGGER_JSON="$(BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" python - <<'PY'
-import json, os, urllib.request
-body=json.dumps({"op":"install_month_trigger","key":os.environ["LEGACY_KEY"]}).encode()
-req=urllib.request.Request(os.environ["BRIDGE_URL"],data=body,
-    headers={"Content-Type":"application/json"},method="POST")
-with urllib.request.urlopen(req,timeout=60) as r:
-    data=json.load(r)
-if not data.get("ok"):
-    raise SystemExit("Month trigger install failed: "+str(data.get("error")))
-print(json.dumps(data,separators=(",",":")))
-PY
-)"
-STATUS_JSON="$(BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" python - <<'PY'
-import json, os, urllib.request
-body=json.dumps({"op":"month_status","key":os.environ["LEGACY_KEY"]}).encode()
-req=urllib.request.Request(os.environ["BRIDGE_URL"],data=body,
-    headers={"Content-Type":"application/json"},method="POST")
-with urllib.request.urlopen(req,timeout=60) as r:
-    data=json.load(r)
-if not data.get("ok"):
-    raise SystemExit("Month status failed: "+str(data.get("error")))
-print(json.dumps(data,separators=(",",":")))
-PY
-)"
+TRIGGER_JSON="$(BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" \
+  python "$ROOT/cloudrun/apps-script-post.py" --op install_month_trigger --raw)"
+STATUS_JSON="$(BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" \
+  python "$ROOT/cloudrun/apps-script-post.py" --op month_status --raw)"
 unset LEGACY_KEY BRIDGE_URL
 
 # Retire the superseded quarterly deployment only after the monthly worker,

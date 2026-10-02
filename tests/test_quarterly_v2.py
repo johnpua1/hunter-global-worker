@@ -40,13 +40,38 @@ class QuarterlyV2Tests(unittest.TestCase):
     def test_g178_validation_contract(self):
         direction={
             "is_selected":{
-                "LONG":{"ticker":"SPY","signal":"S4","H":10,"n":64,"wr":0.8125},
-                "SHORT":{"ticker":"IWM","signal":"S3","H":5,"n":11,"wr":0.6363636363636364}},
-            "final_oos_standalone":{"LONG":{"pass":False},"SHORT":{"pass":False}},
-            "final_online":[],"LONG":"无合格信号","SHORT":"无合格信号"}
+                "LONG":{"ticker":"SPY","signal":"S4","H":10,"n":64,"benchmark_n":199,
+                        "wr":0.8125,"benchmark_wr":0.7085427135678392,
+                        "delta":0.10395728643216084,"delta_ci":[0.002,0.24]},
+                "SHORT":{"ticker":"IWM","signal":"S3","H":5,"n":11,"benchmark_n":50,
+                         "wr":0.6363636363636364,"benchmark_wr":0.3,
+                         "delta":0.33636363636363636,"delta_ci":[0.15,0.52]}},
+            "final_oos_standalone":{
+                "LONG":{"n":93,"benchmark_n":241,"wr":0.46236559139784944,
+                        "benchmark_wr":0.5560165975103735,
+                        "delta":-0.09365100611252403,"delta_ci":[-0.24,0.05],"pass":False},
+                "SHORT":{"n":0,"benchmark_n":245,"wr":None,
+                         "benchmark_wr":0.4897959183673469,
+                         "delta":None,"delta_ci":[None,None],"pass":False}},
+            "final_online":[],"final_replay_counts":{"coverage":0.0},
+            "LONG":"无合格信号","SHORT":"无合格信号"}
         baseline={
-            "LONG":{"IS":{"n":5854},"FINAL_OOS":{"n":7410},"verdict":"MARKET_DRIFT_ONLY"},
-            "SHORT":{"IS":{"n":7428},"FINAL_OOS":{"n":7611},"verdict":"OOS_ONLY"}}
+            "LONG":{
+                "IS":{"n":5854,"own":0.3973315753041392,
+                      "bench":0.40606151903052695,"delta":-0.008729943726387746,
+                      "delta_ci":[-0.04,0.01]},
+                "FINAL_OOS":{"n":7410,"own":0.391389410574781,
+                             "bench":0.38934503480645566,"delta":0.002044375768325335,
+                             "delta_ci":[-0.02,0.02]},
+                "verdict":"MARKET_DRIFT_ONLY"},
+            "SHORT":{
+                "IS":{"n":7428,"own":0.39592643775206443,
+                      "bench":0.4052858110215986,"delta":-0.009359373269534177,
+                      "delta_ci":[-0.02,0.01]},
+                "FINAL_OOS":{"n":7611,"own":0.44561326955688624,
+                             "bench":0.4177880513769859,"delta":0.027825218179900357,
+                             "delta_ci":[0.001,0.05]},
+                "verdict":"OOS_ONLY"}}
         result=q._g178_validation(direction,baseline)
         self.assertTrue(result["pass"])
         direction["LONG"]={"ticker":"SPY"}

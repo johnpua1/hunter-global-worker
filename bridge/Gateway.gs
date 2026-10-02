@@ -31,6 +31,16 @@ function doPost(e) {
       }
       return bridgeJson_({ok: true, key: quarterKey, created: created});
     }
+    if (op === 'install_quarter_trigger') {
+      if (scope !== 'LEGACY') throw new Error('QUARTER_TRIGGER_INSTALL_LEGACY_ONLY');
+      return bridgeJson_({ok: true, trigger: installFirstQuarterlyTrigger()});
+    }
+    if (op === 'quarter_status') {
+      if (scope !== 'LEGACY') throw new Error('QUARTER_STATUS_LEGACY_ONLY');
+      var cfg = hunterCloudConfig_();
+      return bridgeJson_({ok: true, trigger: listQuarterlyTrigger(),
+                          job: status(cfg.quarterJob)});
+    }
     var path = bridgePath_(body.path || '');
     bridgeScopeAuthorize_(scope, op, path);
     if (op === 'folder') {

@@ -59,7 +59,9 @@ function doPost(e) {
         throw new Error('BASE_SEALED');
       if (body.create === true &&
           (/^SNAPSHOT_\d{4}-\d{2}-\d{2}(?:\/|$)/.test(path) ||
-           /^MONTH_\d{4}-\d{2}(?:\/|$)/.test(path)) &&
+           /^MONTH_\d{4}-\d{2}(?:\/|$)/.test(path) ||
+           /^HK_SNAPSHOT_\d{4}-\d{2}(?:\/|$)/.test(path) ||
+           /^HK_MONTH_\d{4}-\d{2}(?:\/|$)/.test(path)) &&
           scope !== 'MONTH') throw new Error('MONTH_WRITER_ONLY');
       var folder = bridgeFolder_(root, path, body.create === true);
       return bridgeJson_({ok: true, folder: {id: path, name: folder.getName()}});
@@ -134,9 +136,12 @@ function bridgeScopeAuthorize_(scope, op, path) {
     throw new Error('SCOPE_OP_DENIED');
   if (!path) throw new Error('SCOPE_ROOT_DENIED');
   if (scope === 'MONTH') {
-    if (/^US(?:\/|$)/.test(path) ||
+    if (/^(US|HK)(?:\/|$)/.test(path) ||
         /^SNAPSHOT_\d{4}-\d{2}-\d{2}(?:\/|$)/.test(path) ||
         /^MONTH_\d{4}-\d{2}(?:\/|$)/.test(path) ||
+        /^HK_SNAPSHOT_\d{4}-\d{2}(?:\/|$)/.test(path) ||
+        /^HK_MONTH_\d{4}-\d{2}(?:\/|$)/.test(path) ||
+        /^HKEX_DESIGNATED_SHORT_SELLING_\d{8}\.csv$/.test(path) ||
         path === 'ACTIVE_POINTER') return;
     throw new Error('SCOPE_PATH_DENIED');
   }
@@ -183,11 +188,14 @@ function bridgePath_(path) {
   if (typeof path !== 'string' || path.length > 240) throw new Error('INVALID_PATH');
   if (!path) return '';
   if (path === 'REPAIR_QUEUE.json' || path === 'BASE_COMPLETE.json' ||
-      path === 'ACTIVE_POINTER') return path;
+      path === 'ACTIVE_POINTER' ||
+      /^HKEX_DESIGNATED_SHORT_SELLING_\d{8}\.csv$/.test(path)) return path;
   var parts = path.split('/');
   var root = parts[0];
   var monthlyRoot = /^SNAPSHOT_\d{4}-\d{2}-\d{2}$/.test(root) ||
-      /^MONTH_\d{4}-\d{2}$/.test(root);
+      /^MONTH_\d{4}-\d{2}$/.test(root) ||
+      /^HK_SNAPSHOT_\d{4}-\d{2}$/.test(root) ||
+      /^HK_MONTH_\d{4}-\d{2}$/.test(root);
   if ((!/^(US|HK|_BRIDGE_TEST)$/.test(root) && !monthlyRoot) ||
       parts.length > 8 || parts.some(function (p) {
         return !p || p === '.' || p === '..' || !/^[A-Za-z0-9_.-]+$/.test(p);
@@ -213,7 +221,8 @@ function bridgeFile_(root, path) {
   if (!path) throw new Error('INVALID_FILE_PATH');
   var split = path.lastIndexOf('/');
   if (split < 0 && path !== 'REPAIR_QUEUE.json' && path !== 'BASE_COMPLETE.json' &&
-      path !== 'ACTIVE_POINTER')
+      path !== 'ACTIVE_POINTER' &&
+      !/^HKEX_DESIGNATED_SHORT_SELLING_\d{8}\.csv$/.test(path))
     throw new Error('INVALID_FILE_PATH');
   var folder;
   try { folder = bridgeFolder_(root, split < 0 ? '' : path.slice(0, split), false); }
@@ -265,6 +274,9 @@ function bridgeWritePolicy_(path, op, scope) {
   var monthlyControlled = path === 'ACTIVE_POINTER' ||
       /^SNAPSHOT_\d{4}-\d{2}-\d{2}(?:\/|$)/.test(path) ||
       /^MONTH_\d{4}-\d{2}(?:\/|$)/.test(path) ||
+      /^HK_SNAPSHOT_\d{4}-\d{2}(?:\/|$)/.test(path) ||
+      /^HK_MONTH_\d{4}-\d{2}(?:\/|$)/.test(path) ||
+      /^HKEX_DESIGNATED_SHORT_SELLING_\d{8}\.csv$/.test(path) ||
       path === 'US/CONTROL/MONTH_NOTICE.json';
   if (monthlyControlled && scope !== 'MONTH') throw new Error('MONTH_WRITER_ONLY');
   if (scope === 'MONTH' && !monthlyControlled) throw new Error('MONTH_SCOPE_WRITE_DENIED');
@@ -305,7 +317,8 @@ function bridgePut_(root, path, body, op, scope) {
   scope = scope || 'LEGACY';
   bridgeWritePolicy_(path, op, scope);
   if (!path || (path.indexOf('/') < 0 && path !== 'REPAIR_QUEUE.json' && path !== 'BASE_COMPLETE.json' &&
-      path !== 'ACTIVE_POINTER'))
+      path !== 'ACTIVE_POINTER' &&
+      !/^HKEX_DESIGNATED_SHORT_SELLING_\d{8}\.csv$/.test(path)))
     throw new Error('INVALID_FILE_PATH');
   if (!/^[a-f0-9]{64}$/.test(body.sha256 || '') ||
       typeof body.data_base64 !== 'string' || body.data_base64.length > 14000000)
@@ -720,34 +733,42 @@ function monthlyV2() {
   var rootId = props.getProperty('HUNTER_GLOBAL_FOLDER_ID');
   if (!rootId) throw new Error('ROOT_NOT_CONFIGURED');
   var root = DriveApp.getFolderById(rootId);
-  var us = bridgeFolder_(root, 'US/CONTROL', false);
-  var files = us.getFilesByName('DAILY_CHECKPOINT.json');
-  if (!files.hasNext()) throw new Error('US_DAILY_CHECKPOINT_MISSING');
-  var checkpoint = JSON.parse(files.next().getBlob().getDataAsString('UTF-8'));
-  var dateText = String(checkpoint.last_completed_date || checkpoint.as_of || '');
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateText)) throw new Error('US_DAILY_CHECKPOINT_DATE_INVALID');
 
-  if (dateText.slice(0,7) !== expectedMonth) {
-    return {ok:true, skipped:true, reason:'WAIT_FIRST_US_SESSION_DAILY',
-            expectedMonth:expectedMonth, checkpoint:dateText,
+  function checkpointDate_(market) {
+    var folder = bridgeFolder_(root, market + '/CONTROL', false);
+    var files = folder.getFilesByName('DAILY_CHECKPOINT.json');
+    if (!files.hasNext()) throw new Error(market + '_DAILY_CHECKPOINT_MISSING');
+    var checkpoint = JSON.parse(files.next().getBlob().getDataAsString('UTF-8'));
+    var value = String(checkpoint.last_completed_date || checkpoint.as_of || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value))
+      throw new Error(market + '_DAILY_CHECKPOINT_DATE_INVALID');
+    return value;
+  }
+
+  var usDate = checkpointDate_('US');
+  var hkDate = checkpointDate_('HK');
+  if (usDate.slice(0,7) !== expectedMonth || hkDate.slice(0,7) !== expectedMonth) {
+    return {ok:true, skipped:true, reason:'WAIT_FIRST_US_AND_HK_SESSION_DAILY',
+            expectedMonth:expectedMonth, US:usDate, HK:hkDate,
             next:hunterMonthlyRetry_(expectedMonth)};
   }
 
   var active = bridgeFile_(root, 'ACTIVE_POINTER');
   if (active) {
     var pointer = JSON.parse(active.getBlob().getDataAsString('UTF-8'));
-    if (pointer.month_file === 'MONTH_' + expectedMonth) {
-      var alreadyNext = hunterNextMonthCandidate_(dateText);
+    if (pointer.month_file === 'MONTH_' + expectedMonth &&
+        pointer.hk_month_file === 'HK_MONTH_' + expectedMonth) {
+      var alreadyNext = hunterNextMonthCandidate_(usDate);
       return {ok:true, skipped:true, reason:'MONTH_ALREADY_COMMITTED',
-              checkpoint:dateText,
+              US:usDate, HK:hkDate,
               next:installMonthlyTriggerAt(alreadyNext.at, alreadyNext.expectedMonth)};
     }
   }
 
   var result = runMonthly();
-  var next = hunterNextMonthCandidate_(dateText);
+  var next = hunterNextMonthCandidate_(usDate);
   installMonthlyTriggerAt(next.at, next.expectedMonth);
-  return {ok:true, skipped:false, checkpoint:dateText, run:result};
+  return {ok:true, skipped:false, US:usDate, HK:hkDate, run:result};
 }
 
 function listMonthlyTrigger() {

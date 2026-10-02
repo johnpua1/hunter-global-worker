@@ -96,12 +96,12 @@ ACTION=create
 if gcloud run jobs describe "$JOB" --region "$REGION" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
   ACTION=update
 fi
-gcloud run jobs "$ACTION" "$JOB"   --image "$IMAGE" --region "$REGION" --project "$GCP_PROJECT_ID"   --service-account "$SA" --cpu 2 --memory 8Gi --tasks 1   --task-timeout 60m --max-retries 0   --set-env-vars 'HUNTER_ACTIONS_CUTOVER=CONFIRMED,FETCH_WORKERS=10'   --set-secrets "APPS_SCRIPT_WEBAPP_URL=${URL_SECRET}:latest,APPS_SCRIPT_SHARED_KEY=${MONTH_KEY_SECRET}:latest"   --args='--mode,monthly'
+gcloud run jobs "$ACTION" "$JOB"   --image "$IMAGE" --region "$REGION" --project "$GCP_PROJECT_ID"   --service-account "$SA" --cpu 2 --memory 8Gi --tasks 1   --task-timeout 120m --max-retries 0   --set-env-vars 'HUNTER_ACTIONS_CUTOVER=CONFIRMED,FETCH_WORKERS=10'   --set-secrets "APPS_SCRIPT_WEBAPP_URL=${URL_SECRET}:latest,APPS_SCRIPT_SHARED_KEY=${MONTH_KEY_SECRET}:latest"   --args='--mode,monthly'
 
 # Immediate real-data regression. This execution overrides args only and leaves
 # the production job definition unchanged. ACTIVE_POINTER is committed by the
 # monthly worker only after all G178 checks pass.
-gcloud run jobs execute "$JOB" --region "$REGION" --project "$GCP_PROJECT_ID"   --args='--mode,monthly,--snapshot,SNAPSHOT_2026-10-01,--validation'   --task-timeout=60m --wait
+gcloud run jobs execute "$JOB" --region "$REGION" --project "$GCP_PROJECT_ID"   --args='--mode,monthly,--snapshot,SNAPSHOT_2026-10-01,--validation'   --task-timeout=120m --wait
 
 # Fail closed on the committed pointer before arming any future trigger.
 LEGACY_KEY="$(gcloud secrets versions access latest --secret "$LEGACY_KEY_SECRET" --project "$GCP_PROJECT_ID")"
@@ -120,8 +120,18 @@ expected={
     "short_direction_signal":"无合格信号",
     "long_vertical_baseline":"MARKET_DRIFT_ONLY",
     "short_vertical_baseline":"OOS_ONLY",
+    "hk_month_file":"HK_MONTH_2026-10",
+    "hk_snapshot":"HK_SNAPSHOT_2026-10",
+    "hk_vertical_overlay":"N/A",
 }
 bad={k:{"got":doc.get(k),"expected":v} for k,v in expected.items() if doc.get(k)!=v}
+for side in ("hk_long_edge","hk_short_edge"):
+    edge=doc.get(side) or {}
+    if edge.get("pass_count")!=0 or edge.get("parameter_points")!=27 or edge.get("status")!="EDGE_NOT_CERTIFIED":
+        bad[side]={"got":edge,"expected":{"pass_count":0,"parameter_points":27,"status":"EDGE_NOT_CERTIFIED"}}
+version=str(doc.get("hk_shortable_list_version") or "")
+if not version.startswith("HKEX_DESIGNATED_SHORT_SELLING_"):
+    bad["hk_shortable_list_version"]={"got":version,"expected":"HKEX_DESIGNATED_SHORT_SELLING_<YYYYMMDD>"}
 if bad:
     raise SystemExit("ACTIVE_POINTER validation failed: "+json.dumps(bad,ensure_ascii=False))
 print(json.dumps(doc,ensure_ascii=False,separators=(",",":")))

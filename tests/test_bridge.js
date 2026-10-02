@@ -4,6 +4,19 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 const source = fs.readFileSync('bridge/Gateway.gs', 'utf8');
+const singletonFunctions = [
+  'doGet',
+  'doPost',
+  'installFirstMonthlyTrigger',
+  'monthlyV2',
+  'listMonthlyTrigger',
+];
+for (const name of singletonFunctions) {
+  const hits = source.match(new RegExp('function\\s+' + name + '\\b', 'g')) || [];
+  assert.equal(hits.length, 1, 'duplicate Apps Script function: ' + name);
+}
+assert.equal(source.includes('2027Q1'), false);
+assert.equal(source.includes('2027, 1, 5'), false);
 const context = vm.createContext({});
 vm.runInContext(source, context);
 const scopedProps = {getProperty(name) {

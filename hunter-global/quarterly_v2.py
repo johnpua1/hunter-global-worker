@@ -322,6 +322,15 @@ def _vertical_p(side: str, s0: float, st: float) -> float:
     return max(0.0, min(1.0, move/(s0*.05)))
 
 
+def _bar_suspect(row: dict) -> bool:
+    try:
+        o,h,l,cl,v=(float(row[k]) for k in ("open","high","low","close","volume"))
+    except (KeyError,TypeError,ValueError):
+        return True
+    return (not all(math.isfinite(x) for x in (o,h,l,cl,v)) or
+            h < max(o,cl,l) or l > min(o,cl) or min(o,h,l,cl) <= 0 or v < 0)
+
+
 def _stock_signals(rows: list[dict], split: dict[str,str],
                    target_map: dict[str,str]) -> Iterable[tuple[str,str,str,float,bool]]:
     if len(rows) < 501:
@@ -339,6 +348,8 @@ def _stock_signals(rows: list[dict], split: dict[str,str],
         seg=_segment(date,split)
         target=target_map.get(date)
         if not seg or not target or target not in by_date:
+            continue
+        if _bar_suspect(rows[i]) or _bar_suspect(by_date[target]):
             continue
         s0=float(rows[i]["close"])
         st=float(by_date[target]["close"])
@@ -367,6 +378,8 @@ def vertical_baseline(stock_groups: Iterable[list[dict]], split: dict[str,str],
         by_date={r["date"]:r for r in rows}
         for date,target in target_map.items():
             if date not in by_date or target not in by_date:
+                continue
+            if _bar_suspect(by_date[date]) or _bar_suspect(by_date[target]):
                 continue
             s0=float(by_date[date]["close"]); st=float(by_date[target]["close"])
             if not (s0>0 and math.isfinite(s0) and math.isfinite(st)):

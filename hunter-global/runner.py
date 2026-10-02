@@ -666,6 +666,27 @@ def run_mini(drive: Drive, markets: tuple[str, ...]):
                  market, security["security_id"], len(rows), digest(payload), flags, len(splits))
 
 
+def _enforce_cloud_run_topology(args) -> None:
+    job = os.getenv("CLOUD_RUN_JOB")
+    if not job:
+        return
+    expected = {
+        "hunter-us-daily": ("auto", "US"),
+        "hunter-hk-daily": ("auto", "HK"),
+        "hunter-monthly-v2": ("monthly", None),
+    }
+    if job not in expected:
+        return
+    want_mode, want_market = expected[job]
+    if args.mode != want_mode or (want_market is not None and args.market != want_market):
+        raise RuntimeError(
+            f"TOPOLOGY_RUNTIME_MISMATCH:{job}:mode={args.mode}:market={args.market}:"
+            f"expected_mode={want_mode}:expected_market={want_market}"
+        )
+    if want_market is None and args.market is not None:
+        raise RuntimeError(f"TOPOLOGY_RUNTIME_MISMATCH:{job}:MONTHLY_MARKET_MUST_BE_NONE")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("probe", "mini", "base", "daily", "daily-core", "auto",
@@ -677,6 +698,7 @@ def main():
     parser.add_argument("--validation", action="store_true",
                         help="Require exact G178 validation statuses in monthly mode")
     args = parser.parse_args()
+    _enforce_cloud_run_topology(args)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     from production_guard import check_at_start
     check_at_start()

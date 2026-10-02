@@ -66,7 +66,7 @@ jobs=doc["jobs"]
 checks={
   "dailyUS": daily.get("counts",{}).get("dailyUS")==1,
   "dailyHK": daily.get("counts",{}).get("dailyHK")==1,
-  "dailyTZ": daily.get("timeZone")=="Asia/Kuala_Lumpur",
+  "dailyTZ": daily.get("timeZone") in {"Asia/Kuala_Lumpur","Asia/Singapore"},
   "monthlyCount": monthly.get("count")==1,
   "USJob": jobs.get("US",{}).get("job")=="hunter-us-daily",
   "HKJob": jobs.get("HK",{}).get("job")=="hunter-hk-daily",

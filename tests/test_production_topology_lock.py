@@ -73,6 +73,14 @@ class ProductionTopologyLockTests(unittest.TestCase):
         self.assertIn('"USImage"', source)
         self.assertIn('"MONTHImage"', source)
         self.assertIn("UNEXPECTED_HUNTER_JOB", source)
+        self.assertIn('US_SA="hunter-us-daily@${GCP_PROJECT_ID}.iam.gserviceaccount.com"', source)
+        self.assertIn('HK_SA="hunter-hk-daily@${GCP_PROJECT_ID}.iam.gserviceaccount.com"', source)
+        self.assertIn('MAINT_SA="hunter-maintenance@${GCP_PROJECT_ID}.iam.gserviceaccount.com"', source)
+        self.assertIn('MONTH_SA="hunter-monthly@${GCP_PROJECT_ID}.iam.gserviceaccount.com"', source)
+        self.assertIn("APPS_SCRIPT_SHARED_KEY_US:latest", source)
+        self.assertIn("APPS_SCRIPT_SHARED_KEY_HK:latest", source)
+        self.assertIn("APPS_SCRIPT_SHARED_KEY_MAINT:latest", source)
+        self.assertIn("APPS_SCRIPT_SHARED_KEY_MONTH:latest", source)
 
     def test_schedule_script_is_maintenance_only(self):
         source = (ROOT / "cloudrun" / "schedule.sh").read_text(encoding="utf-8")

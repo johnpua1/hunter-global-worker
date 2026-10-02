@@ -3,6 +3,7 @@ name: hardening-check
 on:
   push:
     branches:
+      - main
       - 'hardening/**'
   pull_request:
     branches:

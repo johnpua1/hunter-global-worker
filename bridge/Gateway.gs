@@ -53,13 +53,14 @@ function doPost(e) {
       }
       return bridgeJson_({ok: true, files: entries});
     }
-    if (op === 'file' || op === 'read') {
+    if (op === 'file' || op === 'read' || op === 'read_chunk') {
       var file = bridgeFile_(root, path);
       if (!file) {
         if (op === 'file') return bridgeJson_({ok: true, file: null});
         throw new Error('FILE_NOT_FOUND');
       }
       if (op === 'file') return bridgeJson_({ok: true, file: bridgeInfo_(file, path)});
+      if (op === 'read_chunk') return bridgeReadChunk_(file, body);
       if (file.getSize() > 10000000) throw new Error('READ_SIZE_LIMIT');
       var raw = file.getBlob().getBytes();
       return bridgeJson_({ok: true, sha256: bridgeSha_(raw),
@@ -97,7 +98,7 @@ function bridgeAuthScope_(props, presented) {
 }
 function bridgeScopeAuthorize_(scope, op, path) {
   if (scope === 'LEGACY') return;
-  if (['folder','list','file','read','put','append'].indexOf(op) < 0)
+  if (['folder','list','file','read','read_chunk','put','append'].indexOf(op) < 0)
     throw new Error('SCOPE_OP_DENIED');
   if (!path) throw new Error('SCOPE_ROOT_DENIED');
   if (scope === 'QUARTER') {
@@ -193,6 +194,34 @@ function bridgeFile_(root, path) {
 }
 function bridgeInfo_(file, path) {
   return {id: path, name: file.getName(), mimeType: file.getMimeType(), size: file.getSize()};
+}
+
+function bridgeReadChunk_(file, body) {
+  var offset = Number(body.offset || 0);
+  var length = Number(body.length || 0);
+  var size = Number(file.getSize());
+  if (!Number.isInteger(offset) || !Number.isInteger(length) ||
+      offset < 0 || length < 1 || length > 6000000 || offset >= size)
+    throw new Error('READ_CHUNK_RANGE_INVALID');
+  var end = Math.min(size - 1, offset + length - 1);
+  var url = 'https://www.googleapis.com/drive/v3/files/' +
+      encodeURIComponent(file.getId()) + '?alt=media';
+  var response = UrlFetchApp.fetch(url, {
+    method: 'get',
+    headers: {
+      Authorization: 'Bearer ' + ScriptApp.getOAuthToken(),
+      Range: 'bytes=' + offset + '-' + end
+    },
+    muteHttpExceptions: true
+  });
+  var code = response.getResponseCode();
+  if (code !== 206 && !(code === 200 && offset === 0 && end === size - 1))
+    throw new Error('READ_CHUNK_HTTP_' + code);
+  var bytes = response.getBlob().getBytes();
+  if (bytes.length !== end - offset + 1) throw new Error('READ_CHUNK_LENGTH_MISMATCH');
+  return bridgeJson_({ok: true, offset: offset, length: bytes.length, size: size,
+                      eof: end + 1 >= size, sha256: bridgeSha_(bytes),
+                      data_base64: Utilities.base64Encode(bytes)});
 }
 function bridgeSha_(bytes) {
   var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes);

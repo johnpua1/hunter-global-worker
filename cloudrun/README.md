@@ -62,22 +62,23 @@ live IAM audit before and after any scoped cutover.
 
 
 
-## V2 quarterly recertification
+## V2 monthly recertification
 
-`cloudrun/deploy-quarterly.sh` deploys only `hunter-quarterly-v2`. It uses a dedicated
-`hunter-quarterly@` runtime service account and a Bridge credential scoped to
-`SNAPSHOT_* / QUARTER_* / ACTIVE_POINTER / US/CONTROL/QUARTER_NOTICE.json`.
-The script performs a real-data regression against `SNAPSHOT_2026-10-01`
-before it asks the Apps Script bridge to install the next one-shot trigger.
-The validation execution must reproduce: no qualified LONG direction, no
-qualified SHORT direction, LONG baseline `MARKET_DRIFT_ONLY`, SHORT baseline
-`OOS_ONLY`. Failure stops before trigger installation.
+`cloudrun/deploy-monthly.sh` deploys only `hunter-monthly-v2`. It uses a dedicated
+`hunter-monthly@` runtime service account and a Bridge credential scoped to
+`SNAPSHOT_* / MONTH_* / ACTIVE_POINTER / US/CONTROL/MONTH_NOTICE.json`.
 
-Quarterly production freezes the current US ACTIVE universe, full available
-OHLC and the 12 registered benchmark ETFs into immutable
-`SNAPSHOT_<date>`, recalculates D1 and the paired vertical baseline only, writes
-immutable `QUARTER_<year>Q<quarter>` artifacts, then commits `ACTIVE_POINTER`
-last. It never recalculates or replaces the frozen D/W grids, DW_MAX 0.34/0.40,
-or DWR/THR. The next trigger is one-shot and runs at 08:00 MYT after the first
-US session of the next quarter; if DAILY has not advanced to that session, the
-handler re-arms for the next MYT morning instead of using stale data.
+The worker runs once per month after the first completed US trading session has
+been written by DAILY. It freezes an immutable `SNAPSHOT_<date>`, re-runs the
+registered D1 direction acceptance flow and vertical-baseline comparison, writes
+immutable `MONTH_<YYYY-MM>` artifacts, and commits `ACTIVE_POINTER` last.
+D/W grids, the frozen 0.34 / 0.40 D/W limits, and DWR / THR / THR_TOUCH are not
+recomputed by this job.
+
+The Apps Script one-shot trigger begins at 08:00 MYT on calendar day 2 of the
+target month and retries each morning until DAILY proves that the first US
+session of that month has completed. After a successful run it arms the next
+month. `cloudrun/deploy-monthly-full.sh` updates the existing Apps Script Web
+App, performs the frozen `SNAPSHOT_2026-10-01` G178 regression, validates
+`ACTIVE_POINTER`, installs the monthly trigger, and only then retires any
+superseded quarterly Cloud Run job/secret/service account.

@@ -730,6 +730,11 @@ function monthlyV2() {
   var expectedMonth = String(props.getProperty('HUNTER_MONTH_EXPECTED') || '');
   if (!/^\d{4}-\d{2}$/.test(expectedMonth)) throw new Error('MONTH_EXPECTED_NOT_CONFIGURED');
 
+  // A Cloud Run submission is not a committed monthly result. Keep this
+  // month's next-day check armed even if Drive reads or job launch fail.
+  // Only the two-market ACTIVE_POINTER below may advance the schedule.
+  var retry = hunterMonthlyRetry_(expectedMonth);
+
   var rootId = props.getProperty('HUNTER_GLOBAL_FOLDER_ID');
   if (!rootId) throw new Error('ROOT_NOT_CONFIGURED');
   var root = DriveApp.getFolderById(rootId);
@@ -750,7 +755,7 @@ function monthlyV2() {
   if (usDate.slice(0,7) !== expectedMonth || hkDate.slice(0,7) !== expectedMonth) {
     return {ok:true, skipped:true, reason:'WAIT_FIRST_US_AND_HK_SESSION_DAILY',
             expectedMonth:expectedMonth, US:usDate, HK:hkDate,
-            next:hunterMonthlyRetry_(expectedMonth)};
+            next:retry};
   }
 
   var active = bridgeFile_(root, 'ACTIVE_POINTER');
@@ -766,9 +771,9 @@ function monthlyV2() {
   }
 
   var result = runMonthly();
-  var next = hunterNextMonthCandidate_(usDate);
-  installMonthlyTriggerAt(next.at, next.expectedMonth);
-  return {ok:true, skipped:false, US:usDate, HK:hkDate, run:result};
+  return {ok:true, skipped:!!result.skipped, reason:'WAIT_MONTH_COMMIT',
+          expectedMonth:expectedMonth, US:usDate, HK:hkDate,
+          run:result, next:retry};
 }
 
 function listMonthlyTrigger() {

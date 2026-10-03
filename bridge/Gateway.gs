@@ -46,6 +46,12 @@ function doPost(e) {
       return bridgeJson_({ok:true, daily:listHunterDailyTriggers(),
                           monthly:listMonthlyTrigger(), jobs:inspectHunterJobs()});
     }
+    if (op === 'watchdog_status' || op === 'install_daily_watchdog' || op === 'remove_daily_watchdog') {
+      if (scope !== 'LEGACY') throw new Error('WATCHDOG_ADMIN_LEGACY_ONLY');
+      var watchdog = op === 'install_daily_watchdog' ? installHunterDailyWatchdog() :
+          op === 'remove_daily_watchdog' ? removeHunterDailyWatchdog() : listHunterDailyWatchdog();
+      return bridgeJson_({ok:true, watchdog:watchdog});
+    }
     if (op === 'enforce_topology_triggers') {
       if (scope !== 'LEGACY') throw new Error('TOPOLOGY_ENFORCE_LEGACY_ONLY');
       var daily = installHunterDailyTriggers();
@@ -514,7 +520,7 @@ function inspectHunterJobs() {
           MAINT: hunterJobConfig_('MAINT'), MONTH: hunterJobConfig_('MONTH')};
 }
 
-function runHunterJob_(job) {
+function runHunterJob_(job, compensation) {
   var name = hunterJobName_(job);
   var lock = LockService.getScriptLock();
   var held = false;
@@ -557,6 +563,20 @@ function runHunterJob_(job) {
         if (['SUCCEEDED', 'FAILED', 'CANCELLED'].indexOf(state) < 0)
           throw new Error('LAUNCH_EXECUTION_UNCONFIRMED');
       }
+    }
+    // Compensation shares this lock and durable launch receipt with daily triggers.
+    // Count BEFORE POST, including uncertain/rejected attempts; never hot-loop.
+    if (compensation === true) {
+      if (['hunter-us-daily', 'hunter-hk-daily'].indexOf(name) < 0)
+        throw new Error('COMPENSATION_DAILY_ONLY');
+      var retryKey = 'HUNTER_COMPENSATION_' + name;
+      var retry = JSON.parse(props.getProperty(retryKey) || '{}');
+      if (retry.mytDate !== today) retry = {mytDate: today, count: 0};
+      if (typeof retry.count !== 'number' || retry.count < 0 || retry.count % 1 !== 0)
+        throw new Error('COMPENSATION_RECEIPT_INVALID');
+      if (retry.count >= 2) throw new Error('DAILY_COMPENSATION_EXHAUSTED');
+      retry.count++;
+      props.setProperty(retryKey, JSON.stringify(retry));
     }
     // Persist BEFORE the non-idempotent request, while holding the same lock.
     var receipt = {mytDate: today, requestedAt: new Date().toISOString(), operation: null};

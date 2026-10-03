@@ -44,6 +44,41 @@ def _read_limit(path: str) -> str:
         return "UNAVAILABLE"
 
 
+def resource_limits() -> tuple[str, str]:
+    """Read finite limits on cgroup v2 or Cloud Run's v1 controller mounts.
+
+    Paths are not fingerprint inputs: the same limits have the same identity
+    across layouts. Preserve the actual quota; never round it to a nominal CPU.
+    """
+    for root in ("/sys/fs/cgroup", "/sys/fs/cgroup/unified"):
+        cpu = _read_limit(root + "/cpu.max")
+        memory = _read_limit(root + "/memory.max")
+        if cpu != "UNAVAILABLE" and memory != "UNAVAILABLE":
+            break
+    else:
+        for controller in ("cpu,cpuacct", "cpu", "cpuacct,cpu"):
+            root = "/sys/fs/cgroup/" + controller
+            quota = _read_limit(root + "/cpu.cfs_quota_us")
+            period = _read_limit(root + "/cpu.cfs_period_us")
+            if quota != "UNAVAILABLE" and period != "UNAVAILABLE":
+                cpu = quota + " " + period
+                break
+        else:
+            raise ValueError("RESOURCE_LIMIT_UNAVAILABLE")
+        memory = _read_limit("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    if memory == "UNAVAILABLE":
+        raise ValueError("RESOURCE_LIMIT_UNAVAILABLE")
+    fields = cpu.split()
+    if (len(fields) != 2 or not all(re.fullmatch(r"[0-9]+", x) for x in fields)
+            or not re.fullmatch(r"[0-9]+", memory)):
+        raise ValueError("RESOURCE_LIMIT_INVALID")
+    quota, period = map(int, fields)
+    memory_bytes = int(memory)
+    if min(quota, period, memory_bytes) <= 0:
+        raise ValueError("RESOURCE_LIMIT_INVALID")
+    return f"{quota} {period}", str(memory_bytes)
+
+
 def _service_account_email() -> str:
     response = requests.get(
         "http://metadata.google.internal/computeMetadata/v1/instance/"
@@ -107,10 +142,7 @@ def check_at_start() -> None:
         account_name = "hunter-monthly" if job == "hunter-monthly-v2" else job
         if account != account_name + "@rgs-hunter-global.iam.gserviceaccount.com":
             raise ValueError("SERVICE_ACCOUNT_MISMATCH")
-        cpu = _read_limit("/sys/fs/cgroup/cpu.max")
-        memory = _read_limit("/sys/fs/cgroup/memory.max")
-        if "UNAVAILABLE" in (cpu, memory):
-            raise ValueError("RESOURCE_LIMIT_UNAVAILABLE")
+        cpu, memory = resource_limits()
         actual = fingerprint(job=job, environ=dict(os.environ), argv=list(sys.argv),
                              service_account=account, cpu_limit=cpu, memory_limit=memory)
         probe = os.environ.get("HUNTER_CONFIG_PROBE", "")

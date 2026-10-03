@@ -57,10 +57,24 @@ def main() -> None:
         raise RuntimeError(f"TOPOLOGY_RUNTIME_MISMATCH:{job}:expected=hunter-maintenance")
     from production_guard import check_at_start
     check_at_start()
+    lock_probe = os.getenv("HUNTER_MAINTENANCE_LOCK_PROBE", "")
+    if lock_probe not in ("", "VERIFY"):
+        raise RuntimeError("MAINTENANCE_LOCK_PROBE_INVALID")
     if os.getenv("HUNTER_ACTIONS_CUTOVER") != "CONFIRMED":
         raise RuntimeError("SINGLE_WRITER_NOT_CONFIRMED")
     drive = Drive()
     drive.health()
+    if lock_probe == "VERIFY":
+        from maintenance_lock import verify_lock
+        verify_lock(drive)
+        return
+    from maintenance_lock import maintenance_slot
+    with maintenance_slot(drive) as held:
+        if held:
+            run_maintenance(drive)
+
+
+def run_maintenance(drive) -> None:
     today = dt.datetime.now(TZ).date()
     deadline = time.monotonic() + 3300
     for market in MARKETS:

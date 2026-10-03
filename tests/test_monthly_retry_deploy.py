@@ -15,6 +15,43 @@ TAIL = "\nfunction listMonthlyTrigger() {}\n"
 
 
 class MonthlyDeployTests(unittest.TestCase):
+    def test_timezone_migration_preserves_all_other_manifest_fields(self):
+        manifest = {"timeZone": "Asia/Singapore", "oauthScopes": ["scope"],
+                    "runtimeVersion": "V8", "webapp": {"executeAs": "USER_DEPLOYING"}}
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            path = root / "appsscript.json"
+            path.write_text(json.dumps(manifest))
+            self.assertEqual(deploy.patch_myt_manifest(root), "Asia/Singapore")
+            expected = dict(manifest, timeZone="Asia/Kuala_Lumpur")
+            self.assertEqual(json.loads(path.read_text()), expected)
+            unchanged = path.read_bytes()
+            self.assertEqual(deploy.patch_myt_manifest(root), "Asia/Kuala_Lumpur")
+            self.assertEqual(path.read_bytes(), unchanged)
+            manifest["timeZone"] = "America/New_York"
+            path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(RuntimeError, "UNREVIEWED_SCRIPT_TIMEZONE"):
+                deploy.patch_myt_manifest(root)
+            self.assertEqual(json.loads(path.read_text()), manifest)
+
+    def test_before_accepts_observed_timezone_after_requires_myt(self):
+        doc = {"ok": True, "monthly": {"count": 1, "expectedMonth": "2026-11"},
+               "daily": {"timeZone": "Asia/Singapore", "counts": {"dailyUS": 1, "dailyHK": 1},
+                         "triggers": [{"triggerId": "us"}, {"triggerId": "hk"}]}}
+        before = deploy.verify_launch_triggers(doc, "Asia/Singapore")
+        expected = deploy.expected_myt_triggers(before)
+        self.assertEqual(before["daily"]["timeZone"], "Asia/Singapore")
+        with self.assertRaisesRegex(RuntimeError, "TIMEZONE_READBACK_FAILED"):
+            deploy.verify_launch_triggers(doc, "Asia/Kuala_Lumpur")
+        doc["daily"]["timeZone"] = "Asia/Kuala_Lumpur"
+        after = deploy.verify_launch_triggers(doc, "Asia/Kuala_Lumpur")
+        self.assertEqual(after, expected)
+        doc["daily"]["triggers"][0]["triggerId"] = "replacement"
+        self.assertNotEqual(deploy.verify_launch_triggers(doc, "Asia/Kuala_Lumpur"), expected)
+        doc["daily"]["counts"]["dailyUS"] = 2
+        with self.assertRaisesRegex(RuntimeError, "TRIGGER_COUNT_READBACK_FAILED"):
+            deploy.verify_launch_triggers(doc, "Asia/Kuala_Lumpur")
+
     def test_launch_patch_preserves_monthly_manifest_and_other_functions(self):
         old_source = "\n".join("function " + name + "(job) {\n  return 'old';\n}\n"
                                for name in deploy.LAUNCH_FUNCTIONS)

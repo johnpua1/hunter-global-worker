@@ -29,6 +29,38 @@ def document(job):
 
 
 class GuardEnrollmentTests(unittest.TestCase):
+    def test_probe_rejects_success_that_hides_a_config_block_on_retry(self):
+        job = "hunter-us-daily"
+        replies = [
+            {"metadata": {"name": job + "-test"}},
+            [{"textPayload": "HUNTER_CONFIG_OK worker=" + job + " myt=test sha256=" + "a" * 64}],
+            [{"textPayload": "HUNTER_CONFIG_BLOCKED reason=ValueError:HASH_MISMATCH"}],
+        ]
+        with patch.object(enrollment, "gc", side_effect=replies):
+            with self.assertRaisesRegex(RuntimeError, "PROBE_RETRIED_AFTER_CONFIG_BLOCK"):
+                enrollment.probe(job, "VERIFY")
+
+    def test_resume_uses_built_release_and_does_not_touch_other_jobs(self):
+        release = "b" * 40
+        target = "hunter-hk-daily"
+        calls = []
+        def gc(*args, **kwargs):
+            calls.append(args)
+            if args[:3] == ("run", "jobs", "describe"):
+                return copy.deepcopy(document(args[3]))
+            return {}
+        with tempfile.TemporaryDirectory() as folder, \
+             patch.object(enrollment, "gc", side_effect=gc), \
+             patch.object(enrollment, "probe", side_effect=RuntimeError("PROBE_FAILED")), \
+             patch.object(enrollment.subprocess, "check_output") as git, \
+             patch.object(enrollment.tempfile, "mkdtemp", return_value=folder):
+            with self.assertRaisesRegex(RuntimeError, "PROBE_FAILED"):
+                enrollment.main(release=release, jobs=[target])
+        git.assert_not_called()
+        self.assertTrue(all(call[3] == target for call in calls))
+        self.assertIn("--image=us-central1-docker.pkg.dev/rgs-hunter-global/hunter-worker/runner:" + release,
+                      calls[1])
+
     def test_preflight_accepts_known_roles_and_rejects_unpinned_secret_and_probe(self):
         for job in enrollment.PREVIOUS:
             d = document(job)

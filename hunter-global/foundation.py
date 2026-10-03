@@ -195,8 +195,14 @@ def append_daily_date(drive: Drive, market: str, date: str, securities: list[dic
     rows.sort(key=lambda r: (r["security_id"], r["date"]))
     append_queue(drive, repairs)
     flag_five_day_failures(drive, market, date, securities, calendar)
-    if rows:
-        folder = f"{market}/DAILY/{date}"
+    # A fetch can recover several missed sessions for one security. The Bridge
+    # requires every row's date to match its DAILY directory, so partition the
+    # backfill by the actual session rather than the current run's target date.
+    rows_by_date = defaultdict(list)
+    for row in rows:
+        rows_by_date[row["date"]].append(row)
+    for row_date, dated_rows in sorted(rows_by_date.items()):
+        folder = f"{market}/DAILY/{row_date}"
         try:
             names = {x["name"] for x in drive.list(folder)}
         except RuntimeError as exc:
@@ -207,7 +213,7 @@ def append_daily_date(drive: Drive, market: str, date: str, securities: list[dic
         while any(f"part-{number:04d}{suffix}" in names
                   for suffix in DAILY_SEGMENT_SUFFIXES):
             number += 1
-        payload = lines_gz(rows)
+        payload = lines_gz(dated_rows)
         # Prefer the canonical .ndjson.gz name. Older live Apps Script Bridge
         # deployments can reject a valid gzip before parsing because ungzip()
         # receives a Blob without gzip MIME metadata. On that exact legacy

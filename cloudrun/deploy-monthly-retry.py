@@ -119,6 +119,36 @@ def patch_launch(directory, old, new):
     return True
 
 
+def patch_myt_manifest(directory):
+    path = directory / "appsscript.json"
+    manifest = json.loads(path.read_text())
+    previous = manifest.get("timeZone")
+    if previous not in ("Asia/Singapore", "Asia/Kuala_Lumpur"):
+        raise RuntimeError("UNREVIEWED_SCRIPT_TIMEZONE:" + str(previous))
+    if previous != "Asia/Kuala_Lumpur":
+        manifest["timeZone"] = "Asia/Kuala_Lumpur"
+        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    return previous
+
+
+def verify_launch_triggers(doc, expected_timezone):
+    monthly = doc.get("monthly", {})
+    if not doc.get("ok") or monthly.get("count") != 1:
+        raise RuntimeError("MONTHLY_TRIGGER_READBACK_FAILED")
+    daily = doc.get("daily", {})
+    if daily.get("timeZone") != expected_timezone:
+        raise RuntimeError("DAILY_TIMEZONE_READBACK_FAILED:" + str(daily.get("timeZone")))
+    if daily.get("counts") != {"dailyUS": 1, "dailyHK": 1}:
+        raise RuntimeError("DAILY_TRIGGER_COUNT_READBACK_FAILED:" + json.dumps(daily.get("counts")))
+    return {"monthly": monthly, "daily": daily}
+
+
+def expected_myt_triggers(before):
+    expected = json.loads(json.dumps(before))
+    expected["daily"]["timeZone"] = "Asia/Kuala_Lumpur"
+    return expected
+
+
 def ensure_idle():
     for job in JOBS:
         rows = json.loads(command([
@@ -184,25 +214,26 @@ def main(launch_guard=False):
     settings["rootDir"] = "."
     settings_path.write_text(json.dumps(settings))
     changed = (patch_launch if launch_guard else patch_monthly)(staged, old, new)
+    previous_timezone = None
+    if launch_guard:
+        previous_timezone = patch_myt_manifest(staged)
+        changed = changed or previous_timezone != "Asia/Kuala_Lumpur"
     spec = importlib.util.spec_from_file_location("bridge_post", ROOT / "cloudrun/apps-script-post.py")
     bridge = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(bridge)
     key = secret("APPS_SCRIPT_SHARED_KEY").strip()
 
-    def verify_bridge():
+    def verify_bridge(expected_timezone="Asia/Kuala_Lumpur"):
         op = "topology_status" if launch_guard else "month_status"
         doc = bridge.post_json(url, {"op": op, "key": key}, attempts=3)
+        if launch_guard:
+            return verify_launch_triggers(doc, expected_timezone)
         trigger = doc.get("monthly" if launch_guard else "trigger", {})
         if not doc.get("ok") or trigger.get("count") != 1:
             raise RuntimeError("MONTHLY_TRIGGER_READBACK_FAILED")
-        if launch_guard:
-            daily = doc.get("daily", {})
-            if daily.get("timeZone") != "Asia/Kuala_Lumpur" or daily.get("counts") != {"dailyUS": 1, "dailyHK": 1}:
-                raise RuntimeError("DAILY_TRIGGER_READBACK_FAILED")
-            return {"monthly": trigger, "daily": daily}
         return trigger
 
-    before = verify_bridge()
+    before = verify_bridge(previous_timezone) if launch_guard else verify_bridge()
     if not changed:
         print(label + "_ALREADY_DEPLOYED", flush=True)
         return
@@ -227,7 +258,7 @@ def main(launch_guard=False):
         if deployment_version(script_id, deployment_id, work) != new_version:
             raise RuntimeError("DEPLOYMENT_VERSION_READBACK_MISMATCH")
         after = verify_bridge()
-        if launch_guard and after != before:
+        if launch_guard and after != expected_myt_triggers(before):
             raise RuntimeError("TRIGGERS_CHANGED_DURING_DEPLOY")
         if not launch_guard and after.get("expectedMonth") != before.get("expectedMonth"):
             raise RuntimeError("MONTHLY_EXPECTED_MONTH_CHANGED")

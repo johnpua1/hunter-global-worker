@@ -98,7 +98,7 @@ def prepare_config_reader(jobs):
         account = "hunter-monthly" if job == "hunter-monthly-v2" else job
         gc("run", "jobs", "add-iam-policy-binding", job,
            "--member=serviceAccount:" + account + "@" + PROJECT + ".iam.gserviceaccount.com",
-           "--role=" + role_name, "--condition=None")
+           "--role=" + role_name)
     print("OWN_JOB_CONFIG_READ_GRANTED", flush=True)
 
 

@@ -183,6 +183,23 @@ RETRYABLE_REASONS = frozenset({
 MAX_REPAIR_ATTEMPTS = 3
 
 
+def append_repair_patch(drive: Drive, path: str, content: bytes):
+    """Reconcile an ambiguous append only after exact-byte readback.
+
+    Bridge append stays immutable. A successful write followed by a lost HTTP
+    response can make Drive._call's retry return APPEND_CONFLICT. That is safe
+    to acknowledge only if the persisted bytes equal this exact submission.
+    """
+    try:
+        drive.append(path, content)
+    except RuntimeError as exc:
+        if str(exc) != "BRIDGE_APPEND_CONFLICT":
+            raise
+        stored = drive.read(path)
+        if stored != content:
+            raise RuntimeError("PATCH_APPEND_CONTENT_CONFLICT:" + path) from exc
+
+
 def repair_attempts(item: dict) -> int:
     # Legacy evaluated rows already consumed one attempt.
     return int(item.get("repair_attempts", 1 if item.get("verified_at_myt") else 0))
@@ -308,7 +325,7 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
                     if not previous.get("accepted") or previous.get("result") != answer["result"]:
                         raise RuntimeError("PATCH_IDENTITY_CONFLICT:" + path)
                 else:
-                    drive.append(path, compact(answer))
+                    append_repair_patch(drive, path, compact(answer))
                 item["patch_path"] = path
                 accepted_count += 1
             item.update(status=answer["result"], verified_at_myt=answer["verified_at_myt"],

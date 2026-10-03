@@ -5,6 +5,7 @@ Run from the checked-out release root. No key payloads are read or printed.
 Only the failing job is rolled back; already verified jobs remain protected.
 """
 import json
+import argparse
 import os
 from pathlib import Path
 import re
@@ -16,7 +17,7 @@ PROJECT = "rgs-hunter-global"
 REGION = "us-central1"
 PREVIOUS = {
     "hunter-us-daily": ("79517d4e89dd6f9cc1680cef4868efe5d5a7537d", "US", "2"),
-    "hunter-hk-daily": ("79517d4e89dd6f9cc1680cef4868efe5d5a7537d", "HK", "1"),
+    "hunter-hk-daily": ("79517d4e89dd6f9cc1680cef4868efe5d5a7537d", "HK", "2"),
     "hunter-maintenance": ("78001fc48c579688261b1042b675465a480c4b8f", "MAINT", "2"),
     "hunter-monthly-v2": ("19979eeb812e86c042d0f1d3b71fe8280aeabc9f", "MONTH", "1"),
 }
@@ -88,6 +89,12 @@ def probe(job, mode):
             if match:
                 hashes.add(match[1])
         if len(hashes) == 1:
+            # An eventual success after a configuration block is not a clean
+            # probe. Cloud Run retries must not hide an unstable fingerprint.
+            blocked_query = query.replace(marker, "HUNTER_CONFIG_BLOCKED")
+            blocked = gc("logging", "read", blocked_query, "--freshness=30m", "--limit=20", region=False)
+            if blocked:
+                raise RuntimeError("PROBE_RETRIED_AFTER_CONFIG_BLOCK:" + job)
             return hashes.pop()
         if hashes:
             raise RuntimeError("INCONSISTENT_PROBE_HASH:" + job)
@@ -96,15 +103,18 @@ def probe(job, mode):
     raise RuntimeError("PROBE_LOG_NOT_VISIBLE:" + job)
 
 
-def main():
+def main(release=None, jobs=None):
     os.umask(0o077)
-    release = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    release = release or subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     if not re.fullmatch(r"[0-9a-f]{40}", release):
         raise RuntimeError("RELEASE_SHA_INVALID")
+    selected = list(PREVIOUS) if jobs is None else list(jobs)
+    if not selected or len(set(selected)) != len(selected) or any(j not in PREVIOUS for j in selected):
+        raise RuntimeError("JOB_SELECTION_INVALID")
     backup = Path(tempfile.mkdtemp(prefix="hunter-guard-backup."))
     print("BACKUP", backup, flush=True)
     docs = {}
-    for job in PREVIOUS:
+    for job in selected:
         doc = gc("run", "jobs", "describe", job)
         (backup / (job + ".json")).write_text(json.dumps(doc))
         validate_previous(job, doc, release)
@@ -140,8 +150,15 @@ def main():
             gc("run", "jobs", "update", job, "--image=" + old_container["image"],
                "--update-env-vars=" + env, *extra)
             raise
-    print("FOUR_JOB_GUARD_VERIFIED", flush=True)
+    if len(selected) == 4:
+        print("FOUR_JOB_GUARD_VERIFIED", flush=True)
+    else:
+        print("SELECTED_JOB_GUARDS_VERIFIED", ",".join(selected), flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--release", help="SHA of an already-built image; defaults to this checkout")
+    parser.add_argument("--jobs", nargs="+", choices=list(PREVIOUS))
+    options = parser.parse_args()
+    main(release=options.release, jobs=options.jobs)

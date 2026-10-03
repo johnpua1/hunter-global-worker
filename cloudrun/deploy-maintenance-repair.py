@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "19a421ba4fe0fb6f43ced2dd1a0490bf3ecfdc0b"
+RUNTIME_RELEASE = "cf508f3ab4ecc5db3bc429cff51ebb45af944898"
 PROJECT = "rgs-hunter-global"
 REGION = "us-central1"
 JOB = "hunter-maintenance"
@@ -69,20 +70,31 @@ def ensure_image(image):
                     "--project=" + PROJECT, "--region=" + REGION, "--quiet"], check=True)
 
 
+def reviewed_release(deploy):
+    head = deploy.command(["git", "rev-parse", "HEAD"], ROOT).strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise RuntimeError("RELEASE_SHA_INVALID")
+    # Reuse the already-built image only when runtime and Dockerfile are exact.
+    delta = deploy.command(["git", "diff", "--name-only", RUNTIME_RELEASE, head,
+                            "--", "hunter-global", "Dockerfile"], ROOT)
+    if delta.strip():
+        raise RuntimeError("RUNTIME_DIFFERS_FROM_BUILT_REPAIR_IMAGE")
+    changed = deploy.command(["git", "diff", "--name-only", BASE, RUNTIME_RELEASE,
+                              "--", "hunter-global", "Dockerfile"], ROOT)
+    if set(changed.splitlines()) != {"hunter-global/repair.py"}:
+        raise RuntimeError("UNREVIEWED_RUNTIME_CHANGE")
+    if deploy.command(["git", "status", "--porcelain", "--untracked-files=no"], ROOT).strip():
+        raise RuntimeError("DIRTY_RELEASE_CHECKOUT")
+    return RUNTIME_RELEASE
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wait-idle", action="store_true", help="Check every 60 seconds for up to 2 hours")
     options = parser.parse_args()
     deploy = module("scoped_script_deploy", "deploy-monthly-retry.py")
     guard = module("guard_enrollment", "enroll-production-guard.py")
-    release = deploy.command(["git", "rev-parse", "HEAD"], ROOT).strip()
-    if not re.fullmatch(r"[0-9a-f]{40}", release):
-        raise RuntimeError("RELEASE_SHA_INVALID")
-    changed = deploy.command(["git", "diff", "--name-only", BASE, release, "--", "hunter-global", "Dockerfile"], ROOT)
-    if set(changed.splitlines()) != {"hunter-global/repair.py"}:
-        raise RuntimeError("UNREVIEWED_RUNTIME_CHANGE")
-    if deploy.command(["git", "status", "--porcelain", "--untracked-files=no"], ROOT).strip():
-        raise RuntimeError("DIRTY_RELEASE_CHECKOUT")
+    release = reviewed_release(deploy)
     guard.PREVIOUS[JOB] = (BASE, "MAINT", "2")
     before = guard.gc("run", "jobs", "describe", JOB)
     guard.validate_previous(JOB, before, release)

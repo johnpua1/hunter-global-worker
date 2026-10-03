@@ -1,4 +1,4 @@
-"""Read-only configuration drift check for the three Cloud Run jobs.
+"""Fail-closed startup configuration guard for all four Cloud Run jobs.
 
 The expected fingerprint is enrolled after a production image and job template
 are verified. Never log the inputs: one of them is the Bridge credential.
@@ -27,7 +27,13 @@ ENV_KEYS = (
     "HUNTER_ACTIONS_CUTOVER",
     "HUNTER_SOURCE_SHA",
 )
-EXPECTED_JOBS = {"hunter-us-daily", "hunter-hk-daily", "hunter-maintenance"}
+JOB_ARGS = {
+    "hunter-us-daily": ["/app/runner.py", "--mode", "auto", "--market", "US"],
+    "hunter-hk-daily": ["/app/runner.py", "--mode", "auto", "--market", "HK"],
+    "hunter-maintenance": ["/app/maintenance.py"],
+    "hunter-monthly-v2": ["/app/runner.py", "--mode", "monthly"],
+}
+EXPECTED_JOBS = set(JOB_ARGS)
 HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -78,29 +84,49 @@ def safe_error_summary(exc: Exception) -> str:
 def check_at_start() -> None:
     job = os.environ.get("CLOUD_RUN_JOB", "")
     if not job:
-        return  # Local tests and administrative CLI use the same modules.
+        return  # Local tests and administrative CLI do not enroll production.
     stamp = dt.datetime.now(MYT).isoformat(timespec="seconds")
     try:
         if job not in EXPECTED_JOBS:
             raise ValueError("UNEXPECTED_JOB")
+        if list(sys.argv) != JOB_ARGS[job]:
+            raise ValueError("ENTRYPOINT_MISMATCH")
+        if os.environ.get("CLOUD_RUN_TASK_COUNT") != "1":
+            raise ValueError("TASK_COUNT_MISMATCH")
+        if os.environ.get("HUNTER_ACTIONS_CUTOVER") != "CONFIRMED":
+            raise ValueError("SINGLE_WRITER_NOT_CONFIRMED")
         if not re.fullmatch(r"[0-9a-f]{40}", os.environ.get("HUNTER_SOURCE_SHA", "")):
             raise ValueError("SOURCE_SHA_UNPINNED")
-        actual = fingerprint(
-            job=job,
-            environ=dict(os.environ),
-            argv=list(sys.argv),
-            service_account=_service_account_email(),
-            cpu_limit=_read_limit("/sys/fs/cgroup/cpu.max"),
-            memory_limit=_read_limit("/sys/fs/cgroup/memory.max"),
-        )
+        key = os.environ.get("APPS_SCRIPT_SHARED_KEY", "")
+        if not key or key != key.strip():
+            raise ValueError("BRIDGE_KEY_INVALID")
+        if not re.fullmatch(r"https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec",
+                            os.environ.get("APPS_SCRIPT_WEBAPP_URL", "")):
+            raise ValueError("BRIDGE_URL_INVALID")
+        account = _service_account_email()
+        account_name = "hunter-monthly" if job == "hunter-monthly-v2" else job
+        if account != account_name + "@rgs-hunter-global.iam.gserviceaccount.com":
+            raise ValueError("SERVICE_ACCOUNT_MISMATCH")
+        cpu = _read_limit("/sys/fs/cgroup/cpu.max")
+        memory = _read_limit("/sys/fs/cgroup/memory.max")
+        if "UNAVAILABLE" in (cpu, memory):
+            raise ValueError("RESOURCE_LIMIT_UNAVAILABLE")
+        actual = fingerprint(job=job, environ=dict(os.environ), argv=list(sys.argv),
+                             service_account=account, cpu_limit=cpu, memory_limit=memory)
+        probe = os.environ.get("HUNTER_CONFIG_PROBE", "")
+        if probe not in ("", "ENROLL", "VERIFY"):
+            raise ValueError("CONFIG_PROBE_INVALID")
+        if probe == "ENROLL":
+            # A per-execution override only. Stop before creating a Drive client.
+            LOG.info("HUNTER_CONFIG_ENROLL worker=%s myt=%s sha256=%s", job, stamp, actual)
+            raise SystemExit(0)
         expected = os.environ.get("HUNTER_CONFIG_SHA256", "")
         if not HEX_SHA256.fullmatch(expected) or actual != expected:
-            LOG.error("HUNTER_CONFIG_DRIFT worker=%s myt=%s reason=HASH_MISMATCH "
-                      "expected_sha256=%s actual_sha256=%s; continuing",
-                      job, stamp, expected or "UNREGISTERED", actual)
-        else:
-            LOG.info("HUNTER_CONFIG_OK worker=%s myt=%s sha256=%s", job, stamp, actual)
+            raise ValueError("HASH_MISMATCH")
+        LOG.info("HUNTER_CONFIG_OK worker=%s myt=%s sha256=%s", job, stamp, actual)
+        if probe == "VERIFY":
+            raise SystemExit(0)
     except Exception as exc:
-        # A temporary metadata failure must never stop market processing.
-        LOG.error("HUNTER_CONFIG_DRIFT worker=%s myt=%s reason=HASH_UNAVAILABLE:%s; "
-                  "continuing", job, stamp, type(exc).__name__)
+        LOG.error("HUNTER_CONFIG_BLOCKED worker=%s myt=%s reason=%s",
+                  job, stamp, safe_error_summary(exc))
+        raise RuntimeError("HUNTER_CONFIG_BLOCKED") from None

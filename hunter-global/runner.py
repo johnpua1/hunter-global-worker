@@ -23,6 +23,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import requests
+from time_budget import BudgetExceeded, request_timeout, retry_sleep
 
 
 ROOT = "https://www.googleapis.com/drive/v3/files"
@@ -61,12 +62,12 @@ def retry_http(session, method: str, url: str, **kwargs):
     timeout = max(3.0, float(os.getenv("HUNTER_HTTP_TIMEOUT_SECONDS", "45")))
     for attempt in range(attempts):
         try:
-            response = session.request(method, url, timeout=timeout, **kwargs)
+            response = session.request(method, url, timeout=request_timeout(timeout), **kwargs)
         except (requests.RequestException, OSError) as exc:
             last_error = exc
             if attempt == attempts - 1:
                 raise
-            time.sleep(min(30, 2**attempt + random.random()))
+            retry_sleep(min(30, 2**attempt + random.random()))
             continue
 
         # Non-retryable HTTP failures (for example 401/403/404) are
@@ -79,7 +80,7 @@ def retry_http(session, method: str, url: str, **kwargs):
         last_error = requests.HTTPError(f"HTTP {response.status_code}", response=response)
         if attempt == attempts - 1:
             raise last_error
-        time.sleep(min(30, 2**attempt + random.random()))
+        retry_sleep(min(30, 2**attempt + random.random()))
 
     if last_error is not None:
         raise last_error
@@ -105,7 +106,7 @@ class Drive:
         expected = {"ok": True, "service": "HUNTER_GLOBAL_BRIDGE"}
         for attempt in range(8):
             try:
-                response = self.http.get(self.url, timeout=60)
+                response = self.http.get(self.url, timeout=request_timeout(60))
                 response.raise_for_status()
                 result = response.json()
                 if result != expected:
@@ -121,7 +122,7 @@ class Drive:
                 # original /exec URL instead of accepting or caching it.
                 self.http.close()
                 self.http = requests.Session()
-                time.sleep(min(30, 2 ** attempt + random.random()))
+                retry_sleep(min(30, 2 ** attempt + random.random()))
         raise AssertionError("unreachable")
 
     def _call(self, op: str, **fields) -> dict:
@@ -133,7 +134,7 @@ class Drive:
                     timeout = float(os.getenv("HUNTER_BRIDGE_READ_TIMEOUT_SECONDS", "30"))
                 else:
                     timeout = float(os.getenv("HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS", "120"))
-                response = self.http.post(self.url, json=request, timeout=timeout)
+                response = self.http.post(self.url, json=request, timeout=request_timeout(timeout))
                 response.raise_for_status()
                 result = response.json()
                 # Apps Script can rarely return the doGet health payload to a
@@ -155,7 +156,7 @@ class Drive:
             except (requests.RequestException, ValueError):
                 if attempt == attempts - 1:
                     raise
-                time.sleep(min(30, 2 ** min(attempt, 4) + random.random()))
+                retry_sleep(min(30, 2 ** min(attempt, 4) + random.random()))
         raise AssertionError("unreachable")
 
     def list(self, parent_id: str, name: str | None = None) -> list[dict]:
@@ -369,6 +370,8 @@ def fetch_security(security: dict, calendar: list[str], as_of: str,
                                 row[key] *= factor
                             row["volume"] /= factor
         return rows, flags, splits, None
+    except BudgetExceeded:
+        raise
     except Exception as exc:
         return [], ["FETCH_FAILED"], [], f"{type(exc).__name__}:{str(exc)[:180]}"
 
@@ -768,6 +771,16 @@ def main():
         result = run_foundation_daily(drive, market, workers)
         LOG.info("daily market=%s sessions=%d written=%d", market, len(result),
                  sum(item.get("written", 0) for item in result))
+        incomplete = [item for item in result if item.get("status") != "COMPLETE"]
+        if incomplete:
+            # A zero exit code tells Cloud Run and the fallback scheduler that
+            # work succeeded. Preserve the failure receipt and checkpoint, but
+            # fail the invocation so incomplete sessions remain retryable.
+            item = incomplete[0]
+            raise RuntimeError(
+                f"DAILY_INCOMPLETE:{market}:{item.get('trade_date')}:"
+                f"{item.get('status')}"
+            )
         if args.mode == "daily-core":
             LOG.info("DAILY_CORE_DONE market=%s", market)
             continue

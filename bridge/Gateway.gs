@@ -46,6 +46,12 @@ function doPost(e) {
       return bridgeJson_({ok:true, daily:listHunterDailyTriggers(),
                           monthly:listMonthlyTrigger(), jobs:inspectHunterJobs()});
     }
+    if (op === 'watchdog_status' || op === 'install_daily_watchdog' || op === 'remove_daily_watchdog') {
+      if (scope !== 'LEGACY') throw new Error('WATCHDOG_ADMIN_LEGACY_ONLY');
+      var watchdog = op === 'install_daily_watchdog' ? installHunterDailyWatchdog() :
+          op === 'remove_daily_watchdog' ? removeHunterDailyWatchdog() : listHunterDailyWatchdog();
+      return bridgeJson_({ok:true, watchdog:watchdog});
+    }
     if (op === 'enforce_topology_triggers') {
       if (scope !== 'LEGACY') throw new Error('TOPOLOGY_ENFORCE_LEGACY_ONLY');
       var daily = installHunterDailyTriggers();
@@ -409,19 +415,22 @@ function hunterCloudRequest_(method, resource, payload) {
     options.payload = JSON.stringify(payload);
   }
   var last;
-  for (var attempt = 0; attempt < 3; attempt++) {
+  // A lost :run response does not mean the execution was not created.
+  var attempts = options.method === 'get' ? 3 : 1;
+  for (var attempt = 0; attempt < attempts; attempt++) {
     try {
       var response = UrlFetchApp.fetch(url, options);
       var code = response.getResponseCode();
       var text = response.getContentText();
       var body = text ? JSON.parse(text) : {};
       if (code >= 200 && code < 300) return body;
-      last = new Error('CLOUD_RUN_HTTP_' + code + ':' + text.slice(0, 500));
+      last = new Error('CLOUD_RUN_HTTP_' + code);
+      last.httpStatus = code;
       if ([408, 429, 500, 502, 503, 504].indexOf(code) < 0) break;
     } catch (err) {
       last = err;
     }
-    Utilities.sleep(Math.pow(2, attempt) * 1000);
+    if (attempt + 1 < attempts) Utilities.sleep(Math.pow(2, attempt) * 1000);
   }
   throw last || new Error('CLOUD_RUN_REQUEST_FAILED');
 }
@@ -461,8 +470,15 @@ function hunterExecutionState_(execution) {
 function status(job) {
   var name = hunterJobName_(job);
   var resource = hunterJobResource_(name);
-  var response = hunterCloudRequest_('get', resource + '/executions?pageSize=3', null);
-  var executions = (response.executions || []).slice(0, 3).map(function (x) {
+  var rows = [], token = '', pages = 0;
+  do {
+    if (++pages > 25) throw new Error('EXECUTION_SCAN_LIMIT');
+    var response = hunterCloudRequest_('get', resource + '/executions?pageSize=100' +
+        (token ? '&pageToken=' + encodeURIComponent(token) : ''), null);
+    rows = rows.concat(response.executions || []);
+    token = response.nextPageToken || '';
+  } while (token);
+  var executions = rows.slice(0, 3).map(function (x) {
     return {
       name: x.name || null,
       status: hunterExecutionState_(x),
@@ -476,7 +492,7 @@ function status(job) {
   });
   return {
     job: name,
-    running: executions.some(function (x) { return x.status === 'RUNNING'; }),
+    running: rows.some(function (x) { return hunterExecutionState_(x) === 'RUNNING'; }),
     executions: executions
   };
 }
@@ -504,16 +520,105 @@ function inspectHunterJobs() {
           MAINT: hunterJobConfig_('MAINT'), MONTH: hunterJobConfig_('MONTH')};
 }
 
-function runHunterJob_(job) {
+function runHunterJob_(job, compensation) {
   var name = hunterJobName_(job);
-  var before = status(name);
-  if (before.running) {
-    console.log('SKIP_ALREADY_RUNNING job=' + name);
-    return {ok: true, job: name, skipped: true, reason: 'ALREADY_RUNNING', status: before};
+  var lock = LockService.getScriptLock();
+  var held = false;
+  try {
+    held = lock.tryLock(5000);
+    if (!held) throw new Error('LAUNCH_LOCK_BUSY');
+    var before = status(name);
+    if (before.running) {
+      return {ok: true, job: name, skipped: true, reason: 'ALREADY_RUNNING', status: before};
+    }
+    var props = PropertiesService.getScriptProperties();
+    var key = 'HUNTER_LAUNCH_' + name;
+    var saved = props.getProperty(key);
+    var today = Utilities.formatDate(new Date(), 'Asia/Kuala_Lumpur', 'yyyy-MM-dd');
+    if (saved) {
+      var pending = JSON.parse(saved);
+      // Never expire an ambiguous launch and blindly submit another :run.
+      if (!pending.operation && !pending.execution) throw new Error('LAUNCH_OUTCOME_UNKNOWN');
+      var previous = {};
+      if (!pending.execution) {
+        previous = hunterCloudRequest_('get', pending.operation, null);
+        pending.execution = (previous.response || previous.metadata || {}).name || null;
+        if (!pending.execution && !previous.done) {
+          return {ok: true, job: name, skipped: true, reason: 'LAUNCH_PENDING', operation: pending.operation};
+        }
+      }
+      if (!previous.error) {
+        var executionName = pending.execution;
+        if (!executionName || executionName.indexOf('/jobs/' + name + '/executions/') < 0)
+          throw new Error('LAUNCH_EXECUTION_UNCONFIRMED');
+        var execution = hunterCloudRequest_('get', executionName, null);
+        var state = hunterExecutionState_(execution);
+        if (state === 'RUNNING') {
+          return {ok: true, job: name, skipped: true, reason: 'ALREADY_RUNNING', execution: executionName};
+        }
+        props.setProperty(key, JSON.stringify(pending));
+        if (state === 'SUCCEEDED' && pending.mytDate === today) {
+          return {ok: true, job: name, skipped: true, reason: 'ALREADY_SUCCEEDED_TODAY', execution: executionName};
+        }
+        if (['SUCCEEDED', 'FAILED', 'CANCELLED'].indexOf(state) < 0)
+          throw new Error('LAUNCH_EXECUTION_UNCONFIRMED');
+      }
+    }
+    // Compensation shares this lock and durable launch receipt with daily triggers.
+    // Count BEFORE POST, including uncertain/rejected attempts; never hot-loop.
+    if (compensation === true) {
+      if (['hunter-us-daily', 'hunter-hk-daily'].indexOf(name) < 0)
+        throw new Error('COMPENSATION_DAILY_ONLY');
+      var retryKey = 'HUNTER_COMPENSATION_' + name;
+      var retry = JSON.parse(props.getProperty(retryKey) || '{}');
+      if (retry.mytDate !== today) retry = {mytDate: today, count: 0};
+      if (typeof retry.count !== 'number' || retry.count < 0 || retry.count % 1 !== 0)
+        throw new Error('COMPENSATION_RECEIPT_INVALID');
+      if (retry.count >= 2) throw new Error('DAILY_COMPENSATION_EXHAUSTED');
+      retry.count++;
+      props.setProperty(retryKey, JSON.stringify(retry));
+    }
+    // Persist BEFORE the non-idempotent request, while holding the same lock.
+    var receipt = {mytDate: today, requestedAt: new Date().toISOString(), operation: null};
+    props.setProperty(key, JSON.stringify(receipt));
+    var op;
+    try {
+      op = hunterCloudRequest_('post', hunterJobResource_(name) + ':run', {});
+    } catch (err) {
+      // A definitive rejected request can be retried on the next trigger.
+      if ([400, 401, 403, 404, 409, 429].indexOf(err.httpStatus) >= 0)
+        props.deleteProperty(key);
+      throw err;
+    }
+    if (!op.name) throw new Error('LAUNCH_OUTCOME_UNKNOWN');
+    receipt.operation = op.name;
+    // RunJob operation metadata is an Execution; keep its durable identity.
+    receipt.execution = (op.response || op.metadata || {}).name || null;
+    props.setProperty(key, JSON.stringify(receipt));
+    console.log('STARTED job=' + name + ' operation=' + op.name);
+    return {ok: true, job: name, skipped: false, operation: op.name};
+  } catch (err) {
+    // Do not include response bodies, keys, or URLs in the alert log.
+    var event = {event: 'HUNTER_LAUNCH_FAILED', job: name,
+      reason: String(err.message || '').split(':')[0].replace(/[^A-Z0-9_]/g, '').slice(0, 80),
+      at_myt: Utilities.formatDate(new Date(), 'Asia/Kuala_Lumpur', 'yyyy-MM-dd HH:mm:ss')};
+    console.error(JSON.stringify(event));
+    try {
+      var project = hunterCloudConfig_().project;
+      var logged = UrlFetchApp.fetch('https://logging.googleapis.com/v2/entries:write', {
+        method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+        headers: {Authorization: 'Bearer ' + ScriptApp.getOAuthToken()},
+        payload: JSON.stringify({entries: [{
+          logName: 'projects/' + project + '/logs/hunter-control', severity: 'ERROR',
+          resource: {type: 'global', labels: {project_id: project}}, jsonPayload: event
+        }]})
+      });
+      if (logged.getResponseCode() >= 300) console.error('HUNTER_ALERT_LOG_WRITE_FAILED');
+    } catch (ignored) { console.error('HUNTER_ALERT_LOG_WRITE_FAILED'); }
+    throw err;
+  } finally {
+    if (held) lock.releaseLock();
   }
-  var op = hunterCloudRequest_('post', hunterJobResource_(name) + ':run', {});
-  console.log('STARTED job=' + name + ' operation=' + String(op.name || 'UNKNOWN'));
-  return {ok: true, job: name, skipped: false, operation: op.name || null};
 }
 
 function runUS() { return runHunterJob_('US'); }
@@ -730,6 +835,11 @@ function monthlyV2() {
   var expectedMonth = String(props.getProperty('HUNTER_MONTH_EXPECTED') || '');
   if (!/^\d{4}-\d{2}$/.test(expectedMonth)) throw new Error('MONTH_EXPECTED_NOT_CONFIGURED');
 
+  // A Cloud Run submission is not a committed monthly result. Keep this
+  // month's next-day check armed even if Drive reads or job launch fail.
+  // Only the two-market ACTIVE_POINTER below may advance the schedule.
+  var retry = hunterMonthlyRetry_(expectedMonth);
+
   var rootId = props.getProperty('HUNTER_GLOBAL_FOLDER_ID');
   if (!rootId) throw new Error('ROOT_NOT_CONFIGURED');
   var root = DriveApp.getFolderById(rootId);
@@ -750,7 +860,7 @@ function monthlyV2() {
   if (usDate.slice(0,7) !== expectedMonth || hkDate.slice(0,7) !== expectedMonth) {
     return {ok:true, skipped:true, reason:'WAIT_FIRST_US_AND_HK_SESSION_DAILY',
             expectedMonth:expectedMonth, US:usDate, HK:hkDate,
-            next:hunterMonthlyRetry_(expectedMonth)};
+            next:retry};
   }
 
   var active = bridgeFile_(root, 'ACTIVE_POINTER');
@@ -766,9 +876,9 @@ function monthlyV2() {
   }
 
   var result = runMonthly();
-  var next = hunterNextMonthCandidate_(usDate);
-  installMonthlyTriggerAt(next.at, next.expectedMonth);
-  return {ok:true, skipped:false, US:usDate, HK:hkDate, run:result};
+  return {ok:true, skipped:!!result.skipped, reason:'WAIT_MONTH_COMMIT',
+          expectedMonth:expectedMonth, US:usDate, HK:hkDate,
+          run:result, next:retry};
 }
 
 function listMonthlyTrigger() {

@@ -20,6 +20,19 @@ def materialize(drive: Drive, market: str, as_of: str) -> int:
     zone = "America/New_York" if market == "US" else "Asia/Hong_Kong"
     rows = []
     unresolved = []
+    # Index receipts once instead of making a Bridge request for every date
+    # in the historical calendar. A capped listing is not proof of absence.
+    try:
+        control_files = drive.list(f"{market}/CONTROL")
+        receipt_names = ({item["name"] for item in control_files}
+                         if len(control_files) < 1000 else None)
+    except RuntimeError as exc:
+        if "LIST_LIMIT" in str(exc):
+            receipt_names = None
+        elif "FOLDER_NOT_FOUND" in str(exc):
+            receipt_names = set()
+        else:
+            raise
     day = first
     while day <= last:
         date = day.isoformat()
@@ -30,7 +43,9 @@ def materialize(drive: Drive, market: str, as_of: str) -> int:
         if status not in (None, "OPEN", "CLOSED", "HALF_DAY", "MARKET_HALTED"):
             raise ValueError("CALENDAR_BAD_OFFICIAL_STATUS:" + date)
         outage = f"{market}/CONTROL/DAILY_RUN_{date}.json"
-        if drive.file(outage) and drive.json(outage).get("status") == "MARKET_WIDE_DATA_UNAVAILABLE":
+        has_receipt = (drive.file(outage) if receipt_names is None else
+                       f"DAILY_RUN_{date}.json" in receipt_names)
+        if has_receipt and drive.json(outage).get("status") == "MARKET_WIDE_DATA_UNAVAILABLE":
             status = "MARKET_WIDE_DATA_UNAVAILABLE"
         if status is None:
             if date in observed:

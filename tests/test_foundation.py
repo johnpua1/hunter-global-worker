@@ -62,6 +62,43 @@ def row(date, close, sid="US-000001", anchor="2026-01-01"):
 
 
 class FoundationTests(unittest.TestCase):
+    @patch("foundation.closed_dates_since", return_value=["2026-10-01", "2026-10-02"])
+    @patch("foundation.fetch_security")
+    def test_multisession_backfill_matches_bridge_directory_and_replays(self, fetch, dates):
+        class StrictDailyDrive(MemoryDrive):
+            def append(self, path, data, mime=None):
+                if "/DAILY/" in path:
+                    market, _, day, _ = path.split("/")
+                    for item in parse_lines_gz(data):
+                        if (not item["security_id"].startswith(market + "-") or
+                                item["date"] != day or item["trade_date"] != day):
+                            raise RuntimeError("BRIDGE_DAILY_ROW_IDENTITY_INVALID")
+                super().append(path, data, mime)
+
+        for market in ("US", "HK"):
+            with self.subTest(market=market):
+                drive = StrictDailyDrive()
+                sid = market + "-000001"
+                security = {"market": market, "security_id": sid}
+                earlier = f"{market}/DAILY/2026-10-01/part-0001.ndjson.gz"
+                original = lines_gz([row("2026-10-01", 50, market + "-000002")])
+                drive.data[earlier] = original
+                fetch.return_value = ([row("2026-10-01", 100, sid),
+                                       row("2026-10-02", 101, sid)], [], [], None)
+                result = append_daily_date(drive, market, "2026-10-02", [security],
+                                           {sid: "2026-09-30"}, set(), 1, ["2026-09-30"])
+                self.assertEqual(result["written"], 2)
+                self.assertEqual(drive.data[earlier], original)
+                self.assertIn(f"{market}/DAILY/2026-10-01/part-0002.ndjson.gz", drive.data)
+                self.assertIn(f"{market}/DAILY/2026-10-02/part-0001.ndjson.gz", drive.data)
+                with patch("foundation.daily_segments", return_value=["2026-10-01", "2026-10-02"]):
+                    last, keys = read_existing(drive, market, [security], "2026-09-30")
+                before = list(drive.writes)
+                replay = append_daily_date(drive, market, "2026-10-02", [security],
+                                           last, keys, 1, ["2026-09-30"])
+                self.assertEqual(replay["written"], 0)
+                self.assertEqual(drive.writes, before)
+
     def test_hk_identity_fix_requires_official_isin_proof(self):
         item = {"market": "HK", "security_id": "HK-000001", "category": "IDENTITY_REVIEW",
                 "problem": "OFFICIAL_ISIN_SAME_NEW_TICKER"}
@@ -142,8 +179,9 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(len([x for x in drive.writes[before:] if "/DAILY/" in x]), 0)
         self.assertEqual(len(parse_lines_gz(drive.data["US/DAILY/2026-01-02/part-0001.ndjson.gz"])), 1)
 
+    @patch("foundation.closed_dates_since", return_value=["2026-01-02"])
     @patch("foundation.fetch_security")
-    def test_daily_falls_back_for_legacy_bridge_gzip_validator(self, fetch):
+    def test_daily_falls_back_for_legacy_bridge_gzip_validator(self, fetch, dates):
         drive = LegacyBridgeDrive()
         security = {"market": "US", "security_id": "US-000001", "ticker": "AAPL"}
         fetch.return_value = ([row("2026-01-02", 101)], ["PASS_DAILY"], [], None)
@@ -179,8 +217,9 @@ class FoundationTests(unittest.TestCase):
         self.assertNotIn("US/CONTROL/DAILY_RUN_2026-09-25.json", drive.data)
         fetch.assert_not_called()
 
+    @patch("foundation.closed_dates_since", return_value=["2026-09-25"])
     @patch("foundation.fetch_security")
-    def test_base_date_new_listing_bootstrap_counts_base_as_available(self, fetch):
+    def test_base_date_new_listing_bootstrap_counts_base_as_available(self, fetch, dates):
         drive = MemoryDrive()
         existing = {"market": "US", "security_id": "US-000001", "ticker": "AAPL",
                     "listing_status": "ACTIVE"}

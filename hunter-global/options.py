@@ -10,6 +10,7 @@ import requests
 
 from runner import Drive, compact, now_myt, retry_http, TZ
 from foundation import current_universe
+from time_budget import BudgetExceeded, request_timeout, propagate_budget
 
 
 
@@ -17,12 +18,14 @@ def source_preflight() -> dict:
     """Detect a source-wide Yahoo optionChain auth/rate-limit outage once."""
     url = "https://query1.finance.yahoo.com/v7/finance/options/AAPL"
     try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0 Hunter/1.0"}, timeout=15)
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0 Hunter/1.0"}, timeout=request_timeout(15))
         body = r.text[:200]
         unavailable = r.status_code in (401, 429) and (
             "Invalid Crumb" in body or "Too Many Requests" in body or r.status_code == 429)
         return {"available": not unavailable, "http_status": r.status_code,
                 "evidence": body.replace("\\n", " ")[:160], "checked_at_myt": now_myt()}
+    except BudgetExceeded:
+        raise
     except Exception as exc:
         return {"available": False, "http_status": None,
                 "evidence": "EXCEPTION:" + type(exc).__name__, "checked_at_myt": now_myt()}
@@ -78,6 +81,8 @@ def label(symbol: str, market: str) -> dict:
                 "bid_ask_available": "TRUE" if quotes else "UNKNOWN",
                 "vertical_usable": "TRUE" if vertical_evidence else "UNKNOWN",
                 "vertical_evidence": vertical_evidence, "status": "CHECKED"}
+    except BudgetExceeded:
+        raise
     except Exception:
         return unknown
 
@@ -103,7 +108,7 @@ def monthly(drive: Drive, market: str):
                   for s in securities]
     else:
         with ThreadPoolExecutor(max_workers=6) as pool:
-            statuses = pool.map(lambda s: label(s["ticker"], market), securities)
+            statuses = pool.map(propagate_budget(lambda s: label(s["ticker"], market)), securities)
             values = [{"security_id": s["security_id"], **status}
                       for s, status in zip(securities, statuses)]
     drive.put(path, compact({"market": market, "month": month,

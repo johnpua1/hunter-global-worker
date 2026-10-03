@@ -21,6 +21,35 @@ from universe import refresh
 LOG = logging.getLogger("hunter.maintenance")
 
 
+def repair_markets(drive, markets, deadline):
+    """Share remaining wall time; a first-market failure must not skip the second."""
+    failures = []
+    for index, market in enumerate(markets):
+        now = time.monotonic()
+        share = (deadline - now) / (len(markets) - index)
+        if share <= 300:
+            LOG.error("maintenance stage=repair market=%s state=SKIPPED reason=TIME_BUDGET", market)
+            failures.append(market)
+            continue
+        LOG.info("maintenance stage=repair market=%s state=START budget_seconds=%d", market, share)
+        try:
+            result = run_repair(drive, market, deadline=now + share)
+            LOG.info("repair market=%s result=%s", market, result)
+            if result.get("retry_exhausted"):
+                LOG.error("HUNTER_REPAIR_REVIEW_REQUIRED market=%s count=%s",
+                          market, result["retry_exhausted"])
+            if result.get("timed_out"):
+                failures.append(market)
+        except Exception as exc:
+            from production_guard import safe_error_summary
+            LOG.error("maintenance stage=repair market=%s state=FAILED reason=%s",
+                      market, safe_error_summary(exc))
+            failures.append(market)
+    if failures:
+        # Cloud Run's bounded retry resumes persisted queue state automatically.
+        raise RuntimeError("MAINTENANCE_REPAIR_INCOMPLETE:" + ",".join(failures))
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     job = os.getenv("CLOUD_RUN_JOB")
@@ -49,13 +78,10 @@ def main() -> None:
         LOG.info("maintenance stage=calendar market=%s state=DONE rows=%d", market, calendar_rows)
         LOG.info("maintenance stage=options market=%s state=START", market)
         LOG.info("options market=%s rows=%d", market, monthly(drive, market))
-    for market in MARKETS:
-        if time.monotonic() >= deadline - 120:
-            LOG.warning("maintenance stage=repair market=%s state=SKIPPED reason=TIME_BUDGET", market)
-            break
-        LOG.info("maintenance stage=repair market=%s state=START", market)
-        LOG.info("repair market=%s result=%s", market, run_repair(drive, market,
-                                                       deadline=deadline))
+    markets = list(MARKETS)
+    if today.toordinal() % 2:
+        markets.reverse()
+    repair_markets(drive, markets, deadline)
 
 
 if __name__ == "__main__":

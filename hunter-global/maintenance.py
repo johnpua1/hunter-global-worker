@@ -35,6 +35,7 @@ def main() -> None:
     today = dt.datetime.now(TZ).date()
     deadline = time.monotonic() + 3300
     for market in MARKETS:
+        LOG.info("maintenance stage=control market=%s state=START", market)
         current_universe(drive, market)
         checkpoint = initialize_control(drive, market)
         seed_corporate_actions(drive, market)
@@ -42,12 +43,17 @@ def main() -> None:
         stamp = dt.datetime.fromisoformat(current["updated_at_myt"]).date()
         if stamp.isocalendar()[:2] != today.isocalendar()[:2]:
             LOG.info("universe market=%s result=%s", market, refresh(drive, market))
-        materialize(drive, market, max(checkpoint["last_completed_date"],
+        LOG.info("maintenance stage=calendar market=%s state=START", market)
+        calendar_rows = materialize(drive, market, max(checkpoint["last_completed_date"],
                                        dt.date(2026, 9, 25).isoformat()))
+        LOG.info("maintenance stage=calendar market=%s state=DONE rows=%d", market, calendar_rows)
+        LOG.info("maintenance stage=options market=%s state=START", market)
         LOG.info("options market=%s rows=%d", market, monthly(drive, market))
     for market in MARKETS:
         if time.monotonic() >= deadline - 120:
+            LOG.warning("maintenance stage=repair market=%s state=SKIPPED reason=TIME_BUDGET", market)
             break
+        LOG.info("maintenance stage=repair market=%s state=START", market)
         LOG.info("repair market=%s result=%s", market, run_repair(drive, market,
                                                        deadline=deadline))
 

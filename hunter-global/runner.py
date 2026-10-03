@@ -768,6 +768,16 @@ def main():
         result = run_foundation_daily(drive, market, workers)
         LOG.info("daily market=%s sessions=%d written=%d", market, len(result),
                  sum(item.get("written", 0) for item in result))
+        incomplete = [item for item in result if item.get("status") != "COMPLETE"]
+        if incomplete:
+            # A zero exit code tells Cloud Run and the fallback scheduler that
+            # work succeeded. Preserve the failure receipt and checkpoint, but
+            # fail the invocation so incomplete sessions remain retryable.
+            item = incomplete[0]
+            raise RuntimeError(
+                f"DAILY_INCOMPLETE:{market}:{item.get('trade_date')}:"
+                f"{item.get('status')}"
+            )
         if args.mode == "daily-core":
             LOG.info("DAILY_CORE_DONE market=%s", market)
             continue

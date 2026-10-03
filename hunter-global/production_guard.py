@@ -12,7 +12,8 @@ import logging
 import os
 import re
 import sys
-from pathlib import Path
+import time
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import requests
@@ -37,46 +38,68 @@ EXPECTED_JOBS = set(JOB_ARGS)
 HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
-def _read_limit(path: str) -> str:
-    try:
-        return Path(path).read_text(encoding="ascii").strip()
-    except (OSError, UnicodeError):
-        return "UNAVAILABLE"
+def _get_json(url: str, headers: dict[str, str], label: str) -> dict:
+    for attempt in range(4):
+        try:
+            response = requests.get(url, headers=headers, timeout=(3, 10), allow_redirects=False)
+        except requests.RequestException:
+            if attempt == 3:
+                raise ValueError(label + "_UNAVAILABLE") from None
+        else:
+            if response.status_code == 200:
+                result = response.json()
+                if not isinstance(result, dict):
+                    raise ValueError(label + "_INVALID")
+                return result
+            if response.status_code not in (404, 429, 500, 502, 503, 504) or attempt == 3:
+                raise ValueError(label + "_HTTP_" + str(response.status_code))
+        time.sleep(2 ** attempt)
+    raise AssertionError("unreachable")
 
 
 def resource_limits() -> tuple[str, str]:
-    """Read finite limits on cgroup v2 or Cloud Run's v1 controller mounts.
+    """Use this immutable execution's declared limits, not host cgroup quota.
 
-    Paths are not fingerprint inputs: the same limits have the same identity
-    across layouts. Preserve the actual quota; never round it to a nominal CPU.
+    The per-execution probe timeout and attempt number are deliberately excluded.
+    Requires only run.executions.get on this worker's own job.
     """
-    for root in ("/sys/fs/cgroup", "/sys/fs/cgroup/unified"):
-        cpu = _read_limit(root + "/cpu.max")
-        memory = _read_limit(root + "/memory.max")
-        if cpu != "UNAVAILABLE" and memory != "UNAVAILABLE":
-            break
-    else:
-        for controller in ("cpu,cpuacct", "cpu", "cpuacct,cpu"):
-            root = "/sys/fs/cgroup/" + controller
-            quota = _read_limit(root + "/cpu.cfs_quota_us")
-            period = _read_limit(root + "/cpu.cfs_period_us")
-            if quota != "UNAVAILABLE" and period != "UNAVAILABLE":
-                cpu = quota + " " + period
-                break
-        else:
-            raise ValueError("RESOURCE_LIMIT_UNAVAILABLE")
-        memory = _read_limit("/sys/fs/cgroup/memory/memory.limit_in_bytes")
-    if memory == "UNAVAILABLE":
-        raise ValueError("RESOURCE_LIMIT_UNAVAILABLE")
-    fields = cpu.split()
-    if (len(fields) != 2 or not all(re.fullmatch(r"[0-9]+", x) for x in fields)
-            or not re.fullmatch(r"[0-9]+", memory)):
+    job = os.environ.get("CLOUD_RUN_JOB", "")
+    execution = os.environ.get("CLOUD_RUN_EXECUTION", "")
+    if job not in EXPECTED_JOBS or not re.fullmatch(re.escape(job) + r"-[a-z0-9]+", execution):
+        raise ValueError("EXECUTION_ID_INVALID")
+    name = ("projects/rgs-hunter-global/locations/us-central1/jobs/" + job +
+            "/executions/" + execution)
+    token_doc = _get_json(
+        "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+        {"Metadata-Flavor": "Google"}, "METADATA_TOKEN")
+    token = token_doc.get("access_token")
+    if not isinstance(token, str) or not token:
+        raise ValueError("METADATA_TOKEN_MISSING")
+    doc = _get_json("https://run.googleapis.com/v2/" + name,
+                    {"Authorization": "Bearer " + token}, "EXECUTION_CONFIG")
+    # The API may canonicalize the project ID to its numeric project number.
+    allowed_names = {name, name.replace("projects/rgs-hunter-global/", "projects/1018303980503/")}
+    if doc.get("name") not in allowed_names:
+        raise ValueError("EXECUTION_ID_MISMATCH")
+    if doc.get("taskCount") != 1 or doc.get("parallelism") != 1:
+        raise ValueError("EXECUTION_TOPOLOGY_MISMATCH")
+    containers = doc.get("template", {}).get("containers", [])
+    if len(containers) != 1:
+        raise ValueError("EXECUTION_CONTAINER_MISMATCH")
+    limits = containers[0].get("resources", {}).get("limits", {})
+    cpu, memory = str(limits.get("cpu", "")), str(limits.get("memory", ""))
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?m?", cpu):
         raise ValueError("RESOURCE_LIMIT_INVALID")
-    quota, period = map(int, fields)
-    memory_bytes = int(memory)
-    if min(quota, period, memory_bytes) <= 0:
+    cpu_value = Decimal(cpu[:-1]) / 1000 if cpu.endswith("m") else Decimal(cpu)
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([KMGT]i|[kKMGT])?", memory)
+    if cpu_value <= 0 or not match:
         raise ValueError("RESOURCE_LIMIT_INVALID")
-    return f"{quota} {period}", str(memory_bytes)
+    factors = {None: 1, "Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40,
+               "k": 10**3, "K": 10**3, "M": 10**6, "G": 10**9, "T": 10**12}
+    memory_value = Decimal(match[1]) * factors[match[2]]
+    if memory_value <= 0 or memory_value != int(memory_value):
+        raise ValueError("RESOURCE_LIMIT_INVALID")
+    return format(cpu_value.normalize(), "f"), str(int(memory_value))
 
 
 def _service_account_email() -> str:
@@ -95,7 +118,7 @@ def fingerprint(*, job: str, environ: dict[str, str], argv: list[str],
     # The expected-hash variable is deliberately excluded. Hashing the Bridge
     # key detects rotation without ever exposing it in logs or in the image.
     document = {
-        "schema": 1,
+        "schema": 2,
         "job": job,
         "argv": argv,
         "env": {key: environ.get(key, "") for key in ENV_KEYS},
@@ -145,6 +168,8 @@ def check_at_start() -> None:
         cpu, memory = resource_limits()
         actual = fingerprint(job=job, environ=dict(os.environ), argv=list(sys.argv),
                              service_account=account, cpu_limit=cpu, memory_limit=memory)
+        LOG.info("HUNTER_CONFIG_DETAIL worker=%s myt=%s cpu=%s memory=%s source=%s actual_sha256=%s",
+                 job, stamp, cpu, memory, os.environ["HUNTER_SOURCE_SHA"], actual)
         probe = os.environ.get("HUNTER_CONFIG_PROBE", "")
         if probe not in ("", "ENROLL", "VERIFY"):
             raise ValueError("CONFIG_PROBE_INVALID")

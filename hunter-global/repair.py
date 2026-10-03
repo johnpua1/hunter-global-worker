@@ -15,7 +15,7 @@ from urllib.parse import quote
 
 import requests
 
-from runner import Drive, compact, digest, fetch_security, load_market, now_myt, retry_http, parse_lines_gz
+from runner import Drive, compact, digest, fetch_security, load_market, now_myt, retry_http, parse_lines_gz, TZ
 from foundation import current_universe
 
 
@@ -176,10 +176,43 @@ def decide(drive: Drive, item: dict, security: dict, state=None, base_cache=None
     return result
 
 
+RETRYABLE_REASONS = frozenset({
+    "MARKET_WIDE_OUTAGE", "SESSION_NOT_CONFIRMED", "NO_BAR_AT_REQUESTED_DATE",
+    "NO_PRIMARY_BAR_ACTIVE_LISTING",
+})
+MAX_REPAIR_ATTEMPTS = 3
+
+
+def repair_attempts(item: dict) -> int:
+    # Legacy evaluated rows already consumed one attempt.
+    return int(item.get("repair_attempts", 1 if item.get("verified_at_myt") else 0))
+
+
+def retryable(item: dict) -> bool:
+    return (item.get("status") in {"UNRESOLVED", "NO_DATA"}
+            and item.get("reason") in RETRYABLE_REASONS)
+
+
+def repair_due(item: dict, now: dt.datetime) -> bool:
+    if item.get("status", "OPEN") == "OPEN":
+        return True
+    if not retryable(item) or repair_attempts(item) >= MAX_REPAIR_ATTEMPTS:
+        return False
+    stamp = item.get("next_retry_at_myt")
+    try:
+        due = (dt.datetime.fromisoformat(stamp) if stamp else
+               dt.datetime.fromisoformat(item["verified_at_myt"]) + dt.timedelta(hours=6))
+        if due.tzinfo is None:
+            return False  # An ambiguous legacy timestamp must not cause a hot retry loop.
+        return now >= due
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
                chunk_size: int = 25, shard_index: int | None = None,
                shard_count: int | None = None) -> dict:
-    """Persist each chunk before the Cloud Run deadline; restarts skip terminal rows."""
+    """Persist chunks and retry transient failures at most three times with backoff."""
     if deadline is None:
         deadline = time.monotonic() + int(os.getenv("REPAIR_TIME_BUDGET_SECONDS", "3300"))
     securities = {s["security_id"]: s for s in current_universe(drive, market)}
@@ -192,7 +225,7 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
         doc = json.loads(raw)
         candidates = [(i, x) for i, x in enumerate(doc["items"])
                       if x.get("market") == market
-                      and x.get("status", "OPEN") == "OPEN"
+                      and repair_due(x, dt.datetime.now(TZ))
                       and (shard_count is None or shard_index is None
                            or i % shard_count == shard_index)]
         if not candidates:
@@ -280,13 +313,24 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
                 accepted_count += 1
             item.update(status=answer["result"], verified_at_myt=answer["verified_at_myt"],
                         reason=answer.get("reason"))
+            item["repair_attempts"] = repair_attempts(doc["items"][index]) + 1
+            item.pop("next_retry_at_myt", None)
+            item.pop("retry_exhausted", None)
+            if retryable(item):
+                item["retry_exhausted"] = item["repair_attempts"] >= MAX_REPAIR_ATTEMPTS
+                if not item["retry_exhausted"]:
+                    wait_hours = 6 if item["repair_attempts"] == 1 else 24
+                    item["next_retry_at_myt"] = (
+                        dt.datetime.now(TZ) + dt.timedelta(hours=wait_hours)
+                    ).isoformat(timespec="seconds")
             updates[index] = item
         if not updates:
             break
         for _ in range(12):
             latest = json.loads(raw)
             for index, item in updates.items():
-                if latest["items"][index].get("status", "OPEN") == "OPEN":
+                # Do not overwrite another writer's changed row on a CAS retry.
+                if latest["items"][index] == doc["items"][index]:
                     latest["items"][index] = item
             try:
                 drive.put_fast("REPAIR_QUEUE.json", compact(latest), expected_sha=digest(raw))
@@ -305,6 +349,13 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
         x.get("market") == market and x.get("status", "OPEN") == "OPEN"
         and (shard_count is None or shard_index is None or i % shard_count == shard_index)
         for i, x in enumerate(final_items))
+    scoped = [x for i, x in enumerate(final_items) if x.get("market") == market
+              and (shard_count is None or shard_index is None or i % shard_count == shard_index)]
+    due = sum(repair_due(x, dt.datetime.now(TZ)) for x in scoped)
+    retry_waiting = sum(retryable(x) and repair_attempts(x) < MAX_REPAIR_ATTEMPTS
+                        and not repair_due(x, dt.datetime.now(TZ)) for x in scoped)
+    exhausted = sum(retryable(x) and repair_attempts(x) >= MAX_REPAIR_ATTEMPTS for x in scoped)
     return {"market": market, "processed": processed, "accepted": accepted_count,
             "open": remaining, "shard_index": shard_index, "shard_count": shard_count,
-            "timed_out": remaining > 0 and time.monotonic() >= deadline - 300}
+            "due": due, "retry_waiting": retry_waiting, "retry_exhausted": exhausted,
+            "timed_out": due > 0 and time.monotonic() >= deadline - 300}

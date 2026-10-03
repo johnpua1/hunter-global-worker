@@ -40,7 +40,9 @@ class MonthlyDeployTests(unittest.TestCase):
                          "triggers": [{"triggerId": "us"}, {"triggerId": "hk"}]}}
         before = deploy.verify_launch_triggers(doc, "Asia/Singapore")
         expected = deploy.expected_myt_triggers(before)
-        self.assertEqual(before["daily"]["timeZone"], "Asia/Singapore")
+        self.assertEqual(before["daily"]["timeZone"], "Asia/Kuala_Lumpur")
+        self.assertEqual(deploy.verify_launch_triggers(doc, "Asia/Kuala_Lumpur"), expected)
+        doc["daily"]["timeZone"] = "America/New_York"
         with self.assertRaisesRegex(RuntimeError, "TIMEZONE_READBACK_FAILED"):
             deploy.verify_launch_triggers(doc, "Asia/Kuala_Lumpur")
         doc["daily"]["timeZone"] = "Asia/Kuala_Lumpur"
@@ -51,6 +53,24 @@ class MonthlyDeployTests(unittest.TestCase):
         doc["daily"]["counts"]["dailyUS"] = 2
         with self.assertRaisesRegex(RuntimeError, "TRIGGER_COUNT_READBACK_FAILED"):
             deploy.verify_launch_triggers(doc, "Asia/Kuala_Lumpur")
+
+    def test_source_readback_accepts_only_manifest_timezone_alias(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            manifest = root / "appsscript.json"
+            gateway = root / "Gateway.js"
+            gateway.write_text("function run() { return 1; }\n")
+            manifest.write_text('{"timeZone":"Asia/Kuala_Lumpur","oauthScopes":["one"]}')
+            expected = deploy.source_files(root)
+            manifest.write_text('{"timeZone":"Asia/Singapore","oauthScopes":["one"]}')
+            self.assertEqual(deploy.source_files(root), expected)
+            manifest.write_text('{"timeZone":"Asia/Hong_Kong","oauthScopes":["one"]}')
+            self.assertNotEqual(deploy.source_files(root), expected)
+            manifest.write_text('{"timeZone":"Asia/Singapore","oauthScopes":["two"]}')
+            self.assertNotEqual(deploy.source_files(root), expected)
+            manifest.write_text('{"timeZone":"Asia/Singapore","oauthScopes":["one"]}')
+            gateway.write_text("function run() { return 2; }\n")
+            self.assertNotEqual(deploy.source_files(root), expected)
 
     def test_launch_patch_preserves_monthly_manifest_and_other_functions(self):
         old_source = "\n".join("function " + name + "(job) {\n  return 'old';\n}\n"

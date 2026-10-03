@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
 PROJECT = "rgs-hunter-global"
@@ -82,6 +83,42 @@ def patch_monthly(directory, old, new):
     return True
 
 
+LAUNCH_BASE = "ff37f68afb1203a9fd9bcd7d80eec2e1fde5532a"
+LAUNCH_FUNCTIONS = ("hunterCloudRequest_", "status", "runHunterJob_")
+
+
+def launch_functions(source):
+    result = {}
+    for name in LAUNCH_FUNCTIONS:
+        matches = re.findall(r"^function " + re.escape(name) + r"\([^\n]*\) \{.*?^\}\n",
+                             source, re.M | re.S)
+        if len(matches) != 1:
+            raise RuntimeError("LAUNCH_FUNCTION_NOT_UNIQUE:" + name)
+        result[name] = matches[0]
+    return result
+
+
+def patch_launch(directory, old, new):
+    candidates = []
+    for path in directory.rglob("*"):
+        if path.is_file() and path.suffix in (".js", ".gs"):
+            content = path.read_text()
+            if re.search(r"function\s+runHunterJob_\s*\(", content):
+                candidates.append((path, content))
+    if len(candidates) != 1:
+        raise RuntimeError("LAUNCH_HANDLER_NOT_UNIQUE")
+    path, content = candidates[0]
+    actual = launch_functions(content)
+    if actual == new:
+        return False
+    if actual != old:
+        raise RuntimeError("LIVE_LAUNCH_DIFFERS_FROM_REVIEWED_BASE")
+    for name in LAUNCH_FUNCTIONS:
+        content = content.replace(old[name], new[name], 1)
+    path.write_text(content)
+    return True
+
+
 def ensure_idle():
     for job in JOBS:
         rows = json.loads(command([
@@ -111,9 +148,10 @@ def clone(script_id, directory, version=None):
     clasp(*args, cwd=directory)
 
 
-def main():
+def main(launch_guard=False):
     os.umask(0o077)
-    work = Path(tempfile.mkdtemp(prefix="hunter-monthly-retry-"))
+    label = "LAUNCH_GUARD" if launch_guard else "MONTHLY_RETRY"
+    work = Path(tempfile.mkdtemp(prefix="hunter-" + label.lower() + "-"))
     print("BACKUP=" + str(work), flush=True)
     command(CLASP + ["show-authorized-user", "--json"], work)
     ensure_idle()
@@ -135,29 +173,38 @@ def main():
     baseline = source_files(head)
     if baseline != source_files(active):
         raise RuntimeError("UNDEPLOYED_SCRIPT_CHANGES_PRESENT")
-    old = monthly_function(command(["git", "show", BASE + ":bridge/Gateway.gs"], ROOT))
-    new = monthly_function((ROOT / "bridge/Gateway.gs").read_text())
+    extractor = launch_functions if launch_guard else monthly_function
+    base = LAUNCH_BASE if launch_guard else BASE
+    old = extractor(command(["git", "show", base + ":bridge/Gateway.gs"], ROOT))
+    new = extractor((ROOT / "bridge/Gateway.gs").read_text())
     staged = work / "staged"
     shutil.copytree(head, staged)
     settings_path = staged / ".clasp.json"
     settings = json.loads(settings_path.read_text())
     settings["rootDir"] = "."
     settings_path.write_text(json.dumps(settings))
-    changed = patch_monthly(staged, old, new)
+    changed = (patch_launch if launch_guard else patch_monthly)(staged, old, new)
     spec = importlib.util.spec_from_file_location("bridge_post", ROOT / "cloudrun/apps-script-post.py")
     bridge = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(bridge)
     key = secret("APPS_SCRIPT_SHARED_KEY").strip()
 
     def verify_bridge():
-        doc = bridge.post_json(url, {"op": "month_status", "key": key}, attempts=3)
-        if not doc.get("ok") or doc.get("trigger", {}).get("count") != 1:
+        op = "topology_status" if launch_guard else "month_status"
+        doc = bridge.post_json(url, {"op": op, "key": key}, attempts=3)
+        trigger = doc.get("monthly" if launch_guard else "trigger", {})
+        if not doc.get("ok") or trigger.get("count") != 1:
             raise RuntimeError("MONTHLY_TRIGGER_READBACK_FAILED")
-        return doc["trigger"]
+        if launch_guard:
+            daily = doc.get("daily", {})
+            if daily.get("timeZone") != "Asia/Kuala_Lumpur" or daily.get("counts") != {"dailyUS": 1, "dailyHK": 1}:
+                raise RuntimeError("DAILY_TRIGGER_READBACK_FAILED")
+            return {"monthly": trigger, "daily": daily}
+        return trigger
 
     before = verify_bridge()
     if not changed:
-        print("MONTHLY_RETRY_ALREADY_DEPLOYED", flush=True)
+        print(label + "_ALREADY_DEPLOYED", flush=True)
         return
     # Recheck before push so unrelated edits made during preparation are not overwritten.
     latest = work / "latest"
@@ -165,11 +212,11 @@ def main():
     if source_files(latest) != baseline or deployment_version(script_id, deployment_id, work) != old_version:
         raise RuntimeError("SCRIPT_CHANGED_DURING_PREPARATION")
     ensure_idle()
-    print("DEPLOY_MONTHLY_RETRY_ONLY", flush=True)
+    print("DEPLOY_" + label + "_ONLY", flush=True)
     try:
         clasp("push", "--force", cwd=staged)
         deployed = clasp("update-deployment", deployment_id,
-                         "--description", "Hunter monthly retry until dual-market commit", cwd=staged)
+                         "--description", "Hunter " + label.lower() + " scoped patch", cwd=staged)
         new_version = deployed.get("versionNumber")
         if not isinstance(new_version, int) or new_version == old_version:
             raise RuntimeError("NEW_VERSION_NOT_CONFIRMED")
@@ -180,19 +227,23 @@ def main():
         if deployment_version(script_id, deployment_id, work) != new_version:
             raise RuntimeError("DEPLOYMENT_VERSION_READBACK_MISMATCH")
         after = verify_bridge()
-        if after.get("expectedMonth") != before.get("expectedMonth"):
+        if launch_guard and after != before:
+            raise RuntimeError("TRIGGERS_CHANGED_DURING_DEPLOY")
+        if not launch_guard and after.get("expectedMonth") != before.get("expectedMonth"):
             raise RuntimeError("MONTHLY_EXPECTED_MONTH_CHANGED")
     except Exception:
-        print("ROLLBACK_MONTHLY_DEPLOYMENT", flush=True)
+        print("ROLLBACK_" + label + "_DEPLOYMENT", flush=True)
         clasp("update-deployment", deployment_id, "--versionNumber", str(old_version), cwd=head)
         clasp("push", "--force", cwd=head)
         raise
-    print("MONTHLY_RETRY_DEPLOYED_AND_VERIFIED version=" + str(new_version), flush=True)
+    print(label + "_DEPLOYED_AND_VERIFIED version=" + str(new_version), flush=True)
     print("MONTH_TRIGGER=" + json.dumps(after, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":
     try:
-        main()
+        if sys.argv[1:] not in ([], ["--launch-guard"]):
+            raise RuntimeError("USAGE: deploy-monthly-retry.py [--launch-guard]")
+        main(launch_guard=sys.argv[1:] == ["--launch-guard"])
     except Exception as exc:
         raise SystemExit(str(exc))

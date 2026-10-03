@@ -91,39 +91,47 @@ class ProductionGuardTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "HUNTER_CONFIG_BLOCKED"):
                     check_at_start()
 
-    def test_resource_limits_observed_cloud_run_v1_and_v2_are_equivalent(self):
-        # Values and combined controller mount from the 2026-10-03 MYT probe.
-        layouts = [
-            {"cpu,cpuacct/cpu.cfs_quota_us": "98600",
-             "cpu,cpuacct/cpu.cfs_period_us": "100000",
-             "memory/memory.limit_in_bytes": "536870912"},
-            {"cpu/cpu.cfs_quota_us": "98600",
-             "cpu/cpu.cfs_period_us": "100000",
-             "memory/memory.limit_in_bytes": "536870912"},
-            {"cpuacct,cpu/cpu.cfs_quota_us": "98600",
-             "cpuacct,cpu/cpu.cfs_period_us": "100000",
-             "memory/memory.limit_in_bytes": "536870912"},
-            {"cpu.max": "98600 100000", "memory.max": "536870912"},
-            {"unified/cpu.max": "98600 100000", "unified/memory.max": "536870912"},
-        ]
-        for layout in layouts:
-            files = {"/sys/fs/cgroup/" + k: v for k, v in layout.items()}
-            with self.subTest(layout=layout), patch("production_guard._read_limit",
-                    side_effect=lambda path: files.get(path, "UNAVAILABLE")):
-                self.assertEqual(resource_limits(), ("98600 100000", "536870912"))
+    def execution_doc(self, cpu="1", memory="512Mi"):
+        return {"name": "projects/rgs-hunter-global/locations/us-central1/jobs/hunter-us-daily/executions/hunter-us-daily-test",
+                "taskCount": 1, "parallelism": 1,
+                "template": {"containers": [{"resources": {"limits": {"cpu": cpu, "memory": memory}}}]}}
 
-    def test_missing_or_invalid_resource_limits_block(self):
-        for files in ({}, {"cpu.max": "max 100000", "memory.max": "536870912"},
-                      {"cpu.max": "98600 0", "memory.max": "536870912"},
-                      {"cpu.max": "garbage", "memory.max": "536870912"},
-                      {"cpu.max": "98600 100000", "memory.max": "max"},
-                      {"cpu/cpu.cfs_quota_us": "98600",
-                       "cpu/cpu.cfs_period_us": "100000"}):
-            paths = {"/sys/fs/cgroup/" + k: v for k, v in files.items()}
-            with self.subTest(files=files), patch("production_guard._read_limit",
-                    side_effect=lambda path: paths.get(path, "UNAVAILABLE")):
-                with self.assertRaisesRegex(ValueError, "RESOURCE_LIMIT_"):
+    def test_declared_limits_ignore_cgroup_and_equivalent_units_match(self):
+        for cpu, memory in [("1", "512Mi"), ("1000m", "536870912"), ("1.0", "0.5Gi")]:
+            with patch.dict(os.environ, {"CLOUD_RUN_JOB": "hunter-us-daily",
+                    "CLOUD_RUN_EXECUTION": "hunter-us-daily-test"}, clear=True), \
+                 patch("production_guard._get_json", side_effect=[
+                     {"access_token": "private-token"}, self.execution_doc(cpu, memory)]) as get, \
+                 patch("pathlib.Path.read_text", side_effect=AssertionError("CGROUP_MUST_NOT_BE_READ")):
+                self.assertEqual(resource_limits(), ("1", "536870912"))
+                self.assertIn("/jobs/hunter-us-daily/executions/hunter-us-daily-test", get.call_args.args[0])
+
+    def test_invalid_execution_and_limits_fail_closed(self):
+        docs = [self.execution_doc("max"), self.execution_doc(memory="max"),
+                {**self.execution_doc(), "name": "wrong"},
+                {**self.execution_doc(), "taskCount": 2},
+                {**self.execution_doc(), "template": {"containers": []}}]
+        for doc in docs:
+            with patch.dict(os.environ, {"CLOUD_RUN_JOB": "hunter-us-daily",
+                    "CLOUD_RUN_EXECUTION": "hunter-us-daily-test"}, clear=True), \
+                 patch("production_guard._get_json", side_effect=[{"access_token": "private-token"}, doc]):
+                with self.assertRaises(ValueError):
                     resource_limits()
+
+    def test_cpu_and_memory_drift_still_change_fingerprint(self):
+        env, argv, account = self.config()
+        data = dict(job="hunter-us-daily", environ=env, argv=argv,
+                    service_account=account, cpu_limit="1", memory_limit="536870912")
+        self.assertNotEqual(fingerprint(**data), fingerprint(**{**data, "cpu_limit": "2"}))
+        self.assertNotEqual(fingerprint(**data), fingerprint(**{**data, "memory_limit": "1073741824"}))
+
+    def test_api_permission_failure_blocks_without_printing_token(self):
+        from production_guard import _get_json
+        from unittest.mock import Mock
+        with patch("production_guard.requests.get", return_value=Mock(status_code=403)):
+            with self.assertRaisesRegex(ValueError, "^EXECUTION_CONFIG_HTTP_403$"):
+                _get_json("https://run.googleapis.com/v2/test",
+                          {"Authorization": "Bearer private-token"}, "EXECUTION_CONFIG")
 
     def test_failure_summary_never_logs_arbitrary_exception_text(self):
         self.assertEqual(safe_error_summary(RuntimeError("BRIDGE_AUTH_MISSING:detail")),

@@ -15,6 +15,7 @@ from urllib.parse import quote
 
 import requests
 
+from time_budget import BudgetExceeded, budget
 from runner import Drive, compact, digest, fetch_security, load_market, now_myt, retry_http, parse_lines_gz, TZ
 from foundation import current_universe
 
@@ -226,14 +227,25 @@ def repair_due(item: dict, now: dt.datetime) -> bool:
         return False
 
 
-def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
-               chunk_size: int = 25, shard_index: int | None = None,
+
+
+def run_repair(drive, market, *, deadline=None, chunk_size=5, shard_index=None, shard_count=None):
+    if deadline is None:
+        deadline = time.monotonic() + int(os.getenv("REPAIR_TIME_BUDGET_SECONDS", "3120"))
+    with budget(deadline):
+        return _run_repair(drive, market, deadline=deadline, chunk_size=chunk_size,
+                           shard_index=shard_index, shard_count=shard_count)
+
+
+def _run_repair(drive: Drive, market: str, *, deadline: float | None = None,
+               chunk_size: int = 5, shard_index: int | None = None,
                shard_count: int | None = None) -> dict:
     """Persist chunks and retry transient failures at most three times with backoff."""
     if deadline is None:
         deadline = time.monotonic() + int(os.getenv("REPAIR_TIME_BUDGET_SECONDS", "3300"))
     securities = {s["security_id"]: s for s in current_universe(drive, market)}
     processed = accepted_count = 0
+    budget_stopped = False
     state = None
     base_cache = {}
     base_cache_lock = threading.Lock()
@@ -280,54 +292,72 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
                            if not (x[0] in seen_missing or seen_missing.add(x[0]))]
 
         def read_base(entry):
-            key, path = entry
-            reader = Drive()
-            by_id = defaultdict(list)
-            for row in parse_lines_gz(reader.read(path)):
-                by_id[row["security_id"]].append(row)
-            return key, by_id
+            with budget(deadline - 300):
+                key, path = entry
+                reader = Drive()
+                by_id = defaultdict(list)
+                for row in parse_lines_gz(reader.read(path)):
+                    by_id[row["security_id"]].append(row)
+                return key, by_id
 
-        if missing_batches:
-            base_read_workers = max(1, min(4, int(os.getenv("BASE_READ_WORKERS", "4"))))
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=min(base_read_workers, len(missing_batches))) as pool:
-                for key, by_id in pool.map(read_base, missing_batches):
-                    base_cache[key] = by_id
+        try:
+            if missing_batches:
+                base_read_workers = max(1, min(4, int(os.getenv("BASE_READ_WORKERS", "4"))))
+                with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=min(base_read_workers, len(missing_batches))) as pool:
+                    for key, by_id in pool.map(read_base, missing_batches):
+                        base_cache[key] = by_id
+        except BudgetExceeded:
+            budget_stopped = True
+            break
 
         def evaluate(pair):
-            index, original = pair
-            item = dict(original)
-            sid = item.get("security_id")
-            if sid not in securities:
-                answer = {"result": "UNRESOLVED",
-                          "reason": "SECURITY_ID_MISSING_OR_EXECUTION_EVENT",
-                          "verified_at_myt": now_myt(), "accepted": False}
-            else:
-                answer = decide(drive, item, securities[sid], state, base_cache=base_cache, base_cache_lock=base_cache_lock)
-            return index, item, sid, answer
+            try:
+                with budget(deadline - 300):
+                    index, original = pair
+                    item = dict(original)
+                    sid = item.get("security_id")
+                    if sid not in securities:
+                        answer = {"result": "UNRESOLVED",
+                                  "reason": "SECURITY_ID_MISSING_OR_EXECUTION_EVENT",
+                                  "verified_at_myt": now_myt(), "accepted": False}
+                    else:
+                        answer = decide(drive, item, securities[sid], state, base_cache=base_cache, base_cache_lock=base_cache_lock)
+                    return index, item, sid, answer
+            except BudgetExceeded:
+                return None
 
         workers = max(1, int(os.getenv("REPAIR_WORKERS", os.getenv("FETCH_WORKERS", "6"))))
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             evaluated = list(pool.map(evaluate, batch_candidates))
 
         updates = {}
-        for index, item, sid, answer in evaluated:
-            if answer["accepted"]:
-                identity = digest(compact({"market": market, "security_id": sid,
-                                           "category": item["category"], "batch": item.get("batch"),
-                                           "trade_date": item.get("trade_date")}))[:24]
-                # Shard repair sidecars so the Bridge's 1,000-entry folder
-                # listing ceiling can never block DERIVED once the historical
-                # backlog is drained. Existing flat/bulk sidecars remain readable.
-                path = f"{market}/REPAIR_PATCH/{identity[:2]}/{identity}.json"
-                if drive.file(path):
-                    previous = drive.json(path)
-                    if not previous.get("accepted") or previous.get("result") != answer["result"]:
-                        raise RuntimeError("PATCH_IDENTITY_CONFLICT:" + path)
-                else:
-                    append_repair_patch(drive, path, compact(answer))
-                item["patch_path"] = path
-                accepted_count += 1
+        for evaluated_item in evaluated:
+            if evaluated_item is None:
+                budget_stopped = True
+                continue
+            index, item, sid, answer = evaluated_item
+            try:
+                with budget(deadline - 300):
+                    if answer["accepted"]:
+                        identity = digest(compact({"market": market, "security_id": sid,
+                                                   "category": item["category"], "batch": item.get("batch"),
+                                                   "trade_date": item.get("trade_date")}))[:24]
+                        # Shard repair sidecars so the Bridge's 1,000-entry folder
+                        # listing ceiling can never block DERIVED once the historical
+                        # backlog is drained. Existing flat/bulk sidecars remain readable.
+                        path = f"{market}/REPAIR_PATCH/{identity[:2]}/{identity}.json"
+                        if drive.file(path):
+                            previous = drive.json(path)
+                            if not previous.get("accepted") or previous.get("result") != answer["result"]:
+                                raise RuntimeError("PATCH_IDENTITY_CONFLICT:" + path)
+                        else:
+                            append_repair_patch(drive, path, compact(answer))
+                        item["patch_path"] = path
+                        accepted_count += 1
+            except BudgetExceeded:
+                budget_stopped = True
+                break  # Persist preceding rows using the reserved CAS budget.
             item.update(status=answer["result"], verified_at_myt=answer["verified_at_myt"],
                         reason=answer.get("reason"))
             item["repair_attempts"] = repair_attempts(doc["items"][index]) + 1
@@ -361,6 +391,8 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
         else:
             raise RuntimeError("REPAIR_QUEUE_CAS_EXHAUSTED")
         processed += len(updates)
+        if budget_stopped:
+            break
     final_items = drive.json("REPAIR_QUEUE.json")["items"]
     remaining = sum(
         x.get("market") == market and x.get("status", "OPEN") == "OPEN"
@@ -375,4 +407,4 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
     return {"market": market, "processed": processed, "accepted": accepted_count,
             "open": remaining, "shard_index": shard_index, "shard_count": shard_count,
             "due": due, "retry_waiting": retry_waiting, "retry_exhausted": exhausted,
-            "timed_out": due > 0 and time.monotonic() >= deadline - 300}
+            "timed_out": due > 0 and (budget_stopped or time.monotonic() >= deadline - 300)}

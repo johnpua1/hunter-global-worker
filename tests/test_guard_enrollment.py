@@ -29,6 +29,22 @@ def document(job):
 
 
 class GuardEnrollmentTests(unittest.TestCase):
+    def test_config_reader_grants_only_execution_get_on_each_own_job(self):
+        calls = []
+        def gc(*args, **kwargs):
+            calls.append(args)
+            if args[:3] == ("iam", "roles", "list"):
+                return []
+            if args[:3] == ("iam", "roles", "create"):
+                return {"includedPermissions": ["run.executions.get"]}
+            return {}
+        with patch.object(enrollment, "gc", side_effect=gc):
+            enrollment.prepare_config_reader(["hunter-us-daily", "hunter-monthly-v2"])
+        self.assertIn("--permissions=run.executions.get", calls[1])
+        self.assertEqual(calls[2][3], "hunter-us-daily")
+        self.assertIn("--member=serviceAccount:hunter-us-daily@rgs-hunter-global.iam.gserviceaccount.com", calls[2])
+        self.assertIn("--member=serviceAccount:hunter-monthly@rgs-hunter-global.iam.gserviceaccount.com", calls[3])
+
     def test_probe_rejects_success_that_hides_a_config_block_on_retry(self):
         job = "hunter-us-daily"
         replies = [

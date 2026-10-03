@@ -6,6 +6,7 @@ Only the failing job is rolled back; already verified jobs remain protected.
 """
 import json
 import argparse
+import datetime as dt
 import os
 from pathlib import Path
 import re
@@ -16,7 +17,7 @@ import time
 PROJECT = "rgs-hunter-global"
 REGION = "us-central1"
 PREVIOUS = {
-    "hunter-us-daily": ("79517d4e89dd6f9cc1680cef4868efe5d5a7537d", "US", "2"),
+    "hunter-us-daily": ("4a6dc044574ec3a9097f1e5ae22cf53f197a886f", "US", "2"),
     "hunter-hk-daily": ("79517d4e89dd6f9cc1680cef4868efe5d5a7537d", "HK", "2"),
     "hunter-maintenance": ("78001fc48c579688261b1042b675465a480c4b8f", "MAINT", "2"),
     "hunter-monthly-v2": ("19979eeb812e86c042d0f1d3b71fe8280aeabc9f", "MONTH", "1"),
@@ -67,11 +68,50 @@ def validate_previous(job, doc, release):
         raise RuntimeError("PERSISTENT_PROBE_FORBIDDEN:" + job)
 
 
+def show_probe_diagnostics(job, since):
+    query = ('resource.type="cloud_run_job" AND resource.labels.job_name="' + job +
+             '" AND timestamp>="' + since +
+             '" AND textPayload=~"HUNTER_CONFIG_(DETAIL|BLOCKED) worker="')
+    try:
+        rows = gc("logging", "read", query, "--limit=20", "--order=asc", region=False)
+        for row in rows:
+            print("PROBE_DIAGNOSTIC", row.get("textPayload", ""), flush=True)
+    except Exception:
+        print("PROBE_DIAGNOSTIC_READ_FAILED", job, flush=True)
+
+
+def prepare_config_reader(jobs):
+    role_id = "hunterExecutionConfigReader"
+    role_name = "projects/" + PROJECT + "/roles/" + role_id
+    roles = gc("iam", "roles", "list", "--filter=name=" + role_name, region=False)
+    if not roles:
+        role = gc("iam", "roles", "create", role_id,
+                  "--title=Hunter execution config reader", "--stage=GA",
+                  "--permissions=run.executions.get", region=False)
+    elif len(roles) == 1:
+        role = gc("iam", "roles", "describe", role_id, region=False)
+    else:
+        raise RuntimeError("CONFIG_READER_ROLE_AMBIGUOUS")
+    if role.get("deleted") or set(role.get("includedPermissions", [])) != {"run.executions.get"}:
+        raise RuntimeError("CONFIG_READER_ROLE_PERMISSION_MISMATCH")
+    for job in jobs:
+        account = "hunter-monthly" if job == "hunter-monthly-v2" else job
+        gc("run", "jobs", "add-iam-policy-binding", job,
+           "--member=serviceAccount:" + account + "@" + PROJECT + ".iam.gserviceaccount.com",
+           "--role=" + role_name, "--condition=None")
+    print("OWN_JOB_CONFIG_READ_GRANTED", flush=True)
+
+
 def probe(job, mode):
     print("READ_ONLY_PROBE", job, mode, flush=True)
-    execution = gc("run", "jobs", "execute", job,
-                   "--update-env-vars=HUNTER_CONFIG_PROBE=" + mode,
-                   "--task-timeout=120s", "--wait")
+    since = dt.datetime.now(dt.timezone.utc).isoformat()
+    try:
+        execution = gc("run", "jobs", "execute", job,
+                       "--update-env-vars=HUNTER_CONFIG_PROBE=" + mode,
+                       "--task-timeout=120s", "--wait")
+    except Exception:
+        show_probe_diagnostics(job, since)
+        raise
     name = execution.get("metadata", {}).get("name") or execution.get("name", "").rsplit("/", 1)[-1]
     if not name.startswith(job + "-"):
         raise RuntimeError("EXECUTION_ID_MISSING:" + job)
@@ -94,6 +134,7 @@ def probe(job, mode):
             blocked_query = query.replace(marker, "HUNTER_CONFIG_BLOCKED")
             blocked = gc("logging", "read", blocked_query, "--freshness=30m", "--limit=20", region=False)
             if blocked:
+                show_probe_diagnostics(job, since)
                 raise RuntimeError("PROBE_RETRIED_AFTER_CONFIG_BLOCK:" + job)
             return hashes.pop()
         if hashes:
@@ -103,7 +144,7 @@ def probe(job, mode):
     raise RuntimeError("PROBE_LOG_NOT_VISIBLE:" + job)
 
 
-def main(release=None, jobs=None):
+def main(release=None, jobs=None, prepare_iam=False):
     os.umask(0o077)
     release = release or subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     if not re.fullmatch(r"[0-9a-f]{40}", release):
@@ -119,6 +160,9 @@ def main(release=None, jobs=None):
         (backup / (job + ".json")).write_text(json.dumps(doc))
         validate_previous(job, doc, release)
         docs[job] = doc
+    if prepare_iam:
+        prepare_config_reader(selected)
+        return
     image = REGION + "-docker.pkg.dev/" + PROJECT + "/hunter-worker/runner:" + release
     for job, before in docs.items():
         _, _, old_container, old_env = parts(before)
@@ -160,5 +204,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release", help="SHA of an already-built image; defaults to this checkout")
     parser.add_argument("--jobs", nargs="+", choices=list(PREVIOUS))
+    parser.add_argument("--prepare-iam", action="store_true", help="Grant own-job execution config read only; do not deploy")
     options = parser.parse_args()
-    main(release=options.release, jobs=options.jobs)
+    main(release=options.release, jobs=options.jobs, prepare_iam=options.prepare_iam)

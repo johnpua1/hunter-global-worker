@@ -409,19 +409,22 @@ function hunterCloudRequest_(method, resource, payload) {
     options.payload = JSON.stringify(payload);
   }
   var last;
-  for (var attempt = 0; attempt < 3; attempt++) {
+  // A lost :run response does not mean the execution was not created.
+  var attempts = options.method === 'get' ? 3 : 1;
+  for (var attempt = 0; attempt < attempts; attempt++) {
     try {
       var response = UrlFetchApp.fetch(url, options);
       var code = response.getResponseCode();
       var text = response.getContentText();
       var body = text ? JSON.parse(text) : {};
       if (code >= 200 && code < 300) return body;
-      last = new Error('CLOUD_RUN_HTTP_' + code + ':' + text.slice(0, 500));
+      last = new Error('CLOUD_RUN_HTTP_' + code);
+      last.httpStatus = code;
       if ([408, 429, 500, 502, 503, 504].indexOf(code) < 0) break;
     } catch (err) {
       last = err;
     }
-    Utilities.sleep(Math.pow(2, attempt) * 1000);
+    if (attempt + 1 < attempts) Utilities.sleep(Math.pow(2, attempt) * 1000);
   }
   throw last || new Error('CLOUD_RUN_REQUEST_FAILED');
 }
@@ -461,8 +464,15 @@ function hunterExecutionState_(execution) {
 function status(job) {
   var name = hunterJobName_(job);
   var resource = hunterJobResource_(name);
-  var response = hunterCloudRequest_('get', resource + '/executions?pageSize=3', null);
-  var executions = (response.executions || []).slice(0, 3).map(function (x) {
+  var rows = [], token = '', pages = 0;
+  do {
+    if (++pages > 25) throw new Error('EXECUTION_SCAN_LIMIT');
+    var response = hunterCloudRequest_('get', resource + '/executions?pageSize=100' +
+        (token ? '&pageToken=' + encodeURIComponent(token) : ''), null);
+    rows = rows.concat(response.executions || []);
+    token = response.nextPageToken || '';
+  } while (token);
+  var executions = rows.slice(0, 3).map(function (x) {
     return {
       name: x.name || null,
       status: hunterExecutionState_(x),
@@ -476,7 +486,7 @@ function status(job) {
   });
   return {
     job: name,
-    running: executions.some(function (x) { return x.status === 'RUNNING'; }),
+    running: rows.some(function (x) { return hunterExecutionState_(x) === 'RUNNING'; }),
     executions: executions
   };
 }
@@ -506,14 +516,89 @@ function inspectHunterJobs() {
 
 function runHunterJob_(job) {
   var name = hunterJobName_(job);
-  var before = status(name);
-  if (before.running) {
-    console.log('SKIP_ALREADY_RUNNING job=' + name);
-    return {ok: true, job: name, skipped: true, reason: 'ALREADY_RUNNING', status: before};
+  var lock = LockService.getScriptLock();
+  var held = false;
+  try {
+    held = lock.tryLock(5000);
+    if (!held) throw new Error('LAUNCH_LOCK_BUSY');
+    var before = status(name);
+    if (before.running) {
+      return {ok: true, job: name, skipped: true, reason: 'ALREADY_RUNNING', status: before};
+    }
+    var props = PropertiesService.getScriptProperties();
+    var key = 'HUNTER_LAUNCH_' + name;
+    var saved = props.getProperty(key);
+    var today = Utilities.formatDate(new Date(), 'Asia/Kuala_Lumpur', 'yyyy-MM-dd');
+    if (saved) {
+      var pending = JSON.parse(saved);
+      // Never expire an ambiguous launch and blindly submit another :run.
+      if (!pending.operation && !pending.execution) throw new Error('LAUNCH_OUTCOME_UNKNOWN');
+      var previous = {};
+      if (!pending.execution) {
+        previous = hunterCloudRequest_('get', pending.operation, null);
+        pending.execution = (previous.response || previous.metadata || {}).name || null;
+        if (!pending.execution && !previous.done) {
+          return {ok: true, job: name, skipped: true, reason: 'LAUNCH_PENDING', operation: pending.operation};
+        }
+      }
+      if (!previous.error) {
+        var executionName = pending.execution;
+        if (!executionName || executionName.indexOf('/jobs/' + name + '/executions/') < 0)
+          throw new Error('LAUNCH_EXECUTION_UNCONFIRMED');
+        var execution = hunterCloudRequest_('get', executionName, null);
+        var state = hunterExecutionState_(execution);
+        if (state === 'RUNNING') {
+          return {ok: true, job: name, skipped: true, reason: 'ALREADY_RUNNING', execution: executionName};
+        }
+        props.setProperty(key, JSON.stringify(pending));
+        if (state === 'SUCCEEDED' && pending.mytDate === today) {
+          return {ok: true, job: name, skipped: true, reason: 'ALREADY_SUCCEEDED_TODAY', execution: executionName};
+        }
+        if (['SUCCEEDED', 'FAILED', 'CANCELLED'].indexOf(state) < 0)
+          throw new Error('LAUNCH_EXECUTION_UNCONFIRMED');
+      }
+    }
+    // Persist BEFORE the non-idempotent request, while holding the same lock.
+    var receipt = {mytDate: today, requestedAt: new Date().toISOString(), operation: null};
+    props.setProperty(key, JSON.stringify(receipt));
+    var op;
+    try {
+      op = hunterCloudRequest_('post', hunterJobResource_(name) + ':run', {});
+    } catch (err) {
+      // A definitive rejected request can be retried on the next trigger.
+      if ([400, 401, 403, 404, 409, 429].indexOf(err.httpStatus) >= 0)
+        props.deleteProperty(key);
+      throw err;
+    }
+    if (!op.name) throw new Error('LAUNCH_OUTCOME_UNKNOWN');
+    receipt.operation = op.name;
+    // RunJob operation metadata is an Execution; keep its durable identity.
+    receipt.execution = (op.response || op.metadata || {}).name || null;
+    props.setProperty(key, JSON.stringify(receipt));
+    console.log('STARTED job=' + name + ' operation=' + op.name);
+    return {ok: true, job: name, skipped: false, operation: op.name};
+  } catch (err) {
+    // Do not include response bodies, keys, or URLs in the alert log.
+    var event = {event: 'HUNTER_LAUNCH_FAILED', job: name,
+      reason: String(err.message || '').split(':')[0].replace(/[^A-Z0-9_]/g, '').slice(0, 80),
+      at_myt: Utilities.formatDate(new Date(), 'Asia/Kuala_Lumpur', 'yyyy-MM-dd HH:mm:ss')};
+    console.error(JSON.stringify(event));
+    try {
+      var project = hunterCloudConfig_().project;
+      var logged = UrlFetchApp.fetch('https://logging.googleapis.com/v2/entries:write', {
+        method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+        headers: {Authorization: 'Bearer ' + ScriptApp.getOAuthToken()},
+        payload: JSON.stringify({entries: [{
+          logName: 'projects/' + project + '/logs/hunter-control', severity: 'ERROR',
+          resource: {type: 'global', labels: {project_id: project}}, jsonPayload: event
+        }]})
+      });
+      if (logged.getResponseCode() >= 300) console.error('HUNTER_ALERT_LOG_WRITE_FAILED');
+    } catch (ignored) { console.error('HUNTER_ALERT_LOG_WRITE_FAILED'); }
+    throw err;
+  } finally {
+    if (held) lock.releaseLock();
   }
-  var op = hunterCloudRequest_('post', hunterJobResource_(name) + ':run', {});
-  console.log('STARTED job=' + name + ' operation=' + String(op.name || 'UNKNOWN'));
-  return {ok: true, job: name, skipped: false, operation: op.name || null};
 }
 
 function runUS() { return runHunterJob_('US'); }

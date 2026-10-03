@@ -11,6 +11,18 @@ spec.loader.exec_module(deploy)
 
 
 class MaintenanceRepairDeployTests(unittest.TestCase):
+    def test_built_image_reuse_requires_identical_runtime_and_clean_checkout(self):
+        check = SimpleNamespace(command=Mock(side_effect=["a" * 40, "", "hunter-global/repair.py\n", ""]))
+        self.assertEqual(deploy.reviewed_release(check), deploy.RUNTIME_RELEASE)
+        self.assertIn(deploy.RUNTIME_RELEASE, check.command.call_args_list[1].args[0])
+        for delta in ("hunter-global/repair.py\n", "Dockerfile\n"):
+            check.command = Mock(side_effect=["a" * 40, delta])
+            with self.assertRaisesRegex(RuntimeError, "RUNTIME_DIFFERS"):
+                deploy.reviewed_release(check)
+        check.command = Mock(side_effect=["a" * 40, "", "hunter-global/repair.py\n", " M file"])
+        with self.assertRaisesRegex(RuntimeError, "DIRTY_RELEASE_CHECKOUT"):
+            deploy.reviewed_release(check)
+
     def test_running_job_waits_then_proceeds_only_after_idle(self):
         check = SimpleNamespace(ensure_idle=Mock(side_effect=[RuntimeError("JOB_STILL_RUNNING:maint"), None]),
                                 command=Mock(return_value=json.dumps([])))

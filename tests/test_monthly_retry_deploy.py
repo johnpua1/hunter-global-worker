@@ -15,6 +15,25 @@ TAIL = "\nfunction listMonthlyTrigger() {}\n"
 
 
 class MonthlyDeployTests(unittest.TestCase):
+    def test_launch_patch_preserves_monthly_manifest_and_other_functions(self):
+        old_source = "\n".join("function " + name + "(job) {\n  return 'old';\n}\n"
+                               for name in deploy.LAUNCH_FUNCTIONS)
+        new_source = old_source.replace("'old'", "'new'")
+        old, new = deploy.launch_functions(old_source), deploy.launch_functions(new_source)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            gateway = root / "Gateway.js"
+            gateway.write_text(old_source + OLD + TAIL)
+            (root / "appsscript.json").write_text('{"timeZone":"Asia/Kuala_Lumpur"}')
+            before = deploy.source_files(root)
+            self.assertTrue(deploy.patch_launch(root, old, new))
+            self.assertFalse(deploy.patch_launch(root, old, new))
+            self.assertEqual(gateway.read_text(), new_source + OLD + TAIL)
+            self.assertEqual(deploy.source_files(root)["appsscript.json"], before["appsscript.json"])
+            gateway.write_text(old_source.replace("'old'", "'different'", 1))
+            with self.assertRaisesRegex(RuntimeError, "LIVE_LAUNCH_DIFFERS"):
+                deploy.patch_launch(root, old, new)
+
     def test_only_monthly_function_changes_and_rerun_is_noop(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

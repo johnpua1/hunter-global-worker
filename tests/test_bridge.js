@@ -37,6 +37,8 @@ assert.equal(watchdogBody.includes("hunterRecoverStaleExecutions_(market, cloud)
 assert.equal(watchdogBody.includes("if (cloud.running)"), false);
 assert.equal(source.includes("op === 'enforce_daily_triggers'"), true);
 assert.equal(source.includes("op === 'daily_trigger_status'"), true);
+assert.equal(source.includes("op === 'daily_watchdog_once'"), true);
+assert.equal(source.includes("DAILY_WATCHDOG_LEGACY_ONLY"), true);
 const context = vm.createContext({});
 vm.runInContext(source, context);
 const scopedProps = {getProperty(name) {

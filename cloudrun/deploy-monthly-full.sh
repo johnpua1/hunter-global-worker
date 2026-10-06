@@ -68,6 +68,7 @@ cp "$ROOT/bridge/appsscript.json" "$SCRIPT_DIR/appsscript.json"
 # but fail closed if any basename still exists with more than one script
 # extension before push.
 python "$ROOT/cloudrun/normalize-clasp-dir.py" "$SCRIPT_DIR"
+python "$ROOT/cloudrun/guard-apps-script-governed.py" "$SCRIPT_DIR"
 python - "$ROOT/bridge/Gateway.gs" <<'PY'
 from pathlib import Path
 import sys

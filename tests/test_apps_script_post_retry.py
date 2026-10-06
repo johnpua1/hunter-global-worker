@@ -55,6 +55,27 @@ def http_error(code, location=None):
 
 
 class AppsScriptPostRetryTests(unittest.TestCase):
+    def test_health_response_retries_original_post(self):
+        opener = FakeOpener([
+            FakeResponse({"ok": True, "service": "HUNTER_GLOBAL_BRIDGE"}),
+            FakeResponse({"ok": True, "daily": {"counts": {}}}),
+        ])
+        with mock.patch.object(mod.urllib.request, "build_opener", return_value=opener), \
+                mock.patch.object(mod.time, "sleep"):
+            result = mod.post_json("https://script.google.com/macros/s/test/exec",
+                                   {"op": "daily_trigger_status"}, attempts=2)
+        self.assertIn("daily", result)
+        self.assertEqual(opener.calls, 2)
+
+    def test_redirect_health_response_exhaustion_fails_closed(self):
+        opener = FakeOpener([http_error(302, "https://script.googleusercontent.com/one-time")])
+        with mock.patch.object(mod.urllib.request, "build_opener", return_value=opener), \
+                mock.patch.object(mod.urllib.request, "urlopen", return_value=FakeResponse(
+                    {"ok": True, "service": "HUNTER_GLOBAL_BRIDGE"})):
+            with self.assertRaisesRegex(RuntimeError, "BRIDGE_POST_RETURNED_HEALTH"):
+                mod.post_json("https://script.google.com/macros/s/test/exec",
+                              {"op": "read"}, attempts=1)
+
     def test_redirect_target_404_retries_original_post(self):
         opener = FakeOpener([
             http_error(302, "https://script.googleusercontent.com/one-time"),

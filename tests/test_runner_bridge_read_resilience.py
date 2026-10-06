@@ -4,6 +4,7 @@ import importlib.util
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RUNNER_PATH = ROOT / "hunter-global" / "runner.py"
@@ -15,6 +16,29 @@ spec.loader.exec_module(runner)
 
 
 class DriveReadResilienceTests(unittest.TestCase):
+    def test_reader_preserves_connection_without_environment_lookup(self):
+        drive = runner.Drive.__new__(runner.Drive)
+        drive.url, drive.key = "configured-url", "configured-key"
+        drive.http = mock.Mock()
+        drive.folders = {"": "", "US": "US"}
+        with mock.patch.dict(runner.os.environ, {}, clear=True), \
+                mock.patch.object(runner.requests, "Session") as session:
+            reader = drive.fork_reader()
+        self.assertEqual((reader.url, reader.key), (drive.url, drive.key))
+        self.assertIs(reader.http, session.return_value)
+        self.assertIsNot(reader.http, drive.http)
+        self.assertIsNot(reader.folders, drive.folders)
+
+    def test_parallel_reader_sessions_close_on_failure(self):
+        child = mock.Mock()
+        drive = mock.Mock()
+        drive.fork_reader.return_value = child
+        def fail(reader, item):
+            raise RuntimeError("read failed")
+        with self.assertRaisesRegex(RuntimeError, "read failed"):
+            runner.map_drive_reads(drive, fail, [1], 1)
+        child.http.close.assert_called_once()
+
     def test_large_json_uses_bounded_read_chunks(self):
         payload = (b'{"market":"HK","securities":[' + b'{"security_id":"HK-X"},' * 30000 + b'{}]}')
         drive = runner.Drive.__new__(runner.Drive)

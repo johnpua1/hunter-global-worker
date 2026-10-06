@@ -4,9 +4,8 @@ from __future__ import annotations
 import json
 import os
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 
-from runner import Drive, compact, digest, load_market, now_myt, parse_lines_gz
+from runner import Drive, compact, digest, load_market, now_myt, parse_lines_gz, map_drive_reads
 from foundation import current_universe, daily_segments
 from analytics import compose, excursions, indicators, split_adjust
 
@@ -44,8 +43,7 @@ def read_files(drive: Drive, market: str, folder: str, suffix):
         elif name.endswith(suffixes):
             paths.append(f"{base}/{name}")
 
-    def list_shard(shard):
-        reader = Drive()
+    def list_shard(reader, shard):
         return [
             f"{shard}/{child['name']}"
             for child in reader.list(shard)
@@ -53,12 +51,10 @@ def read_files(drive: Drive, market: str, folder: str, suffix):
         ]
 
     workers = max(1, min(6, int(os.getenv("DERIVED_READ_WORKERS", "4"))))
-    if shards:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for result in pool.map(list_shard, shards):
-                paths.extend(result)
+    for result in map_drive_reads(drive, list_shard, shards, workers):
+        paths.extend(result)
 
-    return paths
+    return sorted(paths)
 
 
 def build(drive: Drive, market: str, date: str):
@@ -66,12 +62,10 @@ def build(drive: Drive, market: str, date: str):
     universe = current_universe(drive, market)
     workers = max(1, min(6, int(os.getenv("DERIVED_READ_WORKERS", "4"))))
 
-    def read_gzip(path):
-        reader = Drive()
+    def read_gzip(reader, path):
         return parse_lines_gz(reader.read(path))
 
-    def read_json(path):
-        reader = Drive()
+    def read_json(reader, path):
         return reader.json(path)
 
     daily = defaultdict(list)
@@ -82,41 +76,37 @@ def build(drive: Drive, market: str, date: str):
                        (".ndjson.gz", ".ndjson.gzip"))
         )
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for rows in pool.map(read_gzip, daily_paths):
-            for row in rows:
-                if row.get("trade_date", row["date"]) <= date:
-                    daily[row["security_id"]].append(row)
+    for rows in map_drive_reads(drive, read_gzip, daily_paths, workers):
+        for row in rows:
+            if row.get("trade_date", row["date"]) <= date:
+                daily[row["security_id"]].append(row)
 
     patches = defaultdict(list)
     patch_paths = read_files(drive, market, "REPAIR_PATCH", ".json")
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for payload in pool.map(read_json, patch_paths):
-            items = payload.get("items") if isinstance(payload, dict) else None
-            if isinstance(items, list):
-                for patch in items:
-                    if patch.get("security_id"):
-                        patches[patch["security_id"]].append(patch)
-            elif isinstance(payload, dict) and payload.get("security_id"):
-                patches[payload["security_id"]].append(payload)
+    for payload in map_drive_reads(drive, read_json, patch_paths, workers):
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if isinstance(items, list):
+            for patch in items:
+                if patch.get("security_id"):
+                    patches[patch["security_id"]].append(patch)
+        elif isinstance(payload, dict) and payload.get("security_id"):
+            patches[payload["security_id"]].append(payload)
 
     events = []
     action_paths = read_files(drive, market, "CORPORATE_ACTIONS", ".json")
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for payload in pool.map(read_json, action_paths):
-            events.extend(payload)
+    for payload in map_drive_reads(drive, read_json, action_paths, workers):
+        events.extend(payload)
     anchors_path = f"{market}/SIGNAL_ANCHORS.json"
     anchor_rows = drive.json(anchors_path) if drive.file(anchors_path) else []
     anchors = defaultdict(list)
     for anchor in anchor_rows:
         anchors[anchor["security_id"]].append(anchor)
     derived = []
-    def process_base_batch(batch: int) -> list[dict]:
+    def process_base_batch(reader, batch: int) -> list[dict]:
         # Each worker owns an independent HTTP session; Drive access is read-only
         # here. Result writes remain single-threaded below.
-        reader = Drive()
         base = parse_lines_gz(reader.read(f"{market}/BASE/batch-{batch:04d}.ndjson.gz"))
         by_id = defaultdict(list)
         for row in base:
@@ -136,9 +126,8 @@ def build(drive: Drive, market: str, date: str):
         return out
 
     batches = range(1, state.checkpoint["total_batches"] + 1)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for part in pool.map(process_base_batch, batches):
-            derived.extend(part)
+    for part in map_drive_reads(drive, process_base_batch, batches, workers):
+        derived.extend(part)
     for security in universe[len(state.securities):]:
         if security.get("listing_status", "ACTIVE") != "ACTIVE":
             continue

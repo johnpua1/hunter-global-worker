@@ -17,6 +17,7 @@ import os
 import random
 import sys
 import time
+import threading
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -100,6 +101,14 @@ class Drive:
         self.key = os.environ["APPS_SCRIPT_SHARED_KEY"]
         self.http = requests.Session()
         self.folders: dict[str, str] = {"": ""}
+
+    def fork_reader(self):
+        """Keep this connection's configuration with an independent HTTP session."""
+        reader = object.__new__(type(self))
+        reader.url, reader.key = self.url, self.key
+        reader.http = requests.Session()
+        reader.folders = dict(self.folders)
+        return reader
 
     def health(self):
         expected = {"ok": True, "service": "HUNTER_GLOBAL_BRIDGE"}
@@ -283,6 +292,28 @@ class Drive:
                 if "BRIDGE_STALE_WRITE" not in str(exc):
                     raise
                 time.sleep(1 + random.random())
+
+
+def map_drive_reads(drive, operation, items, workers):
+    """Ordered reads; transports without a reader factory remain sequential."""
+    factory = getattr(drive, "fork_reader", None)
+    if factory is None:
+        return [operation(drive, item) for item in items]
+    local = threading.local()
+    readers = []
+
+    def read(item):
+        if not hasattr(local, "reader"):
+            local.reader = factory()
+            readers.append(local.reader)
+        return operation(local.reader, item)
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(read, items))
+    finally:
+        for reader in readers:
+            reader.http.close()
 
 
 def yahoo_chart(symbol: str, start_date: str, end_date: str) -> dict:

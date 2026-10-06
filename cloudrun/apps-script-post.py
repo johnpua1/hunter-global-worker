@@ -23,7 +23,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def _decode_response(response) -> dict:
     raw = response.read()
-    return json.loads(raw.decode("utf-8"))
+    result = json.loads(raw.decode("utf-8"))
+    if result == {"ok": True, "service": "HUNTER_GLOBAL_BRIDGE"}:
+        raise ValueError("BRIDGE_POST_RETURNED_HEALTH")
+    if not isinstance(result, dict):
+        raise ValueError("BRIDGE_POST_INVALID_RESPONSE")
+    return result
 
 
 def post_json(url: str, payload: dict, attempts: int = 6) -> dict:
@@ -57,7 +62,7 @@ def post_json(url: str, payload: dict, attempts: int = 6) -> dict:
                     last = redirect_exc
                     if redirect_exc.code not in (404, 408, 429, 500, 502, 503, 504):
                         raise
-                except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as redirect_exc:
+                except (urllib.error.URLError, TimeoutError, ValueError) as redirect_exc:
                     last = redirect_exc
                 if attempt + 1 < attempts:
                     time.sleep(min(5, 1 + attempt))
@@ -68,7 +73,7 @@ def post_json(url: str, payload: dict, attempts: int = 6) -> dict:
             # failures during deployment propagation.
             if exc.code not in (404, 408, 429, 500, 502, 503, 504):
                 raise
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
             last = exc
         if attempt + 1 < attempts:
             time.sleep(min(5, 1 + attempt))

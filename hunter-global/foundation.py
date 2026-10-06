@@ -6,7 +6,8 @@ import json
 import os
 from collections import defaultdict
 from runner import (Drive, MARKETS, compact, digest, fetch_security, lines_gz,
-                    load_market, now_myt, parse_lines_gz, closed_dates_since)
+                    load_market, now_myt, parse_lines_gz, closed_dates_since,
+                    map_drive_reads)
 
 
 DAILY_SEGMENT_SUFFIXES = (".ndjson.gz", ".ndjson.gzip")
@@ -70,22 +71,19 @@ def read_existing(drive: Drive, market: str, securities: list[dict], base_as_of:
             if is_daily_segment(file["name"]):
                 paths.append(f"{market}/DAILY/{date}/{file['name']}")
 
-    def load_segment(path):
-        reader = Drive()
+    def load_segment(reader, path):
         return parse_lines_gz(reader.read(path))
 
-    from concurrent.futures import ThreadPoolExecutor
     workers = max(1, min(6, int(os.getenv("DAILY_READ_WORKERS", "6"))))
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for rows in pool.map(load_segment, paths):
-            for row in rows:
-                key = (row["security_id"], row.get("trade_date", row.get("date")))
-                if key in keys:
-                    raise RuntimeError("DAILY_DUPLICATE_STORED:" + str(key))
-                keys.add(key)
-                if key[0] in last and (last[key[0]] is None or key[1] > last[key[0]]):
-                    last[key[0]] = key[1]
+    for rows in map_drive_reads(drive, load_segment, paths, workers):
+        for row in rows:
+            key = (row["security_id"], row.get("trade_date", row.get("date")))
+            if key in keys:
+                raise RuntimeError("DAILY_DUPLICATE_STORED:" + str(key))
+            keys.add(key)
+            if key[0] in last and (last[key[0]] is None or key[1] > last[key[0]]):
+                last[key[0]] = key[1]
 
     return last, keys
 

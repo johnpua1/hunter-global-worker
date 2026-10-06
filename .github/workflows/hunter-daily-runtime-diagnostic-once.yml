@@ -38,13 +38,14 @@ jobs:
               payload={"op":op,"key":key}
               payload.update(fields)
               result=mod.post_json(url,payload)
-              print(op + ":" + json.dumps(result,ensure_ascii=False,sort_keys=True))
+              if op != "read":
+                  print(op + ":" + json.dumps(result,ensure_ascii=False,sort_keys=True))
               return result
 
           def read_json(path):
               result=call("read",path=path)
-              if not result.get("ok"):
-                  return None
+              if not result.get("ok") or "data_base64" not in result:
+                  raise RuntimeError("CHECKPOINT_READ_FAILED:" + path)
               raw=base64.b64decode(result["data_base64"])
               return json.loads(raw.decode("utf-8"))
 

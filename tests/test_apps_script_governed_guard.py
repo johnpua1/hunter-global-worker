@@ -38,7 +38,7 @@ class GuardAppsScriptGovernedTests(unittest.TestCase):
             root = pathlib.Path(td)
             (root / "Gateway.gs").write_text("function hunterDailyWatchdog() {}\n", encoding="utf-8")
             (root / "Code.js").write_text("function dailyUS() {}\n", encoding="utf-8")
-            function_re = re.compile(r"\\bfunction\\s+(" + "|".join(re.escape(x) for x in mod.GOVERNED) + r")\\s*\\(")
+            function_re = re.compile(r"\bfunction\s+(" + "|".join(re.escape(x) for x in mod.GOVERNED) + r")\s*\(")
             hits = function_re.findall((root / "Code.js").read_text(encoding="utf-8"))
             self.assertIn("dailyUS", hits)
 

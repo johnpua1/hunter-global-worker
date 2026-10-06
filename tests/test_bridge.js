@@ -27,6 +27,9 @@ assert.equal(source.includes("handler === 'hunterDailyWatchdog'"), true);
 assert.equal(source.includes("newTrigger('hunterDailyWatchdog').timeBased().everyHours(1)"), true);
 assert.equal(source.includes("TODAY_EXECUTION_SUCCEEDED"), true);
 assert.equal(source.includes("STATUS_UNREADABLE"), true);
+assert.equal(source.includes("function hunterRecoverStaleExecutions_"), true);
+assert.equal(source.includes("execution.name + ':cancel'"), true);
+assert.equal(source.includes("STALE_CANCEL_PENDING"), true);
 assert.equal(source.includes("op === 'enforce_daily_triggers'"), true);
 assert.equal(source.includes("op === 'daily_trigger_status'"), true);
 const context = vm.createContext({});
@@ -46,6 +49,18 @@ assert.equal(context.bridgeAuthScope_(scopedProps, 'maint-key'), 'MAINT');
 assert.equal(context.bridgeAuthScope_(scopedProps, 'month-key'), 'MONTH');
 assert.equal(context.bridgeAuthScope_(scopedProps, 'legacy-key'), 'LEGACY');
 assert.throws(() => context.bridgeAuthScope_(scopedProps, 'wrong-key'), /UNAUTHORIZED/);
+assert.equal(context.hunterDurationMs_('3600s', 1), 3600000);
+const split = context.hunterRunningSplit_(
+  {executions: [
+    {status: 'RUNNING', createTime: '2026-10-06T01:30:00Z'},
+    {status: 'RUNNING', createTime: '2026-10-05T20:00:00Z'},
+    {status: 'SUCCEEDED', createTime: '2026-10-05T19:00:00Z'}
+  ]},
+  75 * 60 * 1000,
+  new Date('2026-10-06T02:00:00Z')
+);
+assert.equal(split.fresh.length, 1);
+assert.equal(split.stale.length, 1);
 assert.doesNotThrow(() => context.bridgeScopeAuthorize_('US', 'read', 'US/CURRENT_UNIVERSE.json'));
 assert.throws(() => context.bridgeScopeAuthorize_('US', 'read', 'HK/CURRENT_UNIVERSE.json'), /SCOPE_PATH_DENIED/);
 assert.doesNotThrow(() => context.bridgeScopeAuthorize_('HK', 'read', 'HK/CURRENT_UNIVERSE.json'));

@@ -513,7 +513,7 @@ function inspectHunterJobs() {
 }
 
 function hunterDurationMs_(value, fallbackMs) {
-  var match = /^(\\d+(?:\\.\\d+)?)s$/.exec(String(value || ''));
+  var match = /^(\d+(?:\.\d+)?)s$/.exec(String(value || ''));
   if (!match) return fallbackMs;
   return Math.max(1000, Math.round(Number(match[1]) * 1000));
 }

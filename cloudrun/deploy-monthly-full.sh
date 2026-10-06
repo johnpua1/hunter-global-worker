@@ -194,5 +194,10 @@ else
   echo "BRIDGE_URL_SECRET_CURRENT=PASS"
 fi
 
+if [[ "${SKIP_MONTHLY_DEPLOY:-0}" == "1" ]]; then
+  echo "MONTHLY_DEPLOY_SKIPPED=PASS"
+  exit 0
+fi
+
 cd "$ROOT"
 bash cloudrun/deploy-monthly.sh

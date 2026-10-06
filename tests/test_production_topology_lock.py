@@ -50,6 +50,8 @@ class ProductionTopologyLockTests(unittest.TestCase):
         watchdog = source[source.index("function hunterDailyWatchdogMarket_"):source.index("function hunterDailyWatchdog()", source.index("function hunterDailyWatchdogMarket_"))]
         self.assertIn("hunterRecoverStaleExecutions_(market, cloud)", watchdog)
         self.assertNotIn("if (cloud.running)", watchdog)
+        self.assertIn("op === 'daily_watchdog_once'", source)
+        self.assertIn("DAILY_WATCHDOG_LEGACY_ONLY", source)
         self.assertNotRegex(source, r"function\s+quarterlyV2\s*\(")
         self.assertIn("handler === 'monthlyV2' || handler === 'quarterlyV2'", source)
 

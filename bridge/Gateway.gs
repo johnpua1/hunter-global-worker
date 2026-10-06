@@ -54,6 +54,10 @@ function doPost(e) {
       if (scope !== 'LEGACY') throw new Error('DAILY_TRIGGER_ENFORCE_LEGACY_ONLY');
       return bridgeJson_({ok:true, daily:installHunterDailyTriggers()});
     }
+    if (op === 'daily_watchdog_once') {
+      if (scope !== 'LEGACY') throw new Error('DAILY_WATCHDOG_LEGACY_ONLY');
+      return bridgeJson_({ok:true, watchdog:hunterDailyWatchdog()});
+    }
     if (op === 'enforce_topology_triggers') {
       if (scope !== 'LEGACY') throw new Error('TOPOLOGY_ENFORCE_LEGACY_ONLY');
       var daily = installHunterDailyTriggers();

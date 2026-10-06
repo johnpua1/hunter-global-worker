@@ -84,6 +84,7 @@ required = (
     "function hunterRecoverStaleExecutions_(",
     "function hunterJobStaleAfterMs_(",
     "execution.name + ':cancel'",
+    "op === 'daily_watchdog_once'",
 )
 missing = [item for item in required if item not in source]
 if missing:

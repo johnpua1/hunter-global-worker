@@ -1,4 +1,20 @@
 [
-  {"name":"delete-old","action":{"type":"Delete"},"condition":{"tagState":"any"}},
-  {"name":"keep-latest-two","action":{"type":"Keep"},"mostRecentVersions":{"keepCount":2}}
+  {
+    "name":"delete-old",
+    "action":{"type":"Delete"},
+    "condition":{"tagState":"any"}
+  },
+  {
+    "name":"keep-production-tags",
+    "action":{"type":"Keep"},
+    "condition":{
+      "tagState":"tagged",
+      "tagPrefixes":["prod-"]
+    }
+  },
+  {
+    "name":"keep-latest-two",
+    "action":{"type":"Keep"},
+    "mostRecentVersions":{"keepCount":2}
+  }
 ]

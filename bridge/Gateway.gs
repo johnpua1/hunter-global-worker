@@ -463,10 +463,12 @@ function hunterExecutionState_(execution) {
   for (var i = 0; i < conditions.length; i++) {
     if (conditions[i].type === 'Completed') { completed = conditions[i]; break; }
   }
-  if (!execution.completionTime) return 'RUNNING';
+  // Prefer explicit terminal signals over completionTime. Cloud Run can report
+  // a terminal Completed condition before completionTime is populated.
   if (completed && completed.state === 'CONDITION_SUCCEEDED') return 'SUCCEEDED';
   if (completed && completed.state === 'CONDITION_FAILED') return 'FAILED';
   if (execution.cancelledCount > 0) return 'CANCELLED';
+  if (!execution.completionTime) return 'RUNNING';
   return completed ? String(completed.state || 'COMPLETED') : 'COMPLETED';
 }
 
@@ -552,7 +554,19 @@ function hunterRunningSplit_(statusDoc, staleAfterMs, now) {
 
 function hunterCancelExecution_(execution) {
   if (!execution || !execution.name) throw new Error('EXECUTION_NAME_MISSING');
-  return hunterCloudRequest_('post', execution.name + ':cancel', {});
+  try {
+    return hunterCloudRequest_('post', execution.name + ':cancel', {});
+  } catch (err) {
+    var message = String(err && err.message ? err.message : err);
+    // A stale read can race with Cloud Run completing the execution between
+    // status() and :cancel. "not running" is therefore benign; force a fresh
+    // status read instead of turning a completed execution into a hard fault.
+    if (message.indexOf('cannot be cancelled because it is not running') >= 0) {
+      console.log('STALE_CANCEL_ALREADY_TERMINAL execution=' + String(execution.name));
+      return {alreadyTerminal: true};
+    }
+    throw err;
+  }
 }
 
 function hunterRecoverStaleExecutions_(job, before) {

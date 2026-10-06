@@ -30,6 +30,7 @@ assert.equal(source.includes("STATUS_UNREADABLE"), true);
 assert.equal(source.includes("function hunterRecoverStaleExecutions_"), true);
 assert.equal(source.includes("execution.name + ':cancel'"), true);
 assert.equal(source.includes("STALE_CANCEL_PENDING"), true);
+assert.equal(source.includes("STALE_CANCEL_ALREADY_TERMINAL"), true);
 const watchdogStart = source.indexOf("function hunterDailyWatchdogMarket_");
 const watchdogEnd = source.indexOf("function hunterDailyWatchdog()", watchdogStart);
 const watchdogBody = source.slice(watchdogStart, watchdogEnd);
@@ -41,6 +42,14 @@ assert.equal(source.includes("op === 'daily_watchdog_once'"), true);
 assert.equal(source.includes("DAILY_WATCHDOG_LEGACY_ONLY"), true);
 const context = vm.createContext({});
 vm.runInContext(source, context);
+assert.equal(
+  context.hunterExecutionState_({conditions:[{type:'Completed',state:'CONDITION_SUCCEEDED'}], cancelledCount:0}),
+  'SUCCEEDED'
+);
+assert.equal(
+  context.hunterExecutionState_({conditions:[{type:'Completed',state:'CONDITION_FAILED'}], cancelledCount:0}),
+  'FAILED'
+);
 const scopedProps = {getProperty(name) {
   return ({
     BRIDGE_US_KEY: 'us-key',

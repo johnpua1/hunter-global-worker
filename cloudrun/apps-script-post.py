@@ -46,13 +46,26 @@ def post_json(url: str, payload: dict, attempts: int = 6) -> dict:
                 location = exc.headers.get("Location")
                 if not location:
                     raise RuntimeError("APPS_SCRIPT_REDIRECT_WITHOUT_LOCATION") from exc
-                # ContentService's redirect target is a one-time response URL
-                # and must be fetched with GET.
-                with urllib.request.urlopen(location, timeout=60) as response:
-                    return _decode_response(response)
+                # ContentService's redirect target is a one-time response URL.
+                # That URL can expire or race deployment propagation and return
+                # 404/5xx. In that case retry the original /exec POST instead of
+                # failing the whole control-plane call.
+                try:
+                    with urllib.request.urlopen(location, timeout=60) as response:
+                        return _decode_response(response)
+                except urllib.error.HTTPError as redirect_exc:
+                    last = redirect_exc
+                    if redirect_exc.code not in (404, 408, 429, 500, 502, 503, 504):
+                        raise
+                except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as redirect_exc:
+                    last = redirect_exc
+                if attempt + 1 < attempts:
+                    time.sleep(min(5, 1 + attempt))
+                    continue
+                break
             last = exc
-            # Apps Script redirect endpoints can briefly return 404 while a
-            # deployment/version propagates. Retry the original /exec URL.
+            # Apps Script /exec itself can also briefly return retryable
+            # failures during deployment propagation.
             if exc.code not in (404, 408, 429, 500, 502, 503, 504):
                 raise
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:

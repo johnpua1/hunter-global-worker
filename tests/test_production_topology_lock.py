@@ -38,11 +38,20 @@ class ProductionTopologyLockTests(unittest.TestCase):
 
     def test_gateway_has_single_locked_handlers(self):
         source = (ROOT / "bridge" / "Gateway.gs").read_text(encoding="utf-8")
-        for fn in ("dailyUS", "dailyHK", "monthlyV2"):
+        for fn in ("dailyUS", "dailyHK", "hunterDailyWatchdog", "monthlyV2"):
             hits = re.findall(r"function\s+" + re.escape(fn) + r"\s*\(", source)
             self.assertEqual(len(hits), 1, fn)
+        self.assertIn("HUNTER_DAILY_STATE_V1_", source)
+        self.assertIn("HUNTER_DAILY_WATCHDOG_MAX_ATTEMPTS = 3", source)
+        self.assertIn("newTrigger('hunterDailyWatchdog').timeBased().everyHours(1)", source)
         self.assertNotRegex(source, r"function\s+quarterlyV2\s*\(")
         self.assertIn("handler === 'monthlyV2' || handler === 'quarterlyV2'", source)
+
+    def test_monthly_full_deploy_refuses_watchdog_regression(self):
+        source = (ROOT / "cloudrun" / "deploy-monthly-full.sh").read_text(encoding="utf-8")
+        self.assertIn("BRIDGE_SOURCE_GUARD=PASS", source)
+        self.assertIn("hunterDailyWatchdog", source)
+        self.assertIn("HUNTER_DAILY_STATE_V1_", source)
 
     def test_runner_has_monthly_not_quarterly(self):
         source = (ROOT / "hunter-global" / "runner.py").read_text(encoding="utf-8")

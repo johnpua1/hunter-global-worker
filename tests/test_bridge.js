@@ -30,6 +30,15 @@ assert.equal(source.includes("STATUS_UNREADABLE"), true);
 assert.equal(source.includes("function hunterRecoverStaleExecutions_"), true);
 assert.equal(source.includes("execution.name + ':cancel'"), true);
 assert.equal(source.includes("STALE_CANCEL_PENDING"), true);
+assert.equal(source.includes("STALE_CANCEL_ALREADY_TERMINAL"), true);
+assert.equal(
+  context.hunterExecutionState_({conditions:[{type:'Completed',state:'CONDITION_SUCCEEDED'}], cancelledCount:0}),
+  'SUCCEEDED'
+);
+assert.equal(
+  context.hunterExecutionState_({conditions:[{type:'Completed',state:'CONDITION_FAILED'}], cancelledCount:0}),
+  'FAILED'
+);
 const watchdogStart = source.indexOf("function hunterDailyWatchdogMarket_");
 const watchdogEnd = source.indexOf("function hunterDailyWatchdog()", watchdogStart);
 const watchdogBody = source.slice(watchdogStart, watchdogEnd);

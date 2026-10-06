@@ -1,0 +1,63 @@
+name: Hunter daily runtime diagnostic once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.repair-trigger/hunter-daily-runtime-diagnostic-20261006'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Read production DAILY control plane
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import base64, importlib.util, json, os, pathlib
+
+          path = pathlib.Path("cloudrun/apps-script-post.py")
+          spec = importlib.util.spec_from_file_location("apps_script_post", path)
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+
+          url = os.environ["APPS_SCRIPT_WEBAPP_URL"]
+          key = os.environ["APPS_SCRIPT_SHARED_KEY"]
+
+          def call(op, **fields):
+              payload={"op":op,"key":key}
+              payload.update(fields)
+              result=mod.post_json(url,payload)
+              print(op + ":" + json.dumps(result,ensure_ascii=False,sort_keys=True))
+              return result
+
+          def read_json(path):
+              result=call("read",path=path)
+              if not result.get("ok"):
+                  return None
+              raw=base64.b64decode(result["data_base64"])
+              return json.loads(raw.decode("utf-8"))
+
+          trig=call("daily_trigger_status")
+          topo=call("topology_status")
+          print("TRIGGER_COUNTS=" + json.dumps(((trig.get("daily") or {}).get("counts") or {}), sort_keys=True))
+
+          for market in ("US","HK"):
+              cp=read_json(f"{market}/CONTROL/DAILY_CHECKPOINT.json")
+              print(f"{market}_CHECKPOINT=" + json.dumps(cp,ensure_ascii=False,sort_keys=True))
+              for date in ("2026-10-05","2026-10-06"):
+                  run=call("file",path=f"{market}/CONTROL/DAILY_RUN_{date}.json")
+                  rank=call("file",path=f"{market}/DERIVED/{date}/RANK.json")
+                  print(f"{market}_{date}_RUN_EXISTS=" + str(bool(run.get("file"))).lower())
+                  print(f"{market}_{date}_RANK_EXISTS=" + str(bool(rank.get("file"))).lower())
+          PY

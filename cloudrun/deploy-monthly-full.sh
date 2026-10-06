@@ -86,6 +86,8 @@ required = (
     "function hunterJobStaleAfterMs_(",
     "execution.name + ':cancel'",
     "op === 'daily_watchdog_once'",
+    "STALE_CANCEL_ALREADY_TERMINAL",
+    "completed && completed.state === 'CONDITION_SUCCEEDED'",
 )
 missing = [item for item in required if item not in source]
 if missing:

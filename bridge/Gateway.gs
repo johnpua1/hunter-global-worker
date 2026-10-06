@@ -719,10 +719,21 @@ function hunterDailyWatchdogMarket_(market) {
       return {market: market, action: 'STATUS_UNREADABLE'};
     }
 
-    if (cloud.running) {
-      state.watchdog_last_result = 'ALREADY_RUNNING';
+    // Never treat every RUNNING execution as healthy. An execution older
+    // than the Cloud Run task timeout + grace must be recovered here before
+    // the watchdog decides to skip. Fresh executions still fail closed.
+    var recovery = hunterRecoverStaleExecutions_(market, cloud);
+    if (!recovery.ready) {
+      state.watchdog_last_result = String(recovery.reason || 'ALREADY_RUNNING');
+      state.watchdog_stale_seen = Number(recovery.stale || 0);
       hunterDailySaveState_(props, state);
-      return {market: market, action: 'ALREADY_RUNNING'};
+      return {market: market, action: state.watchdog_last_result,
+              stale: state.watchdog_stale_seen};
+    }
+    if (recovery.recovered) {
+      state.watchdog_stale_recovered = true;
+      state.watchdog_stale_cancelled = Number(recovery.cancelled || 0);
+      cloud = recovery.status || cloud;
     }
 
     var latestToday = hunterDailyLatestToday_(cloud, dateText);

@@ -47,6 +47,9 @@ class ProductionTopologyLockTests(unittest.TestCase):
         self.assertIn("hunterRecoverStaleExecutions_", source)
         self.assertIn("execution.name + ':cancel'", source)
         self.assertIn("STALE_CANCEL_PENDING", source)
+        watchdog = source[source.index("function hunterDailyWatchdogMarket_"):source.index("function hunterDailyWatchdog()", source.index("function hunterDailyWatchdogMarket_"))]
+        self.assertIn("hunterRecoverStaleExecutions_(market, cloud)", watchdog)
+        self.assertNotIn("if (cloud.running)", watchdog)
         self.assertNotRegex(source, r"function\s+quarterlyV2\s*\(")
         self.assertIn("handler === 'monthlyV2' || handler === 'quarterlyV2'", source)
 

@@ -16,6 +16,62 @@ spec.loader.exec_module(runner)
 
 
 class DriveReadResilienceTests(unittest.TestCase):
+    def test_second_content_redirect_completes_reads_and_writes_without_reposting(self):
+        for op, payload in [('file', {'ok': True, 'file': {'size': 123}}),
+                            ('append', {'ok': True, 'file': {}, 'sha256': 'abc'}),
+                            ('put', {'ok': True, 'file': {}, 'sha256': 'abc'})]:
+            with self.subTest(op=op):
+                drive = runner.Drive.__new__(runner.Drive)
+                drive.url, drive.key, drive.http = 'https://script.google.com/macros/s/test/exec', 'test-key', mock.Mock()
+                first = mock.Mock(status_code=302, content=b'', headers={'Location': 'https://script.googleusercontent.com/first'})
+                second = mock.Mock(status_code=302, content=b'', headers={'Location': 'https://script.googleusercontent.com/second'})
+                final = mock.Mock(status_code=200)
+                final.json.return_value = payload
+                drive.http.post.return_value = first
+                drive.http.get.side_effect = [second, final]
+                with mock.patch.object(runner, 'bridge_read_response') as fallback:
+                    self.assertEqual(drive._call(op, path='HK/file.json', _attempts=1), payload)
+                    fallback.assert_not_called()
+                drive.http.post.assert_called_once()
+                self.assertEqual(drive.http.get.call_args_list, [
+                    mock.call('https://script.googleusercontent.com/first', timeout=120.0, allow_redirects=False),
+                    mock.call('https://script.googleusercontent.com/second', timeout=120.0, allow_redirects=False)])
+                second.json.assert_not_called()
+
+    def test_untrusted_second_redirect_is_not_followed_and_read_recovery_is_preserved(self):
+        drive = runner.Drive.__new__(runner.Drive)
+        drive.url, drive.key, drive.http = 'https://script.google.com/macros/s/test/exec', 'key', mock.Mock()
+        drive.http.post.return_value = mock.Mock(status_code=302, content=b'', headers={'Location': 'https://script.googleusercontent.com/first'})
+        drive.http.get.return_value = mock.Mock(status_code=302, content=b'', headers={'Location': 'https://untrusted.example/collect'})
+        payload = {'ok': True, 'file': None}
+        with mock.patch.object(runner, 'bridge_read_response', return_value=payload) as fallback:
+            self.assertEqual(drive._call('file', path='HK/file.json', _attempts=1), payload)
+            fallback.assert_called_once_with(drive.url, {'op': 'file', 'key': 'key', 'path': 'HK/file.json'}, 120.0)
+        drive.http.get.assert_called_once_with('https://script.googleusercontent.com/first', timeout=120.0, allow_redirects=False)
+
+    def test_redirect_loop_is_bounded_before_existing_read_recovery(self):
+        drive = runner.Drive.__new__(runner.Drive)
+        drive.url, drive.key, drive.http = 'url', 'key', mock.Mock()
+        loop = mock.Mock(status_code=302, content=b'', headers={'Location': 'https://script.googleusercontent.com/loop'})
+        drive.http.post.return_value = drive.http.get.return_value = loop
+        with mock.patch.object(runner, 'bridge_read_response', return_value={'ok': True, 'file': None}) as fallback:
+            drive._call('file', path='HK/file.json', _attempts=1)
+            fallback.assert_called_once()
+        self.assertEqual(drive.http.get.call_count, 4)
+        loop.json.assert_not_called()
+
+    def test_unresolved_write_redirect_never_uses_read_fallback(self):
+        drive = runner.Drive.__new__(runner.Drive)
+        drive.url, drive.key, drive.http = 'url', 'key', mock.Mock()
+        loop = mock.Mock(status_code=302, content=b'', headers={'Location': 'https://script.googleusercontent.com/loop'})
+        drive.http.post.return_value = drive.http.get.return_value = loop
+        with mock.patch.object(runner, 'bridge_read_response') as fallback:
+            with self.assertRaisesRegex(ValueError, 'BRIDGE_RESPONSE_REDIRECT_UNRESOLVED:append'):
+                drive._call('append', path='HK/file.json', _attempts=1)
+            fallback.assert_not_called()
+        self.assertEqual(drive.http.get.call_count, 4)
+        drive.http.post.assert_called_once()
+
     def test_content_response_redirect_is_explicit_and_key_is_not_resent(self):
         drive = runner.Drive.__new__(runner.Drive)
         drive.url, drive.key = 'https://script.google.com/macros/s/test/exec', 'test-key'

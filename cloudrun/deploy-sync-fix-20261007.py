@@ -76,6 +76,7 @@ def main():
     base = 'us-central1-docker.pkg.dev/rgs-hunter-global/hunter-worker/runner'
     image = base + ':' + sha
     approved = {'760c2808f786df376575839ac0bb4334989955fe',
+                'a6de79fb94a1c4fbd9f99312f4744d4aa0d8d67f',
                 '6cbba32e4754868e93da9f00ca19371e92a5e8e5',
                 '859323f28a76057b51c5e807feec2db6a9aa3b5f',
                 '64dbb5ede192a66f4fd16eebef1f33521f07fb7b', sha}

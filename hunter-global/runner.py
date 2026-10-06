@@ -178,14 +178,24 @@ class Drive:
                 # never silently turn an intermediate /exec redirect into GET.
                 response = self.http.post(self.url, json=request, timeout=timeout,
                                           allow_redirects=False)
-                if response.status_code in (301, 302, 303, 307, 308):
+                for hop in range(4):
+                    if response.status_code not in (301, 302, 303, 307, 308):
+                        break
                     location = response.headers.get("Location", "")
                     target = urlsplit(location)
                     if target.scheme != "https" or target.hostname != "script.googleusercontent.com":
-                        raise ValueError("BRIDGE_UNEXPECTED_REDIRECT:" + op)
+                        if hop == 0:
+                            raise ValueError("BRIDGE_UNEXPECTED_REDIRECT:" + op)
+                        # Preserve the independent read recovery for an unusable
+                        # response hop, but never follow an untrusted target.
+                        break
+                    # Every response hop is GET-only; do not replay a write or
+                    # forward the shared key when ContentService redirects again.
                     response = self.http.get(location, timeout=timeout, allow_redirects=False)
                 response.raise_for_status()
                 try:
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        raise ValueError("BRIDGE_RESPONSE_REDIRECT_UNRESOLVED:" + op)
                     result = response.json()
                 except ValueError:
                     if op not in {"file", "list", "read", "read_chunk"}:

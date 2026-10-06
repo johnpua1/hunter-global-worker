@@ -1,0 +1,40 @@
+name: Hunter DAILY watchdog once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.repair-trigger/hunter-daily-watchdog-once-20261006'
+
+permissions:
+  contents: read
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Invoke Apps Script DAILY watchdog once
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import importlib.util, json, os, pathlib
+          path=pathlib.Path("cloudrun/apps-script-post.py")
+          spec=importlib.util.spec_from_file_location("apps_script_post", path)
+          mod=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          result=mod.post_json(os.environ["APPS_SCRIPT_WEBAPP_URL"], {
+              "op":"daily_watchdog_once",
+              "key":os.environ["APPS_SCRIPT_SHARED_KEY"],
+          })
+          print(json.dumps(result,ensure_ascii=False,sort_keys=True))
+          if not result.get("ok"):
+              raise SystemExit("DAILY_WATCHDOG_ONCE_FAILED:" + str(result.get("error")))
+          print("DAILY_WATCHDOG_ONCE=PASS")
+          PY

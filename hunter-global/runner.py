@@ -155,6 +155,12 @@ class Drive:
             except (requests.RequestException, ValueError):
                 if attempt == attempts - 1:
                     raise
+                # A failed ContentService redirect can leave a stale pooled
+                # connection to script.googleusercontent.com. Rebuild the
+                # session so the next attempt starts again from the canonical
+                # Apps Script /exec endpoint.
+                self.http.close()
+                self.http = requests.Session()
                 time.sleep(min(30, 2 ** min(attempt, 4) + random.random()))
         raise AssertionError("unreachable")
 
@@ -176,13 +182,19 @@ class Drive:
         import base64
         clean = path.strip("/")
         info = self.file(clean)
-        if info and int(info.get("size") or 0) > 10_000_000:
+        # Apps Script ContentService becomes unreliable for multi-MB JSON
+        # responses because the redirected googleusercontent response can sit
+        # idle long enough to hit the worker's read timeout. Use bounded Drive
+        # range reads for any non-trivial file instead of one giant response.
+        chunk_threshold = max(64_000, int(os.getenv("HUNTER_BRIDGE_CHUNK_THRESHOLD_BYTES", "262144")))
+        if info and int(info.get("size") or 0) > chunk_threshold:
             expected = int(info["size"])
+            chunk_size = max(64_000, min(1_000_000, int(os.getenv("HUNTER_BRIDGE_CHUNK_BYTES", "524288"))))
             offset = 0
             chunks = []
             while offset < expected:
                 result = self._call("read_chunk", path=clean, offset=offset,
-                                    length=min(6_000_000, expected - offset))
+                                    length=min(chunk_size, expected - offset))
                 if int(result["offset"]) != offset or int(result["size"]) != expected:
                     raise RuntimeError("BRIDGE_READ_CHUNK_POSITION_MISMATCH:" + path)
                 data = base64.b64decode(result["data_base64"], validate=True)

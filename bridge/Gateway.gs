@@ -46,6 +46,14 @@ function doPost(e) {
       return bridgeJson_({ok:true, daily:listHunterDailyTriggers(),
                           monthly:listMonthlyTrigger(), jobs:inspectHunterJobs()});
     }
+    if (op === 'daily_trigger_status') {
+      if (scope !== 'LEGACY') throw new Error('DAILY_TRIGGER_STATUS_LEGACY_ONLY');
+      return bridgeJson_({ok:true, daily:listHunterDailyTriggers()});
+    }
+    if (op === 'enforce_daily_triggers') {
+      if (scope !== 'LEGACY') throw new Error('DAILY_TRIGGER_ENFORCE_LEGACY_ONLY');
+      return bridgeJson_({ok:true, daily:installHunterDailyTriggers()});
+    }
     if (op === 'enforce_topology_triggers') {
       if (scope !== 'LEGACY') throw new Error('TOPOLOGY_ENFORCE_LEGACY_ONLY');
       var daily = installHunterDailyTriggers();

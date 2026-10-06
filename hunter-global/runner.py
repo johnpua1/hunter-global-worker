@@ -295,10 +295,20 @@ class Drive:
 
 
 def map_drive_reads(drive, operation, items, workers):
-    """Ordered reads; transports without a reader factory remain sequential."""
+    """Yield ordered results with at most ``workers`` reads outstanding.
+
+    Executor.map eagerly submits the entire input on Python 3.12. A slow early
+    read can then retain every later decoded segment in completed futures.
+    Bound both submission and result retention, not just the thread count.
+    """
+    from collections import deque
+
     factory = getattr(drive, "fork_reader", None)
     if factory is None:
-        return [operation(drive, item) for item in items]
+        for item in items:
+            yield operation(drive, item)
+        return
+    workers = max(1, int(workers))
     local = threading.local()
     readers = []
 
@@ -308,10 +318,32 @@ def map_drive_reads(drive, operation, items, workers):
             readers.append(local.reader)
         return operation(local.reader, item)
 
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+    pending = deque()
+    source = iter(items)
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            return list(pool.map(read, items))
+        for _ in range(workers):
+            try:
+                item = next(source)
+            except StopIteration:
+                break
+            pending.append(pool.submit(read, item))
+        while pending:
+            future = pending.popleft()
+            result = future.result()
+            del future
+            yield result
+            del result
+            try:
+                item = next(source)
+            except StopIteration:
+                continue
+            pending.append(pool.submit(read, item))
     finally:
+        for future in pending:
+            future.cancel()
+        pool.shutdown(wait=True, cancel_futures=True)
+        pending.clear()
         for reader in readers:
             reader.http.close()
 

@@ -36,8 +36,62 @@ class DriveReadResilienceTests(unittest.TestCase):
         def fail(reader, item):
             raise RuntimeError("read failed")
         with self.assertRaisesRegex(RuntimeError, "read failed"):
-            runner.map_drive_reads(drive, fail, [1], 1)
+            list(runner.map_drive_reads(drive, fail, [1], 1))
         child.http.close.assert_called_once()
+
+    def test_parallel_reads_bound_input_consumption_and_preserve_order(self):
+        consumed = []
+        drive = mock.Mock()
+        drive.fork_reader.side_effect = lambda: mock.Mock()
+        def source():
+            for item in range(20):
+                consumed.append(item)
+                yield item
+        results = runner.map_drive_reads(drive, lambda reader, item: item, source(), 2)
+        self.assertEqual(consumed, [])
+        self.assertEqual(next(results), 0)
+        self.assertEqual(consumed, [0, 1])
+        self.assertEqual(list(results), list(range(1, 20)))
+
+    def test_decoded_segments_are_released_instead_of_accumulating(self):
+        import tracemalloc
+        drive = mock.Mock()
+        drive.fork_reader.side_effect = lambda: mock.Mock()
+        def read(reader, item):
+            return bytearray(256 * 1024)
+        tracemalloc.start()
+        try:
+            count = 0
+            for segment in runner.map_drive_reads(drive, read, range(200), 2):
+                count += 1
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(count, 200)
+        self.assertLess(peak, 4 * 1024 * 1024)  # Eager storage exceeds 50 MiB.
+
+    def test_early_close_closes_reader_sessions(self):
+        readers = []
+        drive = mock.Mock()
+        def factory():
+            reader = mock.Mock()
+            readers.append(reader)
+            return reader
+        drive.fork_reader.side_effect = factory
+        results = runner.map_drive_reads(drive, lambda reader, item: item, range(20), 2)
+        self.assertEqual(next(results), 0)
+        results.close()
+        self.assertTrue(readers)
+        for reader in readers:
+            reader.http.close.assert_called_once()
+
+    def test_sequential_transport_is_lazy(self):
+        drive = object()
+        operation = mock.Mock(side_effect=lambda reader, item: item)
+        results = runner.map_drive_reads(drive, operation, range(20), 2)
+        self.assertEqual(next(results), 0)
+        self.assertEqual(operation.call_count, 1)
+        results.close()
 
     def test_large_json_uses_bounded_read_chunks(self):
         payload = (b'{"market":"HK","securities":[' + b'{"security_id":"HK-X"},' * 30000 + b'{}]}')

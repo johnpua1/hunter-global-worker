@@ -44,6 +44,9 @@ class ProductionTopologyLockTests(unittest.TestCase):
         self.assertIn("HUNTER_DAILY_STATE_V1_", source)
         self.assertIn("HUNTER_DAILY_WATCHDOG_MAX_ATTEMPTS = 3", source)
         self.assertIn("newTrigger('hunterDailyWatchdog').timeBased().everyHours(1)", source)
+        self.assertIn("hunterRecoverStaleExecutions_", source)
+        self.assertIn("execution.name + ':cancel'", source)
+        self.assertIn("STALE_CANCEL_PENDING", source)
         self.assertNotRegex(source, r"function\s+quarterlyV2\s*\(")
         self.assertIn("handler === 'monthlyV2' || handler === 'quarterlyV2'", source)
 

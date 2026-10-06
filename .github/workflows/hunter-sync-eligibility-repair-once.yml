@@ -1,0 +1,32 @@
+name: Hunter synchronization eligibility repair once
+
+on:
+  push:
+    branches: [main]
+    paths: ['.repair-trigger/hunter-sync-eligibility-20261007']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hunter-sync-eligibility-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+      - run: python -m unittest discover -s tests -p 'test_sync_eligibility.py'
+      - name: Correct eligibility with CAS and reversible receipt
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+          HUNTER_BRIDGE_ATTEMPTS: '3'
+          HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '90'
+        run: python -u cloudrun/repair-sync-eligibility.py --apply

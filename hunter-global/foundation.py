@@ -160,9 +160,15 @@ def append_daily_date(drive: Drive, market: str, date: str, securities: list[dic
                 "no_op_reason": "NO_TARGETS"}
     from concurrent.futures import ThreadPoolExecutor
     def history_start(security):
-        return (last[security["security_id"]] or
-                (security.get("listing_date") if security.get("listing_date_verified") else None) or
-                "1970-01-01")
+        stored = last[security["security_id"]]
+        if stored:
+            return stored
+        # A newly discovered symbol has no stored bar. Bootstrap the same
+        # history window as BASE, not its entire lifetime since Unix epoch.
+        # FULL_HISTORY is defined below as 501 bars, not unlimited history.
+        floor = min(base_calendar) if base_calendar else date
+        listing = security.get("listing_date") if security.get("listing_date_verified") else None
+        return max(floor, listing) if listing else floor
     calendar = closed_dates_since(market, min(map(history_start, target))) if target else []
     calendar = sorted(set(base_calendar + calendar))
     if date not in calendar:

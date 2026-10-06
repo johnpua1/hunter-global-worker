@@ -21,6 +21,23 @@ US_URLS = {
 HK_URL = "https://www.hkex.com.hk/eng/services/trading/securities/securitieslists/ListOfSecurities.xlsx"
 
 
+def us_exclusion(name):
+    """Apply the existing common-share policy with real regex word boundaries."""
+    if re.search(
+        r"\bWARRANTS?\b|\bPREFERRED\b|\bPREFERENCE\b|\bPREF\b|\bPFD\b|"
+        r"\bRIGHTS?\b|\bUNITS?\b|\bREIT\b|\bFUND\b|"
+        r"\bSENIOR NOTES\b|\bSUBORDINATED NOTES\b|\bNOTES DUE\b|"
+        r"\bDEBENTURES?\b|\bMORTGAGE BONDS?\b|\bTRUST PREFERRED\b",
+        name, re.I,
+    ):
+        return "EXCLUDED_NON_COMMON"
+    if (re.search(r"\bSPAC\b", name, re.I) or
+            (re.search(r"\bACQUISITION\b", name, re.I) and
+             re.search(r"\b(CLASS A|ORDINARY SHARES?|COMMON STOCK)\b", name, re.I))):
+        return "EXCLUDED_SPAC"
+    return None
+
+
 def source_bytes(market):
     urls = US_URLS if market == "US" else {"ListOfSecurities.xlsx": HK_URL}
     return {name: retry_http(requests.Session(), "GET", url,
@@ -38,17 +55,8 @@ def parse_us(sources):
                                   delimiter="|"):
             ticker = row.get("Symbol") or row.get("ACT Symbol")
             name = row.get("Security Name", "")
-            non_common = re.search(
-                r"\\bWARRANTS?\\b|\\bPREFERRED\\b|\\bPREFERENCE\\b|\\bPREF\\b|\\bPFD\\b|"
-                r"\\bRIGHTS?\\b|\\bUNITS?\\b|\\bREIT\\b|\\bFUND\\b|"
-                r"\\bSENIOR NOTES\\b|\\bSUBORDINATED NOTES\\b|\\bNOTES DUE\\b|"
-                r"\\bDEBENTURES?\\b|\\bMORTGAGE BONDS?\\b|\\bTRUST PREFERRED\\b",
-                name, re.I)
-            spac = (re.search(r"\\bSPAC\\b", name, re.I) or
-                    (re.search(r"\\bACQUISITION\\b", name, re.I) and
-                     re.search(r"\\b(CLASS A|ORDINARY SHARES?|COMMON STOCK)\\b", name, re.I)))
             if (not ticker or row.get("ETF") != "N" or row.get("Test Issue") != "N"
-                    or non_common or spac):
+                    or us_exclusion(name)):
                 continue
             exchange = "NASDAQ" if filename.startswith("nasdaq") else {
                 "N": "NYSE", "A": "NYSE_AMERICAN", "P": "NYSE_ARCA"}.get(row.get("Exchange"))
@@ -159,10 +167,10 @@ def refresh(drive: Drive, market: str):
                                "category": "IDENTITY_REVIEW", "problem": "NAME_CHANGED",
                                "status": "OPEN", "recorded_at_myt": now_myt()})
                 continue
-            next_status = ("QUARANTINED_DATA_GAP"
-                           if sec.get("listing_status") == "QUARANTINED_DATA_GAP"
-                           else "ACTIVE")
-            sec.update({**entry, "listing_status": next_status, "identity_review": False,
+            # Presence in an exchange list proves listing, not eligibility or
+            # repaired data quality. Only the dedicated review may lift a gate.
+            next_status = sec.get("listing_status", "ACTIVE")
+            sec.update({**entry, "listing_status": next_status,
                         "official_listing_evidence": {
                             "source_hash": digest(sources["ListOfSecurities.xlsx" if market == "HK"
                                                          else "nasdaqlisted.txt" if entry["exchange"] == "NASDAQ"
@@ -175,7 +183,7 @@ def refresh(drive: Drive, market: str):
                 sec = by_isin[0]
                 old_ticker = sec["ticker"]
                 old_key = symbol_key(sec)
-                sec.update({**entry, "listing_status": "ACTIVE",
+                sec.update({**entry, "listing_status": sec.get("listing_status", "ACTIVE"),
                             "identity_proof": {"kind": "HK_ISIN_MATCH",
                                                "isin": entry["isin"],
                                                "old_ticker": old_ticker,

@@ -57,6 +57,13 @@ class ProductionTopologyLockTests(unittest.TestCase):
         self.assertIn("--op daily_trigger_status", source)
         self.assertIn("DAILY_TRIGGER_READBACK=PASS", source)
 
+    def test_daily_control_plane_entry_is_non_business_writer(self):
+        source = (ROOT / "cloudrun" / "deploy-daily-control-plane.sh").read_text(encoding="utf-8")
+        self.assertIn("SKIP_MONTHLY_DEPLOY=1", source)
+        self.assertIn("deploy-monthly-full.sh", source)
+        self.assertNotIn("hunter-daily-safety-net", source)
+        self.assertNotIn("gcloud run jobs execute", source)
+
     def test_runner_has_monthly_not_quarterly(self):
         source = (ROOT / "hunter-global" / "runner.py").read_text(encoding="utf-8")
         self.assertIn('"monthly"', source)

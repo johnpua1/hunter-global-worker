@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections import defaultdict
 
 from runner import Drive, compact, digest, load_market, now_myt, parse_lines_gz, map_drive_reads
 from foundation import current_universe, daily_segments
 from analytics import compose, excursions, indicators, split_adjust
+LOG = logging.getLogger("hunter")
 
 
 def calculate_anchors(rows, anchors):
@@ -58,6 +60,7 @@ def read_files(drive: Drive, market: str, folder: str, suffix):
 
 
 def build(drive: Drive, market: str, date: str):
+    LOG.info("DERIVED_STAGE market=%s date=%s stage=load_inputs", market, date)
     state = load_market(drive, market)
     universe = current_universe(drive, market)
     workers = max(1, min(6, int(os.getenv("DERIVED_READ_WORKERS", "4"))))
@@ -82,7 +85,9 @@ def build(drive: Drive, market: str, date: str):
                 daily[row["security_id"]].append(row)
 
     patches = defaultdict(list)
+    LOG.info("DERIVED_STAGE market=%s date=%s stage=patch_inventory", market, date)
     patch_paths = read_files(drive, market, "REPAIR_PATCH", ".json")
+    LOG.info("DERIVED_STAGE market=%s date=%s stage=patch_reads files=%d", market, date, len(patch_paths))
 
     for payload in map_drive_reads(drive, read_json, patch_paths, workers):
         items = payload.get("items") if isinstance(payload, dict) else None
@@ -126,8 +131,12 @@ def build(drive: Drive, market: str, date: str):
         return out
 
     batches = range(1, state.checkpoint["total_batches"] + 1)
-    for part in map_drive_reads(drive, process_base_batch, batches, workers):
+    LOG.info("DERIVED_STAGE market=%s date=%s stage=base_reads batches=%d",
+             market, date, state.checkpoint["total_batches"])
+    for number, part in enumerate(map_drive_reads(drive, process_base_batch, batches, workers), 1):
         derived.extend(part)
+        LOG.info("DERIVED_BATCH market=%s date=%s completed=%d total=%d",
+                 market, date, number, state.checkpoint["total_batches"])
     for security in universe[len(state.securities):]:
         if security.get("listing_status", "ACTIVE") != "ACTIVE":
             continue
@@ -161,6 +170,7 @@ def build(drive: Drive, market: str, date: str):
     # No benchmark is built or assumed. Relative strength stays null until
     # the user supplies an explicit benchmark list.
     folder = f"{market}/DERIVED/{date}"
+    LOG.info("DERIVED_STAGE market=%s date=%s stage=write_results rows=%d", market, date, len(derived))
     for offset in range(0, len(derived), 250):
         path = f"{folder}/batch-{offset // 250 + 1:04d}.json"
         payload = compact({"market": market, "as_of": date,

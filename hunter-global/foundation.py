@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import os
+import time
 from collections import defaultdict
 from runner import (Drive, MARKETS, compact, digest, fetch_security, lines_gz,
                     load_market, now_myt, parse_lines_gz, closed_dates_since,
@@ -11,6 +13,7 @@ from runner import (Drive, MARKETS, compact, digest, fetch_security, lines_gz,
 
 
 DAILY_SEGMENT_SUFFIXES = (".ndjson.gz", ".ndjson.gzip")
+LOG = logging.getLogger("hunter")
 
 
 def is_daily_segment(name: str) -> bool:
@@ -174,9 +177,15 @@ def append_daily_date(drive: Drive, market: str, date: str, securities: list[dic
     if date not in calendar:
         calendar.append(date)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = list(pool.map(lambda s: fetch_security(
+        results = []
+        LOG.info("SYNC_STAGE market=%s date=%s stage=fetch targets=%d", market, date, len(target))
+        for result in pool.map(lambda s: fetch_security(
             s, [d for d in calendar if (last[s["security_id"]] or "0000") < d <= date],
-            date, daily=True), target))
+            date, daily=True), target):
+            results.append(result)
+            if len(results) % 100 == 0 or len(results) == len(target):
+                LOG.info("SYNC_FETCH_PROGRESS market=%s date=%s completed=%d total=%d",
+                         market, date, len(results), len(target))
     # Count bars already stored for this date from either immutable BASE or DAILY.
     # A same-date NEW_LISTING bootstrap must not treat BASE-backed securities as missing.
     preexisting_today = sum(
@@ -262,11 +271,17 @@ def append_daily_date(drive: Drive, market: str, date: str, securities: list[dic
 
 
 def run_daily(drive: Drive, market: str, workers: int):
+    started = time.monotonic()
+    LOG.info("SYNC_STAGE market=%s stage=load_base", market)
     base = load_market(drive, market)
     if len(base.checkpoint.get("verified_batches", {})) != base.checkpoint["total_batches"]:
         raise RuntimeError("BASE_NOT_VERIFIED:" + market)
+    LOG.info("SYNC_STAGE market=%s stage=current_universe", market)
     securities = current_universe(drive, market)
+    LOG.info("SYNC_STAGE market=%s stage=read_existing securities=%d", market, len(securities))
     last, keys = read_existing(drive, market, securities, base.checkpoint["as_of"])
+    LOG.info("SYNC_STAGE market=%s stage=inputs_ready keys=%d elapsed_seconds=%.1f",
+             market, len(keys), time.monotonic() - started)
     checkpoint = f"{market}/CONTROL/DAILY_CHECKPOINT.json"
     legacy = f"{market}/DAILY/CHECKPOINT.json"
     previous = (drive.json(checkpoint) if drive.file(checkpoint) else
@@ -274,6 +289,8 @@ def run_daily(drive: Drive, market: str, workers: int):
                 {"market": market, "last_completed_date": base.checkpoint["as_of"]})
     results = []
     dates = closed_dates_since(market, previous["last_completed_date"])
+    LOG.info("SYNC_DATES market=%s checkpoint=%s dates=%s", market,
+             previous["last_completed_date"], ",".join(dates))
     # Only ACTIVE new listings may require a same-date bootstrap when there is
     # no newly completed market session. Quarantined/excluded NEW_LISTING rows
     # must never force a weekend replay of the checkpoint date.
@@ -294,10 +311,12 @@ def run_daily(drive: Drive, market: str, workers: int):
         # appended rows; only advance the checkpoint after all work succeeds.
         update_new_listing_history(drive, market, keys)
         from derived import build
+        LOG.info("SYNC_STAGE market=%s date=%s stage=derived", market, date)
         build(drive, market, date)
         previous["last_completed_date"] = date
         previous["updated_at_myt"] = now_myt()
         drive.put(checkpoint, compact(previous))
+        LOG.info("SYNC_CHECKPOINT_COMMITTED market=%s date=%s", market, date)
     return results
 
 

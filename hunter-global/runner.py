@@ -174,7 +174,7 @@ class Drive:
                 if not all(field in result for field in required[op]):
                     raise ValueError("BRIDGE_RESPONSE_SHAPE:" + op + ":" + ",".join(sorted(result)))
                 return result
-            except (requests.RequestException, ValueError):
+            except (requests.RequestException, ValueError) as exc:
                 if attempt == attempts - 1:
                     raise
                 # A failed ContentService redirect can leave a stale pooled
@@ -183,6 +183,8 @@ class Drive:
                 # Apps Script /exec endpoint.
                 self.http.close()
                 self.http = requests.Session()
+                LOG.warning("BRIDGE_REQUEST_RETRY op=%s path=%s attempt=%d type=%s",
+                            op, fields.get("path", ""), attempt + 1, type(exc).__name__)
                 time.sleep(min(30, 2 ** min(attempt, 4) + random.random()))
         raise AssertionError("unreachable")
 
@@ -276,11 +278,26 @@ class Drive:
         return result["file"]
 
     def append(self, path: str, content: bytes, mime: str = "application/json"):
-        """Create a segment once; the bridge rejects equal-byte rewrites too."""
+        """Create once; reconcile an ambiguous response by exact-byte readback."""
         import base64
-        result = self._call("append", path=path.strip("/"),
-                            data_base64=base64.b64encode(content).decode("ascii"),
-                            sha256=digest(content), mime=mime)
+        try:
+            result = self._call("append", path=path.strip("/"),
+                                data_base64=base64.b64encode(content).decode("ascii"),
+                                sha256=digest(content), mime=mime)
+        except (requests.RequestException, ValueError, RuntimeError) as exc:
+            if isinstance(exc, RuntimeError) and str(exc) != "BRIDGE_APPEND_CONFLICT":
+                raise
+            # The original POST may have committed before its response timed
+            # out. Never overwrite or allocate another segment on this path.
+            try:
+                info = self.file(path)
+                identical = info is not None and digest(self.read(path)) == digest(content)
+            except (requests.RequestException, ValueError, RuntimeError):
+                identical = False
+            if not identical:
+                raise exc
+            LOG.info("APPEND_COMMIT_CONFIRMED path=%s", path)
+            return info
         if result["sha256"] != digest(content) or digest(self.read(path)) != digest(content):
             raise RuntimeError("APPEND_READBACK_MISMATCH:" + path)
         return result["file"]
@@ -878,6 +895,8 @@ def main():
             LOG.info("phase2 daily market=%s result=%s", market, run_phase2_daily(drive, market))
         else:
             LOG.warning("phase2 daily deferred until foundation completes market=%s", market)
+            raise RuntimeError("DAILY_INCOMPLETE:" + market + ":" +
+                               ",".join(sorted({item["status"] for item in result})))
 
 
 if __name__ == "__main__":

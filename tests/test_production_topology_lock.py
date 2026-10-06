@@ -64,6 +64,7 @@ class ProductionTopologyLockTests(unittest.TestCase):
         self.assertIn("DAILY_TRIGGER_ENFORCEMENT=PASS", source)
         self.assertIn("--op daily_trigger_status", source)
         self.assertIn("DAILY_TRIGGER_READBACK=PASS", source)
+        self.assertIn("guard-apps-script-governed.py", source)
 
     def test_daily_control_plane_entry_is_non_business_writer(self):
         source = (ROOT / "cloudrun" / "deploy-daily-control-plane.sh").read_text(encoding="utf-8")

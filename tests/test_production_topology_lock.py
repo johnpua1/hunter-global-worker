@@ -52,6 +52,10 @@ class ProductionTopologyLockTests(unittest.TestCase):
         self.assertIn("BRIDGE_SOURCE_GUARD=PASS", source)
         self.assertIn("hunterDailyWatchdog", source)
         self.assertIn("HUNTER_DAILY_STATE_V1_", source)
+        self.assertIn("--op enforce_daily_triggers", source)
+        self.assertIn("DAILY_TRIGGER_ENFORCEMENT=PASS", source)
+        self.assertIn("--op daily_trigger_status", source)
+        self.assertIn("DAILY_TRIGGER_READBACK=PASS", source)
 
     def test_runner_has_monthly_not_quarterly(self):
         source = (ROOT / "hunter-global" / "runner.py").read_text(encoding="utf-8")

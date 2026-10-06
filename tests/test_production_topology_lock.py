@@ -52,6 +52,8 @@ class ProductionTopologyLockTests(unittest.TestCase):
         self.assertNotIn("if (cloud.running)", watchdog)
         self.assertIn("op === 'daily_watchdog_once'", source)
         self.assertIn("DAILY_WATCHDOG_LEGACY_ONLY", source)
+        self.assertIn("STALE_CANCEL_ALREADY_TERMINAL", source)
+        self.assertIn("completed && completed.state === 'CONDITION_SUCCEEDED'", source)
         self.assertNotRegex(source, r"function\s+quarterlyV2\s*\(")
         self.assertIn("handler === 'monthlyV2' || handler === 'quarterlyV2'", source)
 

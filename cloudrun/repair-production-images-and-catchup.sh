@@ -23,7 +23,24 @@ gcloud builds submit "$ROOT" --tag "$IMAGE"   --project "$GCP_PROJECT_ID" --regi
 for job in hunter-us-daily hunter-hk-daily hunter-maintenance hunter-monthly-v2; do
   gcloud run jobs describe "$job" --region "$REGION"     --project "$GCP_PROJECT_ID" >/dev/null
   gcloud run jobs update "$job" --image "$IMAGE"     --region "$REGION" --project "$GCP_PROJECT_ID" >/dev/null
-  bound="$(gcloud run jobs describe "$job" --region "$REGION"     --project "$GCP_PROJECT_ID"     --format='value(template.template.containers[0].image)')"
+  job_json="$(gcloud run jobs describe "$job" --region "$REGION" --project "$GCP_PROJECT_ID" --format=json)"
+  bound="$(JOB_JSON="$job_json" python - <<'PY'
+import json, os
+doc=json.loads(os.environ["JOB_JSON"])
+images=[]
+def walk(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "image" and isinstance(item, str):
+                images.append(item)
+            walk(item)
+    elif isinstance(value, list):
+        for item in value:
+            walk(item)
+walk(doc)
+print(images[0] if images else "")
+PY
+)"
   case "$bound" in
     "$IMAGE"|"$IMAGE_BASE"@"sha256:"*) ;;
     *) echo "JOB_IMAGE_READBACK_FAILED:$job:$bound" >&2; exit 1 ;;

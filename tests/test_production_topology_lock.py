@@ -95,6 +95,9 @@ class ProductionTopologyLockTests(unittest.TestCase):
             self.assertIn(job, repair)
         self.assertIn("PRODUCTION_IMAGE_CLEANUP_GUARD=PASS", repair)
         self.assertIn("IMAGE_REBIND_AND_CATCHUP=PASS", repair)
+        self.assertIn("--format=json", repair)
+        self.assertIn("def walk(value):", repair)
+        self.assertNotIn("value(template.template.containers[0].image)", repair)
 
     def test_runner_has_monthly_not_quarterly(self):
         source = (ROOT / "hunter-global" / "runner.py").read_text(encoding="utf-8")

@@ -10,6 +10,7 @@ RUNNER_PATH = ROOT / "hunter-global" / "runner.py"
 sys.path.insert(0, str(RUNNER_PATH.parent))
 spec = importlib.util.spec_from_file_location("hunter_runner_bridge_test", RUNNER_PATH)
 runner = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = runner
 spec.loader.exec_module(runner)
 
 

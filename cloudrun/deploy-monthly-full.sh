@@ -170,19 +170,55 @@ if not ok:
 '
 echo "DAILY_TRIGGER_ENFORCEMENT=PASS"
 
-DAILY_TRIGGER_STATUS="$(BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" \
-  python "$ROOT/cloudrun/apps-script-post.py" --op daily_trigger_status --raw)"
-printf '%s\n' "$DAILY_TRIGGER_STATUS" | python -c '
+daily_trigger_readback_ok() {
+  local primary fallback
+  primary="$(BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" \
+    python "$ROOT/cloudrun/apps-script-post.py" --op daily_trigger_status --raw)" || return 1
+  if printf '%s\n' "$primary" | python -c '
 import json,sys
 d=json.load(sys.stdin)
 daily=d.get("daily") or {}
 counts=daily.get("counts") or {}
-if not (d.get("ok") is True and
-        counts.get("dailyUS")==1 and counts.get("dailyHK")==1 and
-        counts.get("hunterDailyWatchdog")==1):
-    raise SystemExit("DAILY_TRIGGER_READBACK_FAILED:" + json.dumps(d,sort_keys=True))
+raise SystemExit(0 if (d.get("ok") is True and
+                       counts.get("dailyUS")==1 and
+                       counts.get("dailyHK")==1 and
+                       counts.get("hunterDailyWatchdog")==1) else 1)
+'; then
+    DAILY_TRIGGER_STATUS="$primary"
+    return 0
+  fi
+
+  # Apps Script version propagation can briefly route one request to the
+  # previous deployment. topology_status exists in both generations, so use it
+  # as a compatibility readback, but only accept it when watchdog=1 proves the
+  # new Gateway is actually serving.
+  fallback="$(BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" \
+    python "$ROOT/cloudrun/apps-script-post.py" --op topology_status --raw)" || return 1
+  DAILY_TRIGGER_STATUS="$fallback"
+  printf '%s\n' "$fallback" | python -c '
+import json,sys
+d=json.load(sys.stdin)
+daily=d.get("daily") or {}
+counts=daily.get("counts") or {}
+raise SystemExit(0 if (d.get("ok") is True and
+                       counts.get("dailyUS")==1 and
+                       counts.get("dailyHK")==1 and
+                       counts.get("hunterDailyWatchdog")==1) else 1)
 '
-echo "DAILY_TRIGGER_READBACK=PASS"
+}
+
+DAILY_TRIGGER_STATUS=""
+for attempt in $(seq 1 12); do
+  if daily_trigger_readback_ok; then
+    echo "DAILY_TRIGGER_READBACK=PASS"
+    break
+  fi
+  if [[ "$attempt" -eq 12 ]]; then
+    echo "DAILY_TRIGGER_READBACK_FAILED_AFTER_PROPAGATION_WAIT:$DAILY_TRIGGER_STATUS" >&2
+    exit 1
+  fi
+  sleep 5
+done
 
 echo "BRIDGE_DEPLOYMENT=PASS"
 echo "BRIDGE_POST=PASS"

@@ -512,16 +512,97 @@ function inspectHunterJobs() {
           MAINT: hunterJobConfig_('MAINT'), MONTH: hunterJobConfig_('MONTH')};
 }
 
+function hunterDurationMs_(value, fallbackMs) {
+  var match = /^(\d+(?:\.\d+)?)s$/.exec(String(value || ''));
+  if (!match) return fallbackMs;
+  return Math.max(1000, Math.round(Number(match[1]) * 1000));
+}
+
+function hunterJobStaleAfterMs_(job) {
+  var doc = hunterCloudRequest_('get', hunterJobResource_(job), null);
+  var task = (((doc.template || {}).template || {}));
+  var timeoutMs = hunterDurationMs_(task.timeout, 60 * 60 * 1000);
+  // A Cloud Run execution that is still RUNNING after its configured task
+  // timeout plus 15 minutes is no longer allowed to block DAILY forever.
+  return timeoutMs + 15 * 60 * 1000;
+}
+
+function hunterExecutionAgeMs_(execution, now) {
+  var stamp = execution && (execution.startTime || execution.createTime);
+  if (!stamp) return null;
+  var started = new Date(stamp).getTime();
+  if (!Number.isFinite(started)) return null;
+  return Math.max(0, now.getTime() - started);
+}
+
+function hunterRunningSplit_(statusDoc, staleAfterMs, now) {
+  var fresh = [], stale = [];
+  ((statusDoc || {}).executions || []).forEach(function (execution) {
+    if (execution.status !== 'RUNNING') return;
+    var age = hunterExecutionAgeMs_(execution, now);
+    if (age != null && age > staleAfterMs) stale.push(execution);
+    else fresh.push(execution);
+  });
+  return {fresh: fresh, stale: stale};
+}
+
+function hunterCancelExecution_(execution) {
+  if (!execution || !execution.name) throw new Error('EXECUTION_NAME_MISSING');
+  return hunterCloudRequest_('post', execution.name + ':cancel', {});
+}
+
+function hunterRecoverStaleExecutions_(job, before) {
+  var staleAfterMs = hunterJobStaleAfterMs_(job);
+  var split = hunterRunningSplit_(before, staleAfterMs, new Date());
+  if (split.fresh.length) {
+    return {ready: false, reason: 'ALREADY_RUNNING', status: before,
+            fresh: split.fresh.length, stale: split.stale.length};
+  }
+  if (!split.stale.length) {
+    return {ready: true, recovered: false, status: before};
+  }
+
+  split.stale.forEach(function (execution) {
+    hunterCancelExecution_(execution);
+    console.log('STALE_EXECUTION_CANCEL_REQUESTED job=' + job +
+                ' execution=' + String(execution.name));
+  });
+
+  // Cancellation is asynchronous. Poll briefly; if Cloud Run has not yet
+  // acknowledged completion, fail closed and let the hourly watchdog retry.
+  var last = before;
+  for (var attempt = 0; attempt < 10; attempt++) {
+    Utilities.sleep(2000);
+    last = status(job);
+    var again = hunterRunningSplit_(last, staleAfterMs, new Date());
+    if (again.fresh.length) {
+      return {ready: false, reason: 'ALREADY_RUNNING_AFTER_STALE_CANCEL',
+              status: last, fresh: again.fresh.length, stale: again.stale.length};
+    }
+    if (!again.stale.length) {
+      return {ready: true, recovered: true, cancelled: split.stale.length,
+              status: last};
+    }
+  }
+  return {ready: false, reason: 'STALE_CANCEL_PENDING', status: last,
+          stale: split.stale.length};
+}
+
 function runHunterJob_(job) {
   var name = hunterJobName_(job);
   var before = status(name);
-  if (before.running) {
-    console.log('SKIP_ALREADY_RUNNING job=' + name);
-    return {ok: true, job: name, skipped: true, reason: 'ALREADY_RUNNING', status: before};
+  var recovery = hunterRecoverStaleExecutions_(name, before);
+  if (!recovery.ready) {
+    console.log('SKIP_' + recovery.reason + ' job=' + name);
+    return {ok: true, job: name, skipped: true, reason: recovery.reason,
+            status: recovery.status, stale: recovery.stale || 0};
   }
   var op = hunterCloudRequest_('post', hunterJobResource_(name) + ':run', {});
-  console.log('STARTED job=' + name + ' operation=' + String(op.name || 'UNKNOWN'));
-  return {ok: true, job: name, skipped: false, operation: op.name || null};
+  console.log('STARTED job=' + name + ' operation=' + String(op.name || 'UNKNOWN') +
+              ' stale_recovered=' + String(Boolean(recovery.recovered)));
+  return {ok: true, job: name, skipped: false, operation: op.name || null,
+          stale_recovered: Boolean(recovery.recovered),
+          stale_cancelled: recovery.cancelled || 0};
 }
 
 function runUS() { return runHunterJob_('US'); }

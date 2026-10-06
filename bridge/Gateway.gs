@@ -520,8 +520,177 @@ function runUS() { return runHunterJob_('US'); }
 function runHK() { return runHunterJob_('HK'); }
 function runMonthly() { return runHunterJob_('MONTH'); }
 
-function dailyUS() { return runUS(); }
-function dailyHK() { return runHK(); }
+var HUNTER_DAILY_WATCHDOG_MAX_ATTEMPTS = 3;
+var HUNTER_DAILY_WATCHDOG_COOLDOWN_MS = 45 * 60 * 1000;
+var HUNTER_DAILY_STATE_PREFIX = 'HUNTER_DAILY_STATE_V1_';
+
+function hunterDailyMytDate_(dateObj) {
+  return Utilities.formatDate(dateObj || new Date(), 'Asia/Kuala_Lumpur', 'yyyy-MM-dd');
+}
+
+function hunterDailyStateKey_(market, dateText) {
+  return HUNTER_DAILY_STATE_PREFIX + String(market).toUpperCase() + '_' +
+      String(dateText).replace(/-/g, '');
+}
+
+function hunterDailyLoadState_(props, market, dateText) {
+  var raw = props.getProperty(hunterDailyStateKey_(market, dateText));
+  if (!raw) return {market: market, myt_date: dateText, watchdog_attempts: 0};
+  try {
+    var state = JSON.parse(raw);
+    if (state.market !== market || state.myt_date !== dateText)
+      throw new Error('DAILY_STATE_IDENTITY_MISMATCH');
+    state.watchdog_attempts = Number(state.watchdog_attempts || 0);
+    return state;
+  } catch (err) {
+    throw new Error('DAILY_STATE_INVALID:' + market + ':' + dateText);
+  }
+}
+
+function hunterDailySaveState_(props, state) {
+  state.updated_at_myt = Utilities.formatDate(
+      new Date(), 'Asia/Kuala_Lumpur', "yyyy-MM-dd'T'HH:mm:ssXXX");
+  props.setProperty(hunterDailyStateKey_(state.market, state.myt_date),
+                    JSON.stringify(state));
+}
+
+function hunterDailyExecutionMytDate_(execution) {
+  var stamp = execution && (execution.startTime || execution.createTime || execution.endTime);
+  if (!stamp) return null;
+  try {
+    return Utilities.formatDate(new Date(stamp), 'Asia/Kuala_Lumpur', 'yyyy-MM-dd');
+  } catch (err) {
+    return null;
+  }
+}
+
+function hunterDailyLatestToday_(statusDoc, dateText) {
+  var rows = (statusDoc && statusDoc.executions) || [];
+  for (var i = 0; i < rows.length; i++) {
+    if (hunterDailyExecutionMytDate_(rows[i]) === dateText) return rows[i];
+  }
+  return null;
+}
+
+function hunterDailyWindowClosed_(market, now) {
+  var hh = Number(Utilities.formatDate(now, 'Asia/Kuala_Lumpur', 'HH'));
+  var mm = Number(Utilities.formatDate(now, 'Asia/Kuala_Lumpur', 'mm'));
+  var minutes = hh * 60 + mm;
+  return minutes >= (market === 'US' ? 7 * 60 : 19 * 60);
+}
+
+function hunterDailyPrimary_(market) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var now = new Date();
+    var dateText = hunterDailyMytDate_(now);
+    var props = PropertiesService.getScriptProperties();
+    var state = hunterDailyLoadState_(props, market, dateText);
+    state.primary_seen_at_myt = Utilities.formatDate(
+        now, 'Asia/Kuala_Lumpur', "yyyy-MM-dd'T'HH:mm:ssXXX");
+    try {
+      var result = runHunterJob_(market);
+      state.primary_result = result.skipped ? String(result.reason || 'SKIPPED') : 'DISPATCHED';
+      state.primary_operation = result.operation || null;
+      hunterDailySaveState_(props, state);
+      return result;
+    } catch (err) {
+      state.primary_result = 'ERROR';
+      state.primary_error = String(err.message || err).slice(0, 160);
+      hunterDailySaveState_(props, state);
+      throw err;
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function dailyUS() { return hunterDailyPrimary_('US'); }
+function dailyHK() { return hunterDailyPrimary_('HK'); }
+
+function hunterDailyWatchdogMarket_(market) {
+  var now = new Date();
+  var dateText = hunterDailyMytDate_(now);
+  if (!hunterDailyWindowClosed_(market, now))
+    return {market: market, action: 'BEFORE_WINDOW_END'};
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var state = hunterDailyLoadState_(props, market, dateText);
+    var cloud;
+    try {
+      cloud = status(market);
+    } catch (err) {
+      state.watchdog_last_result = 'STATUS_UNREADABLE';
+      state.watchdog_last_error = String(err.message || err).slice(0, 160);
+      hunterDailySaveState_(props, state);
+      return {market: market, action: 'STATUS_UNREADABLE'};
+    }
+
+    if (cloud.running) {
+      state.watchdog_last_result = 'ALREADY_RUNNING';
+      hunterDailySaveState_(props, state);
+      return {market: market, action: 'ALREADY_RUNNING'};
+    }
+
+    var latestToday = hunterDailyLatestToday_(cloud, dateText);
+    if (latestToday && latestToday.status === 'SUCCEEDED') {
+      state.watchdog_last_result = 'TODAY_EXECUTION_SUCCEEDED';
+      state.last_success_execution = latestToday.name || null;
+      hunterDailySaveState_(props, state);
+      return {market: market, action: 'TODAY_EXECUTION_SUCCEEDED'};
+    }
+
+    if (state.watchdog_attempts >= HUNTER_DAILY_WATCHDOG_MAX_ATTEMPTS) {
+      state.watchdog_last_result = 'ATTEMPTS_EXHAUSTED';
+      hunterDailySaveState_(props, state);
+      return {market: market, action: 'ATTEMPTS_EXHAUSTED',
+              attempts: state.watchdog_attempts};
+    }
+
+    if (state.watchdog_last_dispatch_epoch_ms &&
+        now.getTime() - Number(state.watchdog_last_dispatch_epoch_ms) <
+            HUNTER_DAILY_WATCHDOG_COOLDOWN_MS) {
+      return {market: market, action: 'COOLDOWN',
+              attempts: state.watchdog_attempts};
+    }
+
+    state.watchdog_attempts += 1;
+    state.watchdog_last_dispatch_epoch_ms = now.getTime();
+    state.watchdog_last_dispatch_at_myt = Utilities.formatDate(
+        now, 'Asia/Kuala_Lumpur', "yyyy-MM-dd'T'HH:mm:ssXXX");
+    hunterDailySaveState_(props, state);
+
+    try {
+      var launched = runHunterJob_(market);
+      state.watchdog_last_result = launched.skipped ?
+          String(launched.reason || 'SKIPPED') : 'DISPATCHED';
+      state.watchdog_last_operation = launched.operation || null;
+      hunterDailySaveState_(props, state);
+      return {market: market, action: state.watchdog_last_result,
+              attempts: state.watchdog_attempts,
+              operation: state.watchdog_last_operation};
+    } catch (err2) {
+      state.watchdog_last_result = 'DISPATCH_ERROR';
+      state.watchdog_last_error = String(err2.message || err2).slice(0, 160);
+      hunterDailySaveState_(props, state);
+      return {market: market, action: 'DISPATCH_ERROR',
+              attempts: state.watchdog_attempts};
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function hunterDailyWatchdog() {
+  return {
+    US: hunterDailyWatchdogMarket_('US'),
+    HK: hunterDailyWatchdogMarket_('HK')
+  };
+}
 
 function installHunterDailyTriggers() {
   ScriptApp.requireScopes(ScriptApp.AuthMode.FULL, [
@@ -532,19 +701,22 @@ function installHunterDailyTriggers() {
   ]);
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
     var handler = trigger.getHandlerFunction();
-    if (handler === 'dailyUS' || handler === 'dailyHK') ScriptApp.deleteTrigger(trigger);
+    if (handler === 'dailyUS' || handler === 'dailyHK' ||
+        handler === 'hunterDailyWatchdog') ScriptApp.deleteTrigger(trigger);
   });
   ScriptApp.newTrigger('dailyUS').timeBased().atHour(6).everyDays(1)
       .inTimezone('Asia/Kuala_Lumpur').create();
   ScriptApp.newTrigger('dailyHK').timeBased().atHour(18).everyDays(1)
       .inTimezone('Asia/Kuala_Lumpur').create();
+  ScriptApp.newTrigger('hunterDailyWatchdog').timeBased().everyHours(1).create();
   return listHunterDailyTriggers();
 }
 
 function listHunterDailyTriggers() {
   var rows = ScriptApp.getProjectTriggers().filter(function (trigger) {
     var handler = trigger.getHandlerFunction();
-    return handler === 'dailyUS' || handler === 'dailyHK';
+    return handler === 'dailyUS' || handler === 'dailyHK' ||
+        handler === 'hunterDailyWatchdog';
   }).map(function (trigger) {
     return {
       handler: trigger.getHandlerFunction(),
@@ -553,7 +725,7 @@ function listHunterDailyTriggers() {
       source: String(trigger.getTriggerSource())
     };
   });
-  var counts = {dailyUS: 0, dailyHK: 0};
+  var counts = {dailyUS: 0, dailyHK: 0, hunterDailyWatchdog: 0};
   rows.forEach(function (x) { counts[x.handler] = (counts[x.handler] || 0) + 1; });
   return {timeZone: Session.getScriptTimeZone(), counts: counts, triggers: rows};
 }
@@ -621,7 +793,8 @@ function installAndVerify() {
   var okHK = hunterLatestOk_(states.HK);
   var okTriggers = finalTriggers.timeZone === 'Asia/Kuala_Lumpur' &&
       finalTriggers.counts.dailyUS === 1 &&
-      finalTriggers.counts.dailyHK === 1;
+      finalTriggers.counts.dailyHK === 1 &&
+      finalTriggers.counts.hunterDailyWatchdog === 1;
 
   Logger.log((okUS ? '✓' : '✗') + ' hunter-us-daily：' +
              (states.US.executions.length ? states.US.executions[0].status : 'NO_EXECUTION'));
@@ -629,7 +802,8 @@ function installAndVerify() {
              (states.HK.executions.length ? states.HK.executions[0].status : 'NO_EXECUTION'));
   Logger.log((okTriggers ? '✓' : '✗') +
              ' 触发器：dailyUS=' + finalTriggers.counts.dailyUS +
-             '，dailyHK=' + finalTriggers.counts.dailyHK);
+             '，dailyHK=' + finalTriggers.counts.dailyHK +
+             '，watchdog=' + finalTriggers.counts.hunterDailyWatchdog);
 
   // Apps Script does not expose the randomized exact minute chosen by atHour().
   // Therefore report the truthful next execution window, not a fabricated minute.

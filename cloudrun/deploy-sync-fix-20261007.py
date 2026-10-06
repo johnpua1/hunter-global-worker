@@ -25,11 +25,14 @@ def main():
     base = 'us-central1-docker.pkg.dev/rgs-hunter-global/hunter-worker/runner'
     image = base + ':' + sha
     approved = {'760c2808f786df376575839ac0bb4334989955fe',
+                '6cbba32e4754868e93da9f00ca19371e92a5e8e5',
                 '859323f28a76057b51c5e807feec2db6a9aa3b5f',
                 '64dbb5ede192a66f4fd16eebef1f33521f07fb7b', sha}
     jobs = {'hunter-us-daily': ['--mode', 'auto', '--market', 'US'],
             'hunter-hk-daily': ['--mode', 'auto', '--market', 'HK'],
             'hunter-maintenance': ['/app/maintenance.py']}
+    if '--daily-only' in sys.argv:
+        jobs.pop('hunter-maintenance')
     work = pathlib.Path(tempfile.mkdtemp(prefix='hunter-sync-repair-'))
     for job, args in jobs.items():
         before = recovery.gc('run', 'jobs', 'describe', job)
@@ -38,6 +41,29 @@ def main():
                 rows[0].get('image') not in {base + ':' + s for s in approved}):
             raise RuntimeError('UNEXPECTED_JOB_CONFIGURATION:' + job)
         (work / (job + '.before.json')).write_text(json.dumps(before))
+    if '--daily-only' in sys.argv:
+        # Verify the exact URLs/credentials currently configured in Cloud Run,
+        # not the GitHub diagnostic secret. Values stay in this process only.
+        sys.path.insert(0, str(ROOT / 'hunter-global'))
+        from runner import Drive
+        original_env = dict(os.environ)
+        try:
+            for job in jobs:
+                before = json.loads((work / (job + '.before.json')).read_text())
+                values = {v['name']: v.get('value') for v in list(recovery.containers(before))[0].get('env', [])}
+                for name in ('APPS_SCRIPT_WEBAPP_URL', 'APPS_SCRIPT_SHARED_KEY'):
+                    if not values.get(name):
+                        raise RuntimeError('PREFLIGHT_ENV_NOT_LITERAL:' + job + ':' + name)
+                    os.environ[name] = values[name]
+                os.environ.update(HUNTER_BRIDGE_READ_TIMEOUT_SECONDS='90', HUNTER_BRIDGE_ATTEMPTS='2')
+                market = job.split('-')[1].upper()
+                doc = Drive().json(market + '/CURRENT_UNIVERSE.json')
+                if doc.get('market') != market or not doc.get('securities'):
+                    raise RuntimeError('PREFLIGHT_CONTENT_INVALID:' + market)
+                print('PRODUCTION_CONFIG_FULL_READ_PASS=' + market + ':' + str(len(doc['securities'])), flush=True)
+        finally:
+            os.environ.clear()
+            os.environ.update(original_env)
     config = work / 'build.json'
     config.write_text(json.dumps({'steps': [{'name': 'gcr.io/cloud-builders/docker',
         'args': ['build', '--build-arg', 'HUNTER_SOURCE_SHA=' + sha, '-t', image, '.']}],

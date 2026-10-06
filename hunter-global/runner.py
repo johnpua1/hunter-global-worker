@@ -18,6 +18,8 @@ import random
 import sys
 import time
 import threading
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -31,6 +33,34 @@ UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
 TZ = ZoneInfo("Asia/Kuala_Lumpur")
 LOG = logging.getLogger("hunter")
 MARKETS = ("US", "HK")
+
+
+class _NoBridgeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def bridge_read_response(url: str, payload: dict, timeout: float) -> dict:
+    """Independent, read-only retry after an unusable ContentService response."""
+    if payload.get("op") not in {"file", "list", "read", "read_chunk"}:
+        raise ValueError("BRIDGE_READ_FALLBACK_WRITE_DENIED")
+    opener = urllib.request.build_opener(_NoBridgeRedirect)
+    request = urllib.request.Request(url, data=compact(payload), method="POST",
+                                     headers={"Content-Type": "application/json"})
+    for _ in range(4):
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8-sig"))
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (301, 302, 303, 307, 308):
+                raise
+            location = exc.headers.get("Location", "")
+            target = urlsplit(location)
+            if target.scheme != "https" or target.hostname != "script.googleusercontent.com":
+                raise ValueError("BRIDGE_READ_FALLBACK_REDIRECT_DENIED") from None
+            # The response hop is a GET without credentials or the POST body.
+            request = urllib.request.Request(location, method="GET")
+    raise ValueError("BRIDGE_READ_FALLBACK_REDIRECT_LIMIT")
 
 
 def digest(data: bytes) -> str:
@@ -155,7 +185,19 @@ class Drive:
                         raise ValueError("BRIDGE_UNEXPECTED_REDIRECT:" + op)
                     response = self.http.get(location, timeout=timeout, allow_redirects=False)
                 response.raise_for_status()
-                result = response.json()
+                try:
+                    result = response.json()
+                except ValueError:
+                    if op not in {"file", "list", "read", "read_chunk"}:
+                        raise
+                    LOG.warning("BRIDGE_NON_JSON op=%s path=%s status=%s bytes=%d",
+                                op, fields.get("path", ""), response.status_code,
+                                len(response.content))
+                    try:
+                        result = bridge_read_response(self.url, request, timeout)
+                    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+                        raise ValueError("BRIDGE_READ_FALLBACK_FAILED:" + type(exc).__name__) from None
+                    LOG.info("BRIDGE_READ_FALLBACK_RESPONSE op=%s path=%s", op, fields.get("path", ""))
                 if not isinstance(result, dict):
                     raise ValueError("BRIDGE_RESPONSE_NOT_OBJECT:" + op)
                 # Apps Script can rarely return the doGet health payload to a

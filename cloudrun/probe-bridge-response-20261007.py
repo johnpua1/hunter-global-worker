@@ -13,7 +13,7 @@ import requests
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "hunter-global"))
-from runner import Drive
+from runner import Drive, parse_lines_gz
 
 
 class TraceSession(requests.Session):
@@ -40,6 +40,28 @@ def main():
     os.environ.update(HUNTER_BRIDGE_ATTEMPTS="1", HUNTER_BRIDGE_READ_TIMEOUT_SECONDS="45",
                       HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS="45")
     reader = Reader()
+    if '--verify-fix' in sys.argv:
+        for market, path in [('US', 'US/CURRENT_UNIVERSE.json'),
+                             ('HK', 'HK/BASE/batch-0001.ndjson.gz')]:
+            start = time.monotonic()
+            raw = reader.read(path)
+            count = len(json.loads(raw)['securities']) if market == 'US' else len(parse_lines_gz(raw))
+            print(json.dumps({'event': 'FULL_READ_PASS', 'market': market,
+                              'count': count, 'seconds': round(time.monotonic() - start, 2)}), flush=True)
+        class NonJSONResponse:
+            status_code = 200
+            content = b''
+            def raise_for_status(self): pass
+            def json(self): raise ValueError('SIMULATED_NON_JSON_RESPONSE')
+        class NonJSONSession:
+            def post(self, *args, **kwargs): return NonJSONResponse()
+        reader.http = NonJSONSession()
+        start = time.monotonic()
+        doc = reader.json('US/CURRENT_UNIVERSE.json')
+        print(json.dumps({'event': 'REAL_READ_WITH_INJECTED_PRIMARY_RESPONSE_FAILURE_PASS',
+                          'securities': len(doc['securities']),
+                          'seconds': round(time.monotonic() - start, 2)}), flush=True)
+        return
     reader.http = TraceSession()
     path = "US/CURRENT_UNIVERSE.json"
     for length in (524288, 64000):

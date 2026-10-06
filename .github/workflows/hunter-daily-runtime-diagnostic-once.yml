@@ -68,4 +68,4 @@ jobs:
           APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
         run: |
           python -m pip install --quiet requests
-          python -u cloudrun/probe-bridge-response-20261007.py
+          python -u cloudrun/probe-bridge-response-20261007.py --verify-fix

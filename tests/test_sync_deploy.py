@@ -1,11 +1,40 @@
 import importlib.util
 import pathlib
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'hunter-global'))
 
 
 class SyncDeploymentTests(unittest.TestCase):
+    def test_daily_preflight_blocks_deploy_when_real_configuration_reads_wrong_market(self):
+        path = pathlib.Path(__file__).resolve().parents[1] / 'cloudrun/deploy-sync-fix-20261007.py'
+        spec = importlib.util.spec_from_file_location('sync_preflight_test', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sha = 'a' * 40
+        base = 'us-central1-docker.pkg.dev/rgs-hunter-global/hunter-worker/runner:'
+        def gc(*args):
+            self.assertEqual(args[:3], ('run', 'jobs', 'describe'))
+            market = args[3].split('-')[1].upper()
+            return {'containers': [{'image': base + '6cbba32e4754868e93da9f00ca19371e92a5e8e5',
+                    'args': ['--mode', 'auto', '--market', market], 'env': [
+                        {'name': 'APPS_SCRIPT_WEBAPP_URL', 'value': 'test-url'},
+                        {'name': 'APPS_SCRIPT_SHARED_KEY', 'value': 'test-key'}]}]}
+        with tempfile.TemporaryDirectory() as work, \
+                patch.object(module.sys, 'argv', ['deploy', sha, '--daily-only']), \
+                patch.object(module.subprocess, 'check_output', return_value=sha), \
+                patch.object(module.subprocess, 'run') as build, \
+                patch.object(module.tempfile, 'mkdtemp', return_value=work), \
+                patch.object(module.os, 'umask'), \
+                patch.object(module.recovery, 'gc', side_effect=gc), \
+                patch('runner.Drive') as drive:
+            drive.return_value.json.return_value = {'market': 'HK', 'securities': [{}]}
+            with self.assertRaisesRegex(RuntimeError, 'PREFLIGHT_CONTENT_INVALID:US'):
+                module.main()
+            build.assert_not_called()
+
     def test_updates_writer_and_consumers_but_does_not_duplicate_active_execution(self):
         path = pathlib.Path(__file__).resolve().parents[1] / 'cloudrun/deploy-sync-fix-20261007.py'
         spec = importlib.util.spec_from_file_location('sync_deploy_test', path)

@@ -16,6 +16,55 @@ spec.loader.exec_module(runner)
 
 
 class DriveReadResilienceTests(unittest.TestCase):
+    def test_content_response_redirect_is_explicit_and_key_is_not_resent(self):
+        drive = runner.Drive.__new__(runner.Drive)
+        drive.url, drive.key = 'https://script.google.com/macros/s/test/exec', 'test-key'
+        drive.http = mock.Mock()
+        target = 'https://script.googleusercontent.com/macros/echo?one-time=response'
+        drive.http.post.return_value.status_code = 302
+        drive.http.post.return_value.headers = {'Location': target}
+        drive.http.get.return_value.json.return_value = {'ok': True, 'file': None}
+        self.assertEqual(drive._call('file', path='US/file.json'), {'ok': True, 'file': None})
+        self.assertFalse(drive.http.post.call_args.kwargs['allow_redirects'])
+        drive.http.get.assert_called_once_with(target, timeout=120.0, allow_redirects=False)
+
+    def test_non_content_redirect_is_not_followed(self):
+        drive = runner.Drive.__new__(runner.Drive)
+        drive.url, drive.key, drive.http = 'url', 'key', mock.Mock()
+        drive.http.post.return_value.status_code = 302
+        drive.http.post.return_value.headers = {'Location': 'https://script.google.com/macros/s/test/exec'}
+        with self.assertRaisesRegex(ValueError, 'BRIDGE_UNEXPECTED_REDIRECT'):
+            drive._call('file', path='US/file.json', _attempts=1)
+        drive.http.get.assert_not_called()
+
+    def test_timeout_reduces_chunk_and_resumes_exact_offset(self):
+        payload = b'abcdef' * 100000
+        drive = runner.Drive.__new__(runner.Drive)
+        drive.file = lambda path: {'size': len(payload)}
+        calls = []
+        def call(op, **fields):
+            offset, length = fields['offset'], fields['length']
+            calls.append((offset, length))
+            if length > 262144:
+                raise runner.requests.ReadTimeout('oversized response')
+            part = payload[offset:offset + length]
+            return {'data_base64': base64.b64encode(part).decode(), 'sha256': runner.digest(part),
+                    'offset': offset, 'size': len(payload), 'length': len(part),
+                    'eof': offset + len(part) == len(payload)}
+        drive._call = call
+        self.assertEqual(drive.read('HK/BASE/batch-0001.ndjson.gz'), payload)
+        self.assertEqual(calls[:2], [(0, 524288), (0, 262144)])
+        self.assertTrue(all(length <= 262144 for _, length in calls[1:]))
+
+    def test_zero_length_chunk_cannot_loop_forever(self):
+        drive = runner.Drive.__new__(runner.Drive)
+        drive.file = lambda path: {'size': 600000}
+        drive._call = mock.Mock(return_value={'offset': 0, 'size': 600000, 'data_base64': '',
+                                             'length': 0, 'sha256': runner.digest(b''), 'eof': False})
+        with self.assertRaisesRegex(RuntimeError, 'CHUNK_SHA_MISMATCH'):
+            drive.read('US/file.json')
+        drive._call.assert_called_once()
+
     def test_reader_preserves_connection_without_environment_lookup(self):
         drive = runner.Drive.__new__(runner.Drive)
         drive.url, drive.key = "configured-url", "configured-key"

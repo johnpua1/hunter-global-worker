@@ -20,7 +20,7 @@ import time
 import threading
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo
 
 import requests
@@ -133,18 +133,31 @@ class Drive:
                 time.sleep(min(30, 2 ** attempt + random.random()))
         raise AssertionError("unreachable")
 
-    def _call(self, op: str, **fields) -> dict:
+    def _call(self, op: str, *, _attempts: int | None = None, **fields) -> dict:
         request = {"op": op, "key": self.key, **fields}
-        attempts = max(1, int(os.getenv("HUNTER_BRIDGE_ATTEMPTS", "8")))
+        attempts = max(1, _attempts if _attempts is not None else
+                       int(os.getenv("HUNTER_BRIDGE_ATTEMPTS", "8")))
         for attempt in range(attempts):
             try:
                 if op in ("read", "read_chunk"):
                     timeout = float(os.getenv("HUNTER_BRIDGE_READ_TIMEOUT_SECONDS", "30"))
                 else:
                     timeout = float(os.getenv("HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS", "120"))
-                response = self.http.post(self.url, json=request, timeout=timeout)
+                # ContentService redirects to a one-time response resource.
+                # Handle that hop explicitly, as the control-plane client does;
+                # never silently turn an intermediate /exec redirect into GET.
+                response = self.http.post(self.url, json=request, timeout=timeout,
+                                          allow_redirects=False)
+                if response.status_code in (301, 302, 303, 307, 308):
+                    location = response.headers.get("Location", "")
+                    target = urlsplit(location)
+                    if target.scheme != "https" or target.hostname != "script.googleusercontent.com":
+                        raise ValueError("BRIDGE_UNEXPECTED_REDIRECT:" + op)
+                    response = self.http.get(location, timeout=timeout, allow_redirects=False)
                 response.raise_for_status()
                 result = response.json()
+                if not isinstance(result, dict):
+                    raise ValueError("BRIDGE_RESPONSE_NOT_OBJECT:" + op)
                 # Apps Script can rarely return the doGet health payload to a
                 # POST route during a transient redirect/session anomaly. Never
                 # accept it as operation data; reset the HTTP session and retry.
@@ -202,12 +215,23 @@ class Drive:
             offset = 0
             chunks = []
             while offset < expected:
-                result = self._call("read_chunk", path=clean, offset=offset,
-                                    length=min(chunk_size, expected - offset))
+                try:
+                    result = self._call("read_chunk", path=clean, offset=offset,
+                                        length=min(chunk_size, expected - offset), _attempts=2)
+                except (requests.RequestException, ValueError):
+                    # Retry the same offset with a smaller response, instead of
+                    # repeatedly requesting a chunk that the Bridge cannot serve.
+                    if chunk_size <= 64_000:
+                        raise
+                    chunk_size = max(64_000, chunk_size // 2)
+                    LOG.warning("BRIDGE_READ_REDUCE_CHUNK path=%s offset=%d bytes=%d",
+                                clean, offset, chunk_size)
+                    continue
                 if int(result["offset"]) != offset or int(result["size"]) != expected:
                     raise RuntimeError("BRIDGE_READ_CHUNK_POSITION_MISMATCH:" + path)
                 data = base64.b64decode(result["data_base64"], validate=True)
-                if len(data) != int(result["length"]) or digest(data) != result["sha256"]:
+                if (not data or len(data) > min(chunk_size, expected - offset) or
+                        len(data) != int(result["length"]) or digest(data) != result["sha256"]):
                     raise RuntimeError("BRIDGE_READ_CHUNK_SHA_MISMATCH:" + path)
                 chunks.append(data)
                 offset += len(data)

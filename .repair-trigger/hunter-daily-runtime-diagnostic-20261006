@@ -1,2 +1,2 @@
-run=2026-10-07T05:45+08:00-sync-input-probe
+run=2026-10-07T05:55+08:00-verify-sync-read-transport
 scope=read-only-runtime-diagnostic

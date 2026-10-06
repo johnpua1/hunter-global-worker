@@ -10,6 +10,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "hunter-glo
 from runner import Drive, load_market, parse_lines_gz
 from foundation import current_universe, read_existing
 from derived import read_files
+from production_guard import safe_error_summary
+failures = 0
 
 
 class ReadOnlyDrive(Drive):
@@ -32,6 +34,7 @@ class ReadOnlyDrive(Drive):
                               "offset": fields.get("offset"),
                               "seconds": round(time.monotonic() - start, 2),
                               "type": type(exc).__name__,
+                              "reason": safe_error_summary(exc),
                               "http": getattr(response, "status_code", None)}), flush=True)
             raise
         elapsed = time.monotonic() - start
@@ -43,6 +46,7 @@ class ReadOnlyDrive(Drive):
 
 
 def stage(market, name, fn):
+    global failures
     start = time.monotonic()
     print(json.dumps({"event": "START", "market": market, "stage": name}), flush=True)
     try:
@@ -51,6 +55,7 @@ def stage(market, name, fn):
                           "seconds": round(time.monotonic() - start, 2),
                           "result": result}), flush=True)
     except Exception as exc:
+        failures += 1
         print(json.dumps({"event": "FAIL", "market": market, "stage": name,
                           "seconds": round(time.monotonic() - start, 2),
                           "type": type(exc).__name__}), flush=True)
@@ -62,6 +67,13 @@ if __name__ == "__main__":
                       HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS="25",
                       DAILY_READ_WORKERS="2", DERIVED_READ_WORKERS="2")
     drive = ReadOnlyDrive()
+    if "--focus" in sys.argv:
+        stage("US", "current_universe_full_read", lambda: {
+            "securities": len(drive.json("US/CURRENT_UNIVERSE.json")["securities"])})
+        stage("HK", "derived_base_sample", lambda: {
+            "rows": len(parse_lines_gz(drive.read("HK/BASE/batch-0001.ndjson.gz")))})
+        print(json.dumps({"event": "FINISHED", "calls": dict(drive.calls)}), flush=True)
+        sys.exit(bool(failures))
     for market in ("US", "HK"):
         def daily_input():
             base = load_market(drive, market)
@@ -83,3 +95,4 @@ if __name__ == "__main__":
             return {"patch_files": len(paths), "sample_bytes": sizes}
         stage(market, "derived_patch_inventory", patch_sample)
     print(json.dumps({"event": "FINISHED", "calls": dict(drive.calls)}), flush=True)
+    sys.exit(bool(failures))

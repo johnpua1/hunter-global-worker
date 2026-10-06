@@ -128,4 +128,10 @@ deploy_job() {
 deploy_job hunter-us-daily "$US_RUNTIME_SA" "$US_RUNTIME_KEY" --args='--mode,auto,--market,US'
 deploy_job hunter-hk-daily "$HK_RUNTIME_SA" "$HK_RUNTIME_KEY" --args='--mode,auto,--market,HK'
 deploy_job hunter-maintenance "$MAINT_RUNTIME_SA" "$MAINT_RUNTIME_KEY" --command=python --args=/app/maintenance.py
-printf 'STAGED_IMAGE=%s\nIAM_MODE=%s\nSCHEDULERS=NOT_CREATED\n' "$IMAGE" "$IAM_MODE"
+
+IMAGE_BASE="${REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/hunter-worker/runner"
+for stable_tag in prod-us prod-hk prod-maint; do
+  gcloud artifacts docker tags add "$IMAGE" "${IMAGE_BASE}:${stable_tag}" --project "$GCP_PROJECT_ID" --quiet >/dev/null
+done
+
+printf 'STAGED_IMAGE=%s\nIAM_MODE=%s\nPRODUCTION_TAGS=prod-us,prod-hk,prod-maint\nSCHEDULERS=NOT_CREATED\n' "$IMAGE" "$IAM_MODE"

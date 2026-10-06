@@ -21,7 +21,7 @@ jobs:
       - name: Bridge authorization tests
         run: node tests/test_bridge.js
       - name: Shell syntax
-        run: bash -n cloudrun/deploy.sh cloudrun/deploy-monthly.sh cloudrun/deploy-monthly-full.sh cloudrun/deploy-daily-control-plane.sh cloudrun/enforce-four-job-topology.sh cloudrun/enforce-four-job-topology-full.sh cloudrun/schedule.sh cloudrun/phase1.sh cloudrun/iam-audit.sh
+        run: bash -n cloudrun/deploy.sh cloudrun/deploy-monthly.sh cloudrun/deploy-monthly-full.sh cloudrun/deploy-daily-control-plane.sh cloudrun/repair-production-images-and-catchup.sh cloudrun/enforce-four-job-topology.sh cloudrun/enforce-four-job-topology-full.sh cloudrun/schedule.sh cloudrun/phase1.sh cloudrun/iam-audit.sh
       - name: Literal escape guard
         run: |
           ! grep -R -nF '\\nexport ' cloudrun/*.sh

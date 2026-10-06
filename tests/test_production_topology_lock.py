@@ -75,6 +75,27 @@ class ProductionTopologyLockTests(unittest.TestCase):
         self.assertNotIn("hunter-daily-safety-net", source)
         self.assertNotIn("gcloud run jobs execute", source)
 
+    def test_production_images_are_cleanup_protected(self):
+        cleanup = json.loads((ROOT / "cloudrun" / "artifact-cleanup.json").read_text(encoding="utf-8"))
+        policies = {row["name"]: row for row in cleanup}
+        keep = policies["keep-production-tags"]
+        self.assertEqual(keep["action"]["type"], "Keep")
+        self.assertEqual(keep["condition"]["tagState"], "tagged")
+        self.assertIn("prod-", keep["condition"]["tagPrefixes"])
+
+        daily = (ROOT / "cloudrun" / "deploy.sh").read_text(encoding="utf-8")
+        for tag in ("prod-us", "prod-hk", "prod-maint"):
+            self.assertIn(tag, daily)
+
+        monthly = (ROOT / "cloudrun" / "deploy-monthly.sh").read_text(encoding="utf-8")
+        self.assertIn("prod-monthly", monthly)
+
+        repair = (ROOT / "cloudrun" / "repair-production-images-and-catchup.sh").read_text(encoding="utf-8")
+        for job in ("hunter-us-daily", "hunter-hk-daily", "hunter-maintenance", "hunter-monthly-v2"):
+            self.assertIn(job, repair)
+        self.assertIn("PRODUCTION_IMAGE_CLEANUP_GUARD=PASS", repair)
+        self.assertIn("IMAGE_REBIND_AND_CATCHUP=PASS", repair)
+
     def test_runner_has_monthly_not_quarterly(self):
         source = (ROOT / "hunter-global" / "runner.py").read_text(encoding="utf-8")
         self.assertIn('"monthly"', source)

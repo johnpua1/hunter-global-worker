@@ -98,6 +98,10 @@ if gcloud run jobs describe "$JOB" --region "$REGION" --project "$GCP_PROJECT_ID
 fi
 gcloud run jobs "$ACTION" "$JOB"   --image "$IMAGE" --region "$REGION" --project "$GCP_PROJECT_ID"   --service-account "$SA" --cpu 2 --memory 8Gi --tasks 1   --task-timeout 120m --max-retries 0   --set-env-vars 'HUNTER_ACTIONS_CUTOVER=CONFIRMED,FETCH_WORKERS=10'   --set-secrets "APPS_SCRIPT_WEBAPP_URL=${URL_SECRET}:latest,APPS_SCRIPT_SHARED_KEY=${MONTH_KEY_SECRET}:latest"   --args='--mode,monthly'
 
+IMAGE_BASE="${REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/hunter-worker/runner"
+gcloud artifacts docker tags add "$IMAGE" "${IMAGE_BASE}:prod-monthly" --project "$GCP_PROJECT_ID" --quiet >/dev/null
+echo "MONTHLY_PRODUCTION_TAG=prod-monthly"
+
 # Immediate real-data regression. This execution overrides args only and leaves
 # the production job definition unchanged. ACTIVE_POINTER is committed by the
 # monthly worker only after all G178 checks pass.

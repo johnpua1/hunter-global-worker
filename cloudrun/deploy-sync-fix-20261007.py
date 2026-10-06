@@ -14,6 +14,57 @@ recovery = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(recovery)
 
 
+def secret_aliases(doc):
+    """Collect Cloud Run v1 secret lookup names without reading any values."""
+    aliases = {}
+    def visit(node):
+        if isinstance(node, dict):
+            annotation = node.get('annotations', {}).get('run.googleapis.com/secrets', '')
+            for item in annotation.split(','):
+                if item.strip():
+                    alias, separator, resource = item.strip().partition(':')
+                    if not separator or (alias in aliases and aliases[alias] != resource):
+                        raise RuntimeError('PREFLIGHT_SECRET_ALIAS_INVALID')
+                    aliases[alias] = resource
+            for value in node.values():
+                visit(value)
+        elif isinstance(node, list):
+            for value in node:
+                visit(value)
+    visit(doc)
+    return aliases
+
+
+def preflight_env_value(doc, entry, name):
+    """Resolve only an existing binding; never persist or log the secret value."""
+    if isinstance(entry.get('value'), str) and entry['value']:
+        return entry['value']
+    ref = (entry.get('valueFrom', {}).get('secretKeyRef') or
+           entry.get('valueSource', {}).get('secretKeyRef') or {})
+    secret = ref.get('name') or ref.get('secret', '')
+    version = ref.get('key') or ref.get('version', '')
+    if not secret or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', version):
+        raise RuntimeError('PREFLIGHT_ENV_BINDING_INVALID:' + name)
+    secret = secret_aliases(doc).get(secret, secret)
+    match = re.fullmatch(r'projects/([A-Za-z0-9_-]+)/secrets/([A-Za-z0-9_-]+)', secret)
+    if match:
+        project, secret = match.groups()
+    elif re.fullmatch(r'[A-Za-z0-9_-]+', secret):
+        project = recovery.PROJECT
+    else:
+        raise RuntimeError('PREFLIGHT_SECRET_REFERENCE_INVALID:' + name)
+    try:
+        result = subprocess.run(['gcloud', 'secrets', 'versions', 'access', version,
+                                 '--secret=' + secret, '--project=' + project, '--quiet'],
+                                capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        raise RuntimeError('PREFLIGHT_SECRET_ACCESS_FAILED:' + name) from None
+    if result.returncode or not result.stdout:
+        raise RuntimeError('PREFLIGHT_SECRET_ACCESS_FAILED:' + name)
+    # Keep the exact payload. gcloud streams the stored bytes without a newline.
+    return result.stdout
+
+
 def main():
     os.umask(0o077)
     sha = sys.argv[1]
@@ -50,11 +101,9 @@ def main():
         try:
             for job in jobs:
                 before = json.loads((work / (job + '.before.json')).read_text())
-                values = {v['name']: v.get('value') for v in list(recovery.containers(before))[0].get('env', [])}
+                values = {v['name']: v for v in list(recovery.containers(before))[0].get('env', [])}
                 for name in ('APPS_SCRIPT_WEBAPP_URL', 'APPS_SCRIPT_SHARED_KEY'):
-                    if not values.get(name):
-                        raise RuntimeError('PREFLIGHT_ENV_NOT_LITERAL:' + job + ':' + name)
-                    os.environ[name] = values[name]
+                    os.environ[name] = preflight_env_value(before, values.get(name, {}), name)
                 os.environ.update(HUNTER_BRIDGE_READ_TIMEOUT_SECONDS='90', HUNTER_BRIDGE_ATTEMPTS='2')
                 market = job.split('-')[1].upper()
                 doc = Drive().json(market + '/CURRENT_UNIVERSE.json')

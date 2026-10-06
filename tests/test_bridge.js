@@ -7,6 +7,10 @@ const source = fs.readFileSync('bridge/Gateway.gs', 'utf8');
 const singletonFunctions = [
   'doGet',
   'doPost',
+  'installHunterDailyTriggers',
+  'dailyUS',
+  'dailyHK',
+  'hunterDailyWatchdog',
   'installFirstMonthlyTrigger',
   'monthlyV2',
   'listMonthlyTrigger',
@@ -17,6 +21,12 @@ for (const name of singletonFunctions) {
 }
 assert.equal(source.includes('2027Q1'), false);
 assert.equal(source.includes('2027, 1, 5'), false);
+assert.equal(source.includes("HUNTER_DAILY_STATE_V1_"), true);
+assert.equal(source.includes("HUNTER_DAILY_WATCHDOG_MAX_ATTEMPTS = 3"), true);
+assert.equal(source.includes("handler === 'hunterDailyWatchdog'"), true);
+assert.equal(source.includes("newTrigger('hunterDailyWatchdog').timeBased().everyHours(1)"), true);
+assert.equal(source.includes("TODAY_EXECUTION_SUCCEEDED"), true);
+assert.equal(source.includes("STATUS_UNREADABLE"), true);
 const context = vm.createContext({});
 vm.runInContext(source, context);
 const scopedProps = {getProperty(name) {

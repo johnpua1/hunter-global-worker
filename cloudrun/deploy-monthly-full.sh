@@ -68,6 +68,26 @@ cp "$ROOT/bridge/appsscript.json" "$SCRIPT_DIR/appsscript.json"
 # but fail closed if any basename still exists with more than one script
 # extension before push.
 python "$ROOT/cloudrun/normalize-clasp-dir.py" "$SCRIPT_DIR"
+python - "$ROOT/bridge/Gateway.gs" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+required = (
+    "function hunterDailyWatchdog()",
+    "HUNTER_DAILY_STATE_V1_",
+    "HUNTER_DAILY_WATCHDOG_MAX_ATTEMPTS = 3",
+    "newTrigger('hunterDailyWatchdog').timeBased().everyHours(1)",
+    "function dailyUS()",
+    "function dailyHK()",
+    "function runHunterJob_(",
+)
+missing = [item for item in required if item not in source]
+if missing:
+    raise SystemExit("BRIDGE_SOURCE_GUARD_FAILED:" + ",".join(missing))
+print("BRIDGE_SOURCE_GUARD=PASS")
+PY
+
 npx -y "$CLASP" push --force
 
 # Resolve the actual versioned deployment from clasp itself. Ignore @HEAD

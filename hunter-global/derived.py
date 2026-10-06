@@ -33,45 +33,80 @@ def read_files(drive: Drive, market: str, folder: str, suffix):
         if "FOLDER_NOT_FOUND" in str(exc):
             return []
         raise
+
     paths = []
+    shards = []
+
     for entry in entries:
         name = entry["name"]
         if entry.get("mimeType") == "application/vnd.google-apps.folder":
-            shard = f"{base}/{name}"
-            for child in drive.list(shard):
-                if child["name"].endswith(suffixes):
-                    paths.append(f"{shard}/{child['name']}")
+            shards.append(f"{base}/{name}")
         elif name.endswith(suffixes):
             paths.append(f"{base}/{name}")
+
+    def list_shard(shard):
+        reader = Drive()
+        return [
+            f"{shard}/{child['name']}"
+            for child in reader.list(shard)
+            if child["name"].endswith(suffixes)
+        ]
+
+    workers = max(1, min(6, int(os.getenv("DERIVED_READ_WORKERS", "4"))))
+    if shards:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for result in pool.map(list_shard, shards):
+                paths.extend(result)
+
     return paths
 
 
 def build(drive: Drive, market: str, date: str):
     state = load_market(drive, market)
     universe = current_universe(drive, market)
+    workers = max(1, min(6, int(os.getenv("DERIVED_READ_WORKERS", "4"))))
+
+    def read_gzip(path):
+        reader = Drive()
+        return parse_lines_gz(reader.read(path))
+
+    def read_json(path):
+        reader = Drive()
+        return reader.json(path)
+
     daily = defaultdict(list)
+    daily_paths = []
     for day in daily_segments(drive, market):
-        for path in read_files(drive, market, "DAILY/" + day, (".ndjson.gz", ".ndjson.gzip")):
-            for row in parse_lines_gz(drive.read(path)):
+        daily_paths.extend(
+            read_files(drive, market, "DAILY/" + day,
+                       (".ndjson.gz", ".ndjson.gzip"))
+        )
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for rows in pool.map(read_gzip, daily_paths):
+            for row in rows:
                 if row.get("trade_date", row["date"]) <= date:
                     daily[row["security_id"]].append(row)
+
     patches = defaultdict(list)
-    for path in read_files(drive, market, "REPAIR_PATCH", ".json"):
-        payload = drive.json(path)
-        # Phase 1 repair evidence may be stored either as one accepted patch
-        # per file or as a bulk sidecar containing multiple accepted patches.
-        # Bulk storage changes only write granularity; each item keeps the same
-        # patch schema/evidence and compose semantics.
-        items = payload.get("items") if isinstance(payload, dict) else None
-        if isinstance(items, list):
-            for patch in items:
-                if patch.get("security_id"):
-                    patches[patch["security_id"]].append(patch)
-        elif isinstance(payload, dict) and payload.get("security_id"):
-            patches[payload["security_id"]].append(payload)
+    patch_paths = read_files(drive, market, "REPAIR_PATCH", ".json")
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for payload in pool.map(read_json, patch_paths):
+            items = payload.get("items") if isinstance(payload, dict) else None
+            if isinstance(items, list):
+                for patch in items:
+                    if patch.get("security_id"):
+                        patches[patch["security_id"]].append(patch)
+            elif isinstance(payload, dict) and payload.get("security_id"):
+                patches[payload["security_id"]].append(payload)
+
     events = []
-    for path in read_files(drive, market, "CORPORATE_ACTIONS", ".json"):
-        events.extend(drive.json(path))
+    action_paths = read_files(drive, market, "CORPORATE_ACTIONS", ".json")
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for payload in pool.map(read_json, action_paths):
+            events.extend(payload)
     anchors_path = f"{market}/SIGNAL_ANCHORS.json"
     anchor_rows = drive.json(anchors_path) if drive.file(anchors_path) else []
     anchors = defaultdict(list)
@@ -100,7 +135,6 @@ def build(drive: Drive, market: str, date: str):
                 out.append(indicator)
         return out
 
-    workers = max(1, min(6, int(os.getenv("DERIVED_READ_WORKERS", "4"))))
     batches = range(1, state.checkpoint["total_batches"] + 1)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for part in pool.map(process_base_batch, batches):

@@ -192,35 +192,43 @@ def append_daily_date(drive: Drive, market: str, date: str, securities: list[dic
                 repairs.append({"market": market, "security_id": sid, "category": flag,
                                 "trade_date": date, "problem": reason or flag,
                                 "status": "OPEN", "recorded_at_myt": now_myt()})
-    rows.sort(key=lambda r: (r["security_id"], r["date"]))
+    rows.sort(key=lambda r: (r["date"], r["security_id"]))
     append_queue(drive, repairs)
     flag_five_day_failures(drive, market, date, securities, calendar)
     if rows:
-        folder = f"{market}/DAILY/{date}"
-        try:
-            names = {x["name"] for x in drive.list(folder)}
-        except RuntimeError as exc:
-            if "FOLDER_NOT_FOUND" not in str(exc):
-                raise
-            names = set()
-        number = 1
-        while any(f"part-{number:04d}{suffix}" in names
-                  for suffix in DAILY_SEGMENT_SUFFIXES):
-            number += 1
-        payload = lines_gz(rows)
-        # Prefer the canonical .ndjson.gz name. Older live Apps Script Bridge
-        # deployments can reject a valid gzip before parsing because ungzip()
-        # receives a Blob without gzip MIME metadata. On that exact legacy
-        # error only, fall back to an alternate append-only suffix that bypasses
-        # the broken validator while preserving gzip bytes and Drive immutability.
-        primary = f"{folder}/part-{number:04d}.ndjson.gz"
-        try:
-            drive.append(primary, payload, "application/x-gzip")
-        except RuntimeError as exc:
-            if "BRIDGE_DAILY_PAYLOAD_INVALID" not in str(exc):
-                raise
-            fallback = f"{folder}/part-{number:04d}.ndjson.gzip"
-            drive.append(fallback, payload, "application/x-gzip")
+        # A catch-up fetch can return several historical sessions for one
+        # security. Bridge identity guards require every payload row to match
+        # the DAILY/<trade_date> folder that contains it. Partition by the
+        # row's own date instead of placing all recovered rows under the
+        # current checkpoint date.
+        rows_by_date = defaultdict(list)
+        for row in rows:
+            rows_by_date[row["date"]].append(row)
+        for row_date in sorted(rows_by_date):
+            folder = f"{market}/DAILY/{row_date}"
+            try:
+                names = {x["name"] for x in drive.list(folder)}
+            except RuntimeError as exc:
+                if "FOLDER_NOT_FOUND" not in str(exc):
+                    raise
+                names = set()
+            number = 1
+            while any(f"part-{number:04d}{suffix}" in names
+                      for suffix in DAILY_SEGMENT_SUFFIXES):
+                number += 1
+            payload = lines_gz(rows_by_date[row_date])
+            # Prefer the canonical .ndjson.gz name. Older live Apps Script
+            # Bridge deployments can reject a valid gzip before parsing because
+            # ungzip() receives a Blob without gzip MIME metadata. On that exact
+            # legacy error only, fall back to an alternate append-only suffix.
+            primary = f"{folder}/part-{number:04d}.ndjson.gz"
+            try:
+                drive.append(primary, payload, "application/x-gzip")
+            except RuntimeError as exc:
+                if "BRIDGE_DAILY_PAYLOAD_INVALID" not in str(exc):
+                    raise
+                fallback = f"{folder}/part-{number:04d}.ndjson.gzip"
+                drive.append(fallback, payload, "application/x-gzip")
     if events:
         unique = { (e["security_id"], e["effective_date"], e["factor"]): e
                    for e in events }

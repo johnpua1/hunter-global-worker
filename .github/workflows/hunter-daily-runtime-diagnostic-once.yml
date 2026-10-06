@@ -12,7 +12,7 @@ permissions:
 jobs:
   diagnose:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -62,3 +62,10 @@ jobs:
                   print(f"{market}_{date}_RUN_EXISTS=" + str(bool(run.get("file"))).lower())
                   print(f"{market}_{date}_RANK_EXISTS=" + str(bool(rank.get("file"))).lower())
           PY
+      - name: Probe synchronization inputs without writes
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python -m pip install --quiet requests
+          python -u cloudrun/diagnose-sync-readonly.py

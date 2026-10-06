@@ -27,6 +27,8 @@ assert.equal(source.includes("handler === 'hunterDailyWatchdog'"), true);
 assert.equal(source.includes("newTrigger('hunterDailyWatchdog').timeBased().everyHours(1)"), true);
 assert.equal(source.includes("TODAY_EXECUTION_SUCCEEDED"), true);
 assert.equal(source.includes("STATUS_UNREADABLE"), true);
+assert.equal(source.includes("op === 'enforce_daily_triggers'"), true);
+assert.equal(source.includes("op === 'daily_trigger_status'"), true);
 const context = vm.createContext({});
 vm.runInContext(source, context);
 const scopedProps = {getProperty(name) {

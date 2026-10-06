@@ -150,6 +150,37 @@ if ! bridge_ready; then
   fi
 fi
 
+DAILY_TRIGGER_JSON="$(BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" \
+  python "$ROOT/cloudrun/apps-script-post.py" --op enforce_daily_triggers --raw)"
+printf '%s\n' "$DAILY_TRIGGER_JSON" | python -c '
+import json,sys
+d=json.load(sys.stdin)
+daily=d.get("daily") or {}
+counts=daily.get("counts") or {}
+tz=daily.get("timeZone")
+ok=(d.get("ok") is True and
+    counts.get("dailyUS")==1 and counts.get("dailyHK")==1 and
+    counts.get("hunterDailyWatchdog")==1 and
+    tz in ("Asia/Kuala_Lumpur","Asia/Singapore"))
+if not ok:
+    raise SystemExit("DAILY_TRIGGER_VERIFY_FAILED:" + json.dumps(d,sort_keys=True))
+'
+echo "DAILY_TRIGGER_ENFORCEMENT=PASS"
+
+DAILY_TRIGGER_STATUS="$(BRIDGE_URL="$BRIDGE_URL" LEGACY_KEY="$LEGACY_KEY" \
+  python "$ROOT/cloudrun/apps-script-post.py" --op daily_trigger_status --raw)"
+printf '%s\n' "$DAILY_TRIGGER_STATUS" | python -c '
+import json,sys
+d=json.load(sys.stdin)
+daily=d.get("daily") or {}
+counts=daily.get("counts") or {}
+if not (d.get("ok") is True and
+        counts.get("dailyUS")==1 and counts.get("dailyHK")==1 and
+        counts.get("hunterDailyWatchdog")==1):
+    raise SystemExit("DAILY_TRIGGER_READBACK_FAILED:" + json.dumps(d,sort_keys=True))
+'
+echo "DAILY_TRIGGER_READBACK=PASS"
+
 echo "BRIDGE_DEPLOYMENT=PASS"
 echo "BRIDGE_POST=PASS"
 unset LEGACY_KEY

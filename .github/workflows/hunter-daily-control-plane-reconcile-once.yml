@@ -1,0 +1,69 @@
+name: Hunter daily control-plane reconcile once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.repair-trigger/hunter-daily-control-plane-20261006'
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Reconcile Apps Script DAILY triggers only
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import importlib.util, json, os, pathlib
+
+          path = pathlib.Path("cloudrun/apps-script-post.py")
+          spec = importlib.util.spec_from_file_location("apps_script_post", path)
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+
+          url = os.environ["APPS_SCRIPT_WEBAPP_URL"]
+          key = os.environ["APPS_SCRIPT_SHARED_KEY"]
+
+          def call(op):
+              result = mod.post_json(url, {"op": op, "key": key})
+              print(op + "=" + json.dumps(result, ensure_ascii=False, sort_keys=True))
+              return result
+
+          before = call("daily_trigger_status")
+          modern = bool(before.get("ok"))
+          if not modern:
+              before = call("topology_status")
+              if not before.get("ok"):
+                  raise SystemExit("CONTROL_PLANE_STATUS_UNREADABLE")
+
+          repaired = call("enforce_daily_triggers" if modern else "enforce_topology_triggers")
+          if not repaired.get("ok"):
+              raise SystemExit("CONTROL_PLANE_RECONCILE_FAILED:" + str(repaired.get("error")))
+
+          after = call("daily_trigger_status" if modern else "topology_status")
+          daily = after.get("daily") or {}
+          counts = daily.get("counts") or {}
+          if counts.get("dailyUS") != 1 or counts.get("dailyHK") != 1:
+              raise SystemExit("PRIMARY_TRIGGER_READBACK_FAILED:" + json.dumps(counts, sort_keys=True))
+
+          wd = counts.get("hunterDailyWatchdog")
+          print("DAILY_PRIMARY_TRIGGERS=PASS")
+          if modern:
+              if wd != 1:
+                  raise SystemExit("WATCHDOG_TRIGGER_READBACK_FAILED:" + json.dumps(counts, sort_keys=True))
+              print("DAILY_WATCHDOG=PASS")
+              print("CONTROL_PLANE_GENERATION=WATCHDOG_CAPABLE")
+          else:
+              print("DAILY_WATCHDOG=NOT_AVAILABLE_IN_DEPLOYED_GATEWAY")
+              print("CONTROL_PLANE_GENERATION=LEGACY_GATEWAY_DEPLOY_REQUIRED")
+          PY

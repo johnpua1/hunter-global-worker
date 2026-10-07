@@ -324,9 +324,8 @@ def update_history(market,old_calendar,new_calendar,history,today,refresh_eps=Tr
 def compose_prices(drive,market,wanted,daily_rows=None):
     from runner import load_market, map_drive_reads
     state=load_market(drive,market);base=defaultdict(list);patches=defaultdict(list);daily=defaultdict(list)
-    # HK recovery uses the same bounded reader pool already configured for
-    # derived data. US behavior is unchanged by this targeted deployment.
-    workers=max(1,min(6,int(os.getenv('DERIVED_READ_WORKERS','4')))) if market=='HK' else 1
+    # Recovery uses the existing bounded derived reader pool for both markets.
+    workers=max(1,min(6,int(os.getenv('DERIVED_READ_WORKERS','4'))))
     def read_gzip(reader,path):
         return parse_lines_gz(reader.read(path))
     def read_json(reader,path):
@@ -416,12 +415,8 @@ def daily(drive:Drive,market:str,daily_rows=None):
     if target or dropped:
         new_rows,errors,ambiguous=(sector_us(active,index,target,prior_rows) if market=='US'
                                    else sector_hk(active,index,target,prior_rows))
-        if market=='HK' and errors:
-            raise RuntimeError('PHASE2_HK_SECTOR_SOURCE_INCOMPLETE')
         if errors:
-            new_rows=[{**prior_rows[row['security_id']], 'source_refresh_error':errors}
-                      if row.get('source') is None and row['security_id'] in prior_rows and prior_rows[row['security_id']].get('source')
-                      else row for row in new_rows]
+            raise RuntimeError('PHASE2_' + market + '_SECTOR_SOURCE_INCOMPLETE')
         if full:prior['rows']=new_rows
         else:prior['rows']=[row for row in prior['rows'] if row['security_id'] in active]+new_rows
         prior.update(fetched_at=dt.datetime.now(MYT).isoformat(timespec='seconds'),source_errors=errors,identity_ambiguous=ambiguous)
@@ -430,10 +425,10 @@ def daily(drive:Drive,market:str,daily_rows=None):
     LOG.info('PHASE2_STAGE market=%s stage=calendar',market)
     calendar_raw=drive.read(calendar_path);old_calendar=json.loads(calendar_raw)
     new_calendar=us_calendar(active,index,today) if market=='US' else hk_calendar(active,index,today)
-    # Do not replace the last usable HK calendar/history with an empty failed
+    # Do not replace the last usable calendar/history with an empty failed
     # source response, or publish a successful Phase 2 receipt for that attempt.
-    if market=='HK' and new_calendar.get('source_errors'):
-        raise RuntimeError('PHASE2_HK_CALENDAR_SOURCE_INCOMPLETE')
+    if new_calendar.get('source_errors'):
+        raise RuntimeError('PHASE2_' + market + '_CALENDAR_SOURCE_INCOMPLETE')
     LOG.info('PHASE2_STAGE market=%s stage=history',market)
     history_raw=drive.read(history_path);history=unpack(json.loads(history_raw),active)
     history=update_history(market,old_calendar,new_calendar,history,today)

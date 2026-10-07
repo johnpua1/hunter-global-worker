@@ -863,9 +863,9 @@ def _enforce_cloud_run_topology(args) -> None:
 
 
 def validate_phase2_resume(drive, market, date):
-    """An explicit HK recovery may only enrich an already committed daily close."""
-    if market != "HK" or not date:
-        raise RuntimeError("PHASE2_RESUME_REQUIRES_HK_AND_DATE")
+    """An explicit recovery may only enrich an already committed daily close."""
+    if market not in MARKETS or not date:
+        raise RuntimeError("PHASE2_RESUME_REQUIRES_MARKET_AND_DATE")
     # Reject malformed dates before any writes or source requests.
     dt.date.fromisoformat(date)
     checkpoint = drive.json(f"{market}/CONTROL/DAILY_CHECKPOINT.json")
@@ -914,14 +914,14 @@ def main():
     parser.add_argument("--market", choices=MARKETS, help="Run one market in an independent job")
     parser.add_argument("--as-of", help="Explicit historical close for calendar/derived")
     parser.add_argument("--phase2-only", action="store_true",
-                        help="Resume HK Phase 2 for an already committed --as-of close")
+                        help="Resume Phase 2 for an already committed --as-of close")
     parser.add_argument("--snapshot", help="Use an existing immutable SNAPSHOT_<date> for monthly mode")
     parser.add_argument("--validation", action="store_true",
                         help="Require exact G178 validation statuses in monthly mode")
     args = parser.parse_args()
     _enforce_cloud_run_topology(args)
-    if args.phase2_only and (args.mode != "auto" or args.market != "HK" or not args.as_of):
-        raise RuntimeError("PHASE2_RESUME_REQUIRES_AUTO_HK_AND_DATE")
+    if args.phase2_only and (args.mode != "auto" or args.market not in MARKETS or not args.as_of):
+        raise RuntimeError("PHASE2_RESUME_REQUIRES_AUTO_MARKET_AND_DATE")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     from production_guard import check_at_start
     check_at_start()
@@ -940,8 +940,8 @@ def main():
         raise RuntimeError("SINGLE_WRITER_NOT_CONFIRMED: disable Apps Script triggers first")
     workers = max(1, min(10, int(os.getenv("FETCH_WORKERS", "6"))))
     if args.phase2_only:
-        validate_phase2_resume(drive, "HK", args.as_of)
-        finish_phase2_daily(drive, "HK", expected_date=args.as_of)
+        validate_phase2_resume(drive, args.market, args.as_of)
+        finish_phase2_daily(drive, args.market, expected_date=args.as_of)
         return
     if args.mode == "monthly":
         from combined_monthly import run_combined_monthly

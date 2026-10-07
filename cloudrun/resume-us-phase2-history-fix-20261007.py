@@ -19,6 +19,31 @@ recovery = base.recovery
 JOB = base.JOB
 OLD = 'hunter-us-daily-w4m6s'
 PREVIOUS = '0d662bba78b9c4860e929abce418da68c594c86b'
+DEPLOYED = '741b5a85b168d94d4839b2ef41588da06d56f82e'
+
+
+def verify_old_execution(exact):
+    """Match an immutable execution image to the registry, including digests."""
+    containers=list(recovery.containers(exact))
+    if recovery.name(exact)!=OLD or len(containers)!=1:
+        raise RuntimeError('OLD_US_EXECUTION_IDENTITY_MISMATCH_NO_CANCEL')
+    image=containers[0].get('image','')
+    tagged=base.BASE_IMAGE+PREVIOUS
+    if image==tagged:return
+    repository=base.BASE_IMAGE.rstrip(':')
+    if not re.fullmatch(re.escape(repository)+r'@sha256:[0-9a-f]{64}',image):
+        raise RuntimeError('OLD_US_EXECUTION_IMAGE_MISMATCH_NO_CANCEL')
+    # Tags refer to version resources whose final component is sha256:<digest>.
+    # Query the specific package and require the exact SHA tag, never a prefix.
+    rows=recovery.gc('artifacts','tags','list','--package=runner',
+                     '--repository=hunter-worker','--location='+recovery.REGION,
+                     '--filter=name~"/tags/'+PREVIOUS+'$"')
+    matches=[r for r in rows if r.get('name','').endswith('/tags/'+PREVIOUS)] if isinstance(rows,list) else []
+    digest=matches[0].get('version','').rsplit('/',1)[-1] if len(matches)==1 else ''
+    if not re.fullmatch(r'sha256:[0-9a-f]{64}',digest) or image!=repository+'@'+digest:
+        print('OLD_US_EXECUTION_OBSERVED_IMAGE='+image,flush=True)
+        raise RuntimeError('OLD_US_REGISTRY_DIGEST_MISMATCH_NO_CANCEL')
+    print('OLD_US_EXECUTION_DIGEST_VERIFIED='+digest,flush=True)
 
 
 def eligible():
@@ -73,11 +98,16 @@ def main():
     head=subprocess.check_output(['git','-C',str(ROOT),'rev-parse','HEAD'],text=True).strip()
     if not re.fullmatch(r'[0-9a-f]{40}',sha) or head != sha:
         raise RuntimeError('PINNED_CHECKOUT_REQUIRED')
+    if sys.argv[2:] not in ([],['--resume-deployed']):
+        raise RuntimeError('UNKNOWN_RECOVERY_ARGUMENT')
+    resume=sys.argv[2:]==['--resume-deployed']
+    target=DEPLOYED if resume else sha
     old=eligible()
     if old is None:return
     before=recovery.gc('run','jobs','describe',JOB)
     c=base.container(before)
-    if (c.get('image') not in {base.BASE_IMAGE+PREVIOUS,base.BASE_IMAGE+sha}
+    allowed={base.BASE_IMAGE+DEPLOYED} if resume else {base.BASE_IMAGE+PREVIOUS,base.BASE_IMAGE+sha}
+    if (c.get('image') not in allowed
             or base.deploy.daily_runtime(before)!=(7200,0)
             or {v['name']:v.get('value') for v in c.get('env',[])}.get('DERIVED_READ_WORKERS')!='2'):
         raise RuntimeError('EXPECTED_US_CONFIGURATION_REQUIRED')
@@ -85,15 +115,18 @@ def main():
     inactive=verify_history(before)
     if recovery.state(old)=='ACTIVE' and not inactive:
         print('ACTIVE_US_WITHOUT_PROVEN_BLOCKER_PRESERVED',flush=True);return
-    if c['image']!=base.BASE_IMAGE+sha:base.build(sha)
+    if recovery.state(old)=='ACTIVE':
+        verify_old_execution(recovery.gc('run','jobs','executions','describe',OLD))
+    if not resume and c['image']!=base.BASE_IMAGE+target:base.build(target)
     if eligible() is None:return
     current=recovery.gc('run','jobs','describe',JOB)
     if base.configuration(current)!=base.configuration(before):
         raise RuntimeError('US_CONFIGURATION_CHANGED_DURING_BUILD')
-    recovery.gc('run','jobs','update',JOB,'--image='+base.BASE_IMAGE+sha,
-                '--update-env-vars=HUNTER_SOURCE_SHA='+sha)
+    if not resume:
+        recovery.gc('run','jobs','update',JOB,'--image='+base.BASE_IMAGE+target,
+                    '--update-env-vars=HUNTER_SOURCE_SHA='+target)
     after=recovery.gc('run','jobs','describe',JOB)
-    base.verify_update(before,after,sha)
+    base.verify_update(before,after,target)
     print('US_HISTORY_FIX_DEPLOY_VERIFIED;RUNTIME_CAPACITY_AND_AUTO_ENTRY_UNCHANGED',flush=True)
     if not base.preflight(after):return
     old=eligible()
@@ -101,9 +134,7 @@ def main():
     if recovery.state(old)=='ACTIVE':
         # Recheck actual execution identity/image before any cancellation.
         exact=recovery.gc('run','jobs','executions','describe',OLD)
-        images={v.get('image') for v in recovery.containers(exact)}
-        if recovery.name(exact)!=OLD or images!={base.BASE_IMAGE+PREVIOUS}:
-            raise RuntimeError('OLD_US_EXECUTION_IMAGE_MISMATCH_NO_CANCEL')
+        verify_old_execution(exact)
         if not inactive:raise RuntimeError('NO_PROVEN_BLOCKER_NO_CANCEL')
         recovery.JOB,recovery.OLD=JOB,OLD
         recovery.cancel_old()  # Confirms terminal state before replacement.

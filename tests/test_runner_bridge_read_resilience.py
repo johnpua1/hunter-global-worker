@@ -51,9 +51,10 @@ class DriveReadResilienceTests(unittest.TestCase):
                     self.assertEqual(drive._call(op, path='HK/file.json', _attempts=1), payload)
                     fallback.assert_not_called()
                 drive.http.post.assert_called_once()
+                timeout = 30.0 if op == 'file' else 120.0
                 self.assertEqual(drive.http.get.call_args_list, [
-                    mock.call('https://script.googleusercontent.com/first', timeout=120.0, allow_redirects=False),
-                    mock.call('https://script.googleusercontent.com/second', timeout=120.0, allow_redirects=False)])
+                    mock.call('https://script.googleusercontent.com/first', timeout=timeout, allow_redirects=False),
+                    mock.call('https://script.googleusercontent.com/second', timeout=timeout, allow_redirects=False)])
                 second.json.assert_not_called()
 
     def test_untrusted_second_redirect_is_not_followed_and_read_recovery_is_preserved(self):
@@ -64,8 +65,8 @@ class DriveReadResilienceTests(unittest.TestCase):
         payload = {'ok': True, 'file': None}
         with mock.patch.object(runner, 'bridge_read_response', return_value=payload) as fallback:
             self.assertEqual(drive._call('file', path='HK/file.json', _attempts=1), payload)
-            fallback.assert_called_once_with(drive.url, {'op': 'file', 'key': 'key', 'path': 'HK/file.json'}, 120.0)
-        drive.http.get.assert_called_once_with('https://script.googleusercontent.com/first', timeout=120.0, allow_redirects=False)
+            fallback.assert_called_once_with(drive.url, {'op': 'file', 'key': 'key', 'path': 'HK/file.json'}, 30.0)
+        drive.http.get.assert_called_once_with('https://script.googleusercontent.com/first', timeout=30.0, allow_redirects=False)
 
     def test_redirect_loop_is_bounded_before_existing_read_recovery(self):
         drive = runner.Drive.__new__(runner.Drive)
@@ -100,7 +101,7 @@ class DriveReadResilienceTests(unittest.TestCase):
         drive.http.get.return_value.json.return_value = {'ok': True, 'file': None}
         self.assertEqual(drive._call('file', path='US/file.json'), {'ok': True, 'file': None})
         self.assertFalse(drive.http.post.call_args.kwargs['allow_redirects'])
-        drive.http.get.assert_called_once_with(target, timeout=120.0, allow_redirects=False)
+        drive.http.get.assert_called_once_with(target, timeout=30.0, allow_redirects=False)
 
     def test_non_content_redirect_is_not_followed(self):
         drive = runner.Drive.__new__(runner.Drive)

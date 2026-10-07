@@ -59,7 +59,7 @@ def read_files(drive: Drive, market: str, folder: str, suffix):
     return sorted(paths)
 
 
-def build(drive: Drive, market: str, date: str):
+def build(drive: Drive, market: str, date: str, daily_rows=None):
     LOG.info("DERIVED_STAGE market=%s date=%s stage=load_inputs", market, date)
     state = load_market(drive, market)
     universe = current_universe(drive, market)
@@ -73,13 +73,18 @@ def build(drive: Drive, market: str, date: str):
 
     daily = defaultdict(list)
     daily_paths = []
-    for day in daily_segments(drive, market):
-        daily_paths.extend(
-            read_files(drive, market, "DAILY/" + day,
-                       (".ndjson.gz", ".ndjson.gzip"))
-        )
-
-    for rows in map_drive_reads(drive, read_gzip, daily_paths, workers):
+    if daily_rows is None:
+        for day in daily_segments(drive, market):
+            daily_paths.extend(
+                read_files(drive, market, "DAILY/" + day,
+                           (".ndjson.gz", ".ndjson.gzip"))
+            )
+        segments = map_drive_reads(drive, read_gzip, daily_paths, workers)
+    else:
+        LOG.info("DERIVED_DAILY_REUSED market=%s date=%s rows=%d", market, date,
+                 sum(len(rows) for rows in daily_rows.values()))
+        segments = daily_rows.values()
+    for rows in segments:
         for row in rows:
             if row.get("trade_date", row["date"]) <= date:
                 daily[row["security_id"]].append(row)
@@ -89,7 +94,7 @@ def build(drive: Drive, market: str, date: str):
     patch_paths = read_files(drive, market, "REPAIR_PATCH", ".json")
     LOG.info("DERIVED_STAGE market=%s date=%s stage=patch_reads files=%d", market, date, len(patch_paths))
 
-    for payload in map_drive_reads(drive, read_json, patch_paths, workers):
+    for number, payload in enumerate(map_drive_reads(drive, read_json, patch_paths, workers), 1):
         items = payload.get("items") if isinstance(payload, dict) else None
         if isinstance(items, list):
             for patch in items:
@@ -97,6 +102,8 @@ def build(drive: Drive, market: str, date: str):
                     patches[patch["security_id"]].append(patch)
         elif isinstance(payload, dict) and payload.get("security_id"):
             patches[payload["security_id"]].append(payload)
+        LOG.info("DERIVED_PATCH_PROGRESS market=%s date=%s completed=%d total=%d",
+                 market, date, number, len(patch_paths))
 
     events = []
     action_paths = read_files(drive, market, "CORPORATE_ACTIONS", ".json")

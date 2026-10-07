@@ -320,7 +320,7 @@ def update_history(market,old_calendar,new_calendar,history,today,refresh_eps=Tr
     assert len(byid)==len(events)
     return history
 
-def compose_prices(drive,market,wanted):
+def compose_prices(drive,market,wanted,daily_rows=None):
     from runner import load_market
     state=load_market(drive,market);base=defaultdict(list);patches=defaultdict(list);daily=defaultdict(list)
     for batch in range(1,state.checkpoint['total_batches']+1):
@@ -332,19 +332,26 @@ def compose_prices(drive,market,wanted):
         if not isinstance(items,list):items=[doc] if isinstance(doc,dict) else []
         for item in items:
             if item.get('security_id') in wanted:patches[item['security_id']].append(item)
-    for day in daily_segments(drive,market):
-        for path in read_files(drive,market,'DAILY/'+day,('.ndjson.gz','.ndjson.gzip')):
-            for row in parse_lines_gz(drive.read(path)):
-                if row['security_id'] in wanted:daily[row['security_id']].append(row)
+    days = daily_segments(drive,market)
+    if daily_rows is None:
+        for day in days:
+            LOG.info('PHASE2_DAILY_READ market=%s date=%s',market,day)
+            for path in read_files(drive,market,'DAILY/'+day,('.ndjson.gz','.ndjson.gzip')):
+                for row in parse_lines_gz(drive.read(path)):
+                    if row['security_id'] in wanted:daily[row['security_id']].append(row)
+    else:
+        for sid in wanted:
+            daily[sid].extend(daily_rows.get(sid,[]))
+        LOG.info('PHASE2_DAILY_REUSED market=%s rows=%d',market,sum(map(len,daily.values())))
     actions=[]
     for path in read_files(drive,market,'CORPORATE_ACTIONS','.json'):actions.extend(drive.json(path))
-    return {sid:{row.get('trade_date',row.get('date')):row for row in split_adjust(compose(base[sid],patches[sid],daily[sid]),actions)} for sid in wanted},sorted(set(state.calendar)|set(daily_segments(drive,market)))
+    return {sid:{row.get('trade_date',row.get('date')):row for row in split_adjust(compose(base[sid],patches[sid],daily[sid]),actions)} for sid in wanted},sorted(set(state.calendar)|set(days))
 
-def calculate_reactions(drive,market,history):
+def calculate_reactions(drive,market,history,daily_rows=None):
     events=history.get('events',[])
     targets=[e for e in events if e.get('event_status')!='REVISED' and (not e.get('reaction_status') or e.get('reaction_status') in ('PENDING_PRICE','PARTIAL'))]
     if not targets:return history
-    prices,sessions=compose_prices(drive,market,{e['security_id'] for e in targets})
+    prices,sessions=compose_prices(drive,market,{e['security_id'] for e in targets},daily_rows=daily_rows)
     for event in targets:
         sid=event['security_id'];day=event['report_date'];session=event['session']
         choices=[i for i,s in enumerate(sessions) if (s>=day if market=='US' and session=='BMO' else s>day)]
@@ -373,7 +380,7 @@ def calculate_reactions(drive,market,history):
         event['reaction_status']='COMPLETE' if event['day5_pct'] is not None and event['day1_volume_ratio'] is not None else 'PARTIAL'
     return history
 
-def daily(drive:Drive,market:str):
+def daily(drive:Drive,market:str,daily_rows=None):
     sector_path=f'{market}/PHASE2/SECTOR_MAP.json'
     calendar_path=f'{market}/PHASE2/EARNINGS_CALENDAR.json'
     history_path=f'{market}/PHASE2/EARNINGS_HISTORY.json'
@@ -403,7 +410,8 @@ def daily(drive:Drive,market:str):
     new_calendar=us_calendar(active,index,today) if market=='US' else hk_calendar(active,index,today)
     history_raw=drive.read(history_path);history=unpack(json.loads(history_raw),active)
     history=update_history(market,old_calendar,new_calendar,history,today)
-    history=calculate_reactions(drive,market,history)
+    LOG.info('PHASE2_STAGE market=%s stage=reactions',market)
+    history=calculate_reactions(drive,market,history,daily_rows=daily_rows)
     assert len({e['event_id'] for e in history['events']})==len(history['events'])
     assert all(e['security_id'] in active for e in history['events'])
     drive.put(history_path,compact(pack(history)),expected_sha=digest(history_raw))

@@ -169,8 +169,12 @@ class Drive:
                        int(os.getenv("HUNTER_BRIDGE_ATTEMPTS", "8")))
         for attempt in range(attempts):
             try:
-                if op in ("read", "read_chunk"):
+                reading = op in ("file", "list", "read", "read_chunk")
+                started = time.monotonic()
+                if reading:
                     timeout = float(os.getenv("HUNTER_BRIDGE_READ_TIMEOUT_SECONDS", "30"))
+                    LOG.info("BRIDGE_READ_START op=%s path=%s attempt=%d timeout=%.1f",
+                             op, fields.get("path", ""), attempt + 1, timeout)
                 else:
                     timeout = float(os.getenv("HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS", "120"))
                 # ContentService redirects to a one-time response resource.
@@ -225,6 +229,9 @@ class Drive:
                             "list": ("files",), "file": ("file",), "folder": ("folder",)}
                 if not all(field in result for field in required[op]):
                     raise ValueError("BRIDGE_RESPONSE_SHAPE:" + op + ":" + ",".join(sorted(result)))
+                if reading:
+                    LOG.info("BRIDGE_READ_DONE op=%s path=%s attempt=%d seconds=%.1f",
+                             op, fields.get("path", ""), attempt + 1, time.monotonic() - started)
                 return result
             except (requests.RequestException, ValueError) as exc:
                 if attempt == attempts - 1:
@@ -855,6 +862,26 @@ def _enforce_cloud_run_topology(args) -> None:
         raise RuntimeError(f"TOPOLOGY_RUNTIME_MISMATCH:{job}:MONTHLY_MARKET_MUST_BE_NONE")
 
 
+def finish_phase2_daily(drive, market, daily_rows=None, force=False):
+    """Resume Phase 2 even when DAILY committed before a previous interruption."""
+    path = f"{market}/CONTROL/DAILY_CHECKPOINT.json"
+    raw = drive.read(path)
+    checkpoint = json.loads(raw)
+    date = checkpoint["last_completed_date"]
+    if checkpoint.get("phase2_completed_date") == date and not force:
+        LOG.info("PHASE2_ALREADY_COMMITTED market=%s date=%s", market, date)
+        return
+    from phase2_runtime import daily as run_phase2_daily
+    LOG.info("PHASE2_START market=%s date=%s", market, date)
+    result = run_phase2_daily(drive, market, daily_rows=daily_rows)
+    if result.get("status") == "INITIAL_SNAPSHOT_PENDING":
+        raise RuntimeError("PHASE2_INITIAL_SNAPSHOT_PENDING:" + market)
+    checkpoint["phase2_completed_date"] = date
+    checkpoint["phase2_completed_at_myt"] = now_myt()
+    drive.put(path, compact(checkpoint), expected_sha=digest(raw))
+    LOG.info("PHASE2_COMMITTED market=%s date=%s result=%s", market, date, result)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("probe", "mini", "base", "daily", "daily-core", "auto",
@@ -933,7 +960,8 @@ def main():
     from foundation import run_daily as run_foundation_daily, seed_corporate_actions
     for market in markets:
         seed_corporate_actions(drive, market)
-        result = run_foundation_daily(drive, market, workers)
+        daily_rows = {}
+        result = run_foundation_daily(drive, market, workers, daily_rows=daily_rows)
         LOG.info("daily market=%s sessions=%d written=%d", market, len(result),
                  sum(item.get("written", 0) for item in result))
         if args.mode == "daily-core":
@@ -941,10 +969,8 @@ def main():
             continue
         if not result:
             LOG.info("NO_NEW_SESSION market=%s", market)
-            continue
         if all(item.get("status") == "COMPLETE" for item in result):
-            from phase2_runtime import daily as run_phase2_daily
-            LOG.info("phase2 daily market=%s result=%s", market, run_phase2_daily(drive, market))
+            finish_phase2_daily(drive, market, daily_rows=daily_rows, force=bool(result))
         else:
             LOG.warning("phase2 daily deferred until foundation completes market=%s", market)
             raise RuntimeError("DAILY_INCOMPLETE:" + market + ":" +

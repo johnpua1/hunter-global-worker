@@ -61,32 +61,62 @@ def daily_segments(drive: Drive, market: str) -> list[str]:
                   and len(x["name"]) == 10 and x["name"][4] == "-")
 
 
-def read_existing(drive: Drive, market: str, securities: list[dict], base_as_of: str):
+def read_existing(drive: Drive, market: str, securities: list[dict], base_as_of: str,
+                  daily_rows=None):
     """Return the latest stored bar and keys, including older DAILY layouts."""
     last = {s["security_id"]: (base_as_of if s.get("security_id_origin") != "NEW_LISTING"
                                   else None) for s in securities}
     keys = set()
     dates = daily_segments(drive, market)
 
+    workers = max(1, min(6, int(os.getenv("DAILY_READ_WORKERS", "6"))))
+    LOG.info("SYNC_INVENTORY market=%s total=%d", market, len(dates))
+    def list_date(reader, date):
+        path = f"{market}/DAILY/{date}"
+        started = time.monotonic()
+        LOG.info("SYNC_LIST_START market=%s path=%s", market, path)
+        # Include the ranking reader's supported shard level, but keep shard
+        # requests serial within each worker so concurrency never multiplies.
+        result = []
+        for entry in reader.list(path):
+            child = path + "/" + entry["name"]
+            if entry.get("mimeType") == "application/vnd.google-apps.folder":
+                for part in reader.list(child):
+                    if is_daily_segment(part["name"]):
+                        result.append(child + "/" + part["name"])
+            elif is_daily_segment(entry["name"]):
+                result.append(child)
+        result.sort()
+        LOG.info("SYNC_LIST_DONE market=%s path=%s files=%d seconds=%.1f",
+                 market, path, len(result), time.monotonic() - started)
+        return result
+
     paths = []
-    for date in dates:
-        for file in drive.list(f"{market}/DAILY/{date}"):
-            if is_daily_segment(file["name"]):
-                paths.append(f"{market}/DAILY/{date}/{file['name']}")
+    for number, found in enumerate(map_drive_reads(drive, list_date, dates, workers), 1):
+        paths.extend(found)
+        LOG.info("SYNC_INVENTORY_PROGRESS market=%s completed=%d total=%d files=%d",
+                 market, number, len(dates), len(paths))
 
     def load_segment(reader, path):
-        return parse_lines_gz(reader.read(path))
+        started = time.monotonic()
+        LOG.info("SYNC_READ_START market=%s path=%s", market, path)
+        rows = parse_lines_gz(reader.read(path))
+        LOG.info("SYNC_READ_DONE market=%s path=%s rows=%d seconds=%.1f",
+                 market, path, len(rows), time.monotonic() - started)
+        return rows
 
-    workers = max(1, min(6, int(os.getenv("DAILY_READ_WORKERS", "6"))))
-
-    for rows in map_drive_reads(drive, load_segment, paths, workers):
+    for number, rows in enumerate(map_drive_reads(drive, load_segment, paths, workers), 1):
         for row in rows:
             key = (row["security_id"], row.get("trade_date", row.get("date")))
             if key in keys:
                 raise RuntimeError("DAILY_DUPLICATE_STORED:" + str(key))
             keys.add(key)
+            if daily_rows is not None:
+                daily_rows.setdefault(key[0], []).append(row)
             if key[0] in last and (last[key[0]] is None or key[1] > last[key[0]]):
                 last[key[0]] = key[1]
+        LOG.info("SYNC_READ_PROGRESS market=%s completed=%d total=%d keys=%d",
+                 market, number, len(paths), len(keys))
 
     return last, keys
 
@@ -147,7 +177,8 @@ def flag_five_day_failures(drive: Drive, market: str, date: str,
 
 
 def append_daily_date(drive: Drive, market: str, date: str, securities: list[dict],
-                      last: dict, keys: set, workers: int, base_calendar: list[str]) -> dict:
+                      last: dict, keys: set, workers: int, base_calendar: list[str],
+                      daily_rows=None) -> dict:
     active = [s for s in securities if s.get("listing_status", "ACTIVE") == "ACTIVE"]
     # Each security starts the day following its own last stored bar. This
     # recovers multi-session gaps without rereading or rewriting BASE.
@@ -256,6 +287,12 @@ def append_daily_date(drive: Drive, market: str, date: str, securities: list[dic
                     raise
                 fallback = f"{folder}/part-{number:04d}.ndjson.gzip"
                 drive.append(fallback, payload, "application/x-gzip")
+            # Only expose rows to ranking after their remote append succeeds.
+            if daily_rows is not None:
+                for row in rows_by_date[row_date]:
+                    daily_rows.setdefault(row["security_id"], []).append(row)
+            LOG.info("SYNC_APPEND_COMMITTED market=%s date=%s rows=%d",
+                     market, row_date, len(rows_by_date[row_date]))
     if events:
         unique = { (e["security_id"], e["effective_date"], e["factor"]): e
                    for e in events }
@@ -270,7 +307,7 @@ def append_daily_date(drive: Drive, market: str, date: str, securities: list[dic
     return run
 
 
-def run_daily(drive: Drive, market: str, workers: int):
+def run_daily(drive: Drive, market: str, workers: int, daily_rows=None):
     started = time.monotonic()
     LOG.info("SYNC_STAGE market=%s stage=load_base", market)
     base = load_market(drive, market)
@@ -279,7 +316,9 @@ def run_daily(drive: Drive, market: str, workers: int):
     LOG.info("SYNC_STAGE market=%s stage=current_universe", market)
     securities = current_universe(drive, market)
     LOG.info("SYNC_STAGE market=%s stage=read_existing securities=%d", market, len(securities))
-    last, keys = read_existing(drive, market, securities, base.checkpoint["as_of"])
+    if daily_rows is None:
+        daily_rows = {}
+    last, keys = read_existing(drive, market, securities, base.checkpoint["as_of"], daily_rows)
     LOG.info("SYNC_STAGE market=%s stage=inputs_ready keys=%d elapsed_seconds=%.1f",
              market, len(keys), time.monotonic() - started)
     checkpoint = f"{market}/CONTROL/DAILY_CHECKPOINT.json"
@@ -303,7 +342,7 @@ def run_daily(drive: Drive, market: str, workers: int):
         dates = [previous["last_completed_date"]]
     for date in dates:
         result = append_daily_date(drive, market, date, securities, last, keys, workers,
-                                   base.calendar)
+                                   base.calendar, daily_rows)
         results.append(result)
         if result["status"] != "COMPLETE":
             break
@@ -312,7 +351,10 @@ def run_daily(drive: Drive, market: str, workers: int):
         update_new_listing_history(drive, market, keys)
         from derived import build
         LOG.info("SYNC_STAGE market=%s date=%s stage=derived", market, date)
-        build(drive, market, date)
+        # This invocation already validated every existing row and committed
+        # each new append. Do not repeat the entire remote history scan for
+        # every pending date; ranking still reads current patches/actions.
+        build(drive, market, date, daily_rows=daily_rows)
         previous["last_completed_date"] = date
         previous["updated_at_myt"] = now_myt()
         drive.put(checkpoint, compact(previous))

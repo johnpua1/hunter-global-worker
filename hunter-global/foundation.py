@@ -321,6 +321,8 @@ def run_daily(drive: Drive, market: str, workers: int, daily_rows=None, patch_sn
     if daily_rows is None:
         daily_rows = {}
     last, keys = read_existing(drive, market, securities, base.checkpoint["as_of"], daily_rows)
+    from incremental_inputs import save_inputs
+    save_inputs(drive)
     LOG.info("SYNC_STAGE market=%s stage=inputs_ready keys=%d elapsed_seconds=%.1f",
              market, len(keys), time.monotonic() - started)
     checkpoint = f"{market}/CONTROL/DAILY_CHECKPOINT.json"
@@ -357,6 +359,7 @@ def run_daily(drive: Drive, market: str, workers: int, daily_rows=None, patch_sn
         # each new append. Do not repeat the entire remote history scan for
         # every pending date; ranking still reads current patches/actions.
         build(drive, market, date, daily_rows=daily_rows, patch_snapshot=patch_snapshot)
+        save_inputs(drive)
         previous["last_completed_date"] = date
         previous["updated_at_myt"] = now_myt()
         drive.put(checkpoint, compact(previous))

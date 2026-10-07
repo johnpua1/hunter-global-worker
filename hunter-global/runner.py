@@ -42,7 +42,7 @@ class _NoBridgeRedirect(urllib.request.HTTPRedirectHandler):
 
 def bridge_read_response(url: str, payload: dict, timeout: float) -> dict:
     """Independent, read-only retry after an unusable ContentService response."""
-    if payload.get("op") not in {"file", "list", "read", "read_chunk"}:
+    if payload.get("op") not in {"file", "list", "read", "read_chunk", "source_inventory"}:
         raise ValueError("BRIDGE_READ_FALLBACK_WRITE_DENIED")
     opener = urllib.request.build_opener(_NoBridgeRedirect)
     request = urllib.request.Request(url, data=compact(payload), method="POST",
@@ -169,7 +169,7 @@ class Drive:
                        int(os.getenv("HUNTER_BRIDGE_ATTEMPTS", "8")))
         for attempt in range(attempts):
             try:
-                reading = op in ("file", "list", "read", "read_chunk")
+                reading = op in ("file", "list", "read", "read_chunk", "source_inventory")
                 started = time.monotonic()
                 if reading:
                     timeout = float(os.getenv("HUNTER_BRIDGE_READ_TIMEOUT_SECONDS", "30"))
@@ -211,7 +211,7 @@ class Drive:
                         raise ValueError("BRIDGE_RESPONSE_REDIRECT_UNRESOLVED:" + op)
                     result = response.json()
                 except ValueError:
-                    if op not in {"file", "list", "read", "read_chunk"}:
+                    if op not in {"file", "list", "read", "read_chunk", "source_inventory"}:
                         raise
                     LOG.warning("BRIDGE_NON_JSON op=%s path=%s status=%s bytes=%d",
                                 op, fields.get("path", ""), response.status_code,
@@ -234,8 +234,13 @@ class Drive:
                     self.http = requests.Session()
                     raise ValueError("BRIDGE_POST_RETURNED_HEALTH:" + op)
                 if not result.get("ok"):
+                    if op == "source_inventory" and str(result.get("error", "")) in {
+                            "INVENTORY_HTTP_429", "INVENTORY_HTTP_500", "INVENTORY_HTTP_502",
+                            "INVENTORY_HTTP_503", "INVENTORY_HTTP_504"}:
+                        raise ValueError("INVENTORY_TRANSIENT_FAILURE")
                     raise RuntimeError("BRIDGE_" + str(result.get("error", "UNKNOWN")))
                 required = {"read": ("data_base64", "sha256"),
+                            "source_inventory": ("data_base64", "sha256"),
                             "read_chunk": ("data_base64", "sha256", "offset", "length", "size", "eof"),
                             "put": ("file", "sha256"), "append": ("file", "sha256"),
                             "list": ("files",), "file": ("file",), "folder": ("folder",)}
@@ -261,6 +266,14 @@ class Drive:
 
     def list(self, parent_id: str, name: str | None = None) -> list[dict]:
         return self._call("list", path=parent_id, name=name)["files"]
+
+    def source_inventory(self, market):
+        import base64
+        result = self._call("source_inventory", path=market)
+        packed = base64.b64decode(result["data_base64"], validate=True)
+        if digest(packed) != result["sha256"]:
+            raise RuntimeError("INVENTORY_SHA_MISMATCH")
+        return json.loads(gzip.decompress(packed))
 
     def folder(self, path: str, create: bool = False) -> str:
         path = path.strip("/")
@@ -987,9 +1000,11 @@ def main():
     if os.getenv("HUNTER_ACTIONS_CUTOVER") != "CONFIRMED":
         raise RuntimeError("SINGLE_WRITER_NOT_CONFIRMED: disable Apps Script triggers first")
     workers = max(1, min(10, int(os.getenv("FETCH_WORKERS", "6"))))
+    from incremental_inputs import incremental_inputs
     if args.phase2_only:
         validate_phase2_resume(drive, args.market, args.as_of)
-        finish_phase2_daily(drive, args.market, expected_date=args.as_of)
+        with incremental_inputs(drive, args.market) as inputs:
+            finish_phase2_daily(inputs, args.market, expected_date=args.as_of)
         return
     if args.mode == "monthly":
         from combined_monthly import run_combined_monthly
@@ -1039,25 +1054,26 @@ def main():
         return
     from foundation import run_daily as run_foundation_daily, seed_corporate_actions
     for market in markets:
-        seed_corporate_actions(drive, market)
-        daily_rows = {}
-        patch_snapshot = {}
-        result = run_foundation_daily(drive, market, workers, daily_rows=daily_rows,
-                                     patch_snapshot=patch_snapshot)
-        LOG.info("daily market=%s sessions=%d written=%d", market, len(result),
-                 sum(item.get("written", 0) for item in result))
-        if args.mode == "daily-core":
-            LOG.info("DAILY_CORE_DONE market=%s", market)
-            continue
-        if not result:
-            LOG.info("NO_NEW_SESSION market=%s", market)
-        if all(item.get("status") == "COMPLETE" for item in result):
-            finish_phase2_daily(drive, market, daily_rows=daily_rows, force=bool(result),
-                                patch_snapshot=patch_snapshot)
-        else:
-            LOG.warning("phase2 daily deferred until foundation completes market=%s", market)
-            raise RuntimeError("DAILY_INCOMPLETE:" + market + ":" +
-                               ",".join(sorted({item["status"] for item in result})))
+        with incremental_inputs(drive, market) as inputs:
+            seed_corporate_actions(inputs, market)
+            daily_rows = {}
+            patch_snapshot = {}
+            result = run_foundation_daily(inputs, market, workers, daily_rows=daily_rows,
+                                         patch_snapshot=patch_snapshot)
+            LOG.info("daily market=%s sessions=%d written=%d", market, len(result),
+                     sum(item.get("written", 0) for item in result))
+            if args.mode == "daily-core":
+                LOG.info("DAILY_CORE_DONE market=%s", market)
+                continue
+            if not result:
+                LOG.info("NO_NEW_SESSION market=%s", market)
+            if all(item.get("status") == "COMPLETE" for item in result):
+                finish_phase2_daily(inputs, market, daily_rows=daily_rows, force=bool(result),
+                                    patch_snapshot=patch_snapshot)
+            else:
+                LOG.warning("phase2 daily deferred until foundation completes market=%s", market)
+                raise RuntimeError("DAILY_INCOMPLETE:" + market + ":" +
+                                   ",".join(sorted({item["status"] for item in result})))
 
 
 if __name__ == "__main__":

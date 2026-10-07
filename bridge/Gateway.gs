@@ -66,6 +66,13 @@ function doPost(e) {
     }
     var path = bridgePath_(body.path || '');
     bridgeScopeAuthorize_(scope, op, path);
+    if (op === 'source_inventory') {
+      if (!/^(US|HK)$/.test(path)) throw new Error('INVENTORY_MARKET_REQUIRED');
+      var inventory = bridgeSourceInventory_(root, path);
+      var packed = Utilities.gzip(Utilities.newBlob(JSON.stringify(inventory))).getBytes();
+      return bridgeJson_({ok:true, sha256:bridgeSha_(packed),
+                          data_base64:Utilities.base64Encode(packed)});
+    }
     if (op === 'folder') {
       if (body.create === true && /^(US|HK)\/BASE(?:\/|$)/.test(path))
         throw new Error('BASE_SEALED');
@@ -144,7 +151,7 @@ function bridgeAuthScope_(props, presented) {
 }
 function bridgeScopeAuthorize_(scope, op, path) {
   if (scope === 'LEGACY') return;
-  if (['folder','list','file','read','read_chunk','put','append'].indexOf(op) < 0)
+  if (['folder','list','file','read','read_chunk','source_inventory','put','append'].indexOf(op) < 0)
     throw new Error('SCOPE_OP_DENIED');
   if (!path) throw new Error('SCOPE_ROOT_DENIED');
   if (scope === 'MONTH') {
@@ -247,6 +254,59 @@ function bridgeFile_(root, path) {
 }
 function bridgeInfo_(file, path) {
   return {id: path, name: file.getName(), mimeType: file.getMimeType(), size: file.getSize()};
+}
+
+// Batch metadata requests inside the existing Bridge. No source blob reads,
+// new permissions, or new service: callers remain restricted to their market.
+function bridgeSourceInventory_(root, market) {
+  var folderMime = 'application/vnd.google-apps.folder';
+  var pending = [{id:bridgeFolder_(root, market, false).getId(), path:market}];
+  var entries = [], seen = {}, visited = {}, pages = 0;
+  while (pending.length) {
+    var batch = pending.splice(0, 10), parents = {};
+    batch.forEach(function(p) {
+      if (visited[p.id]) throw new Error('INVENTORY_FOLDER_CYCLE');
+      visited[p.id] = true;
+      parents[p.id] = p.path;
+    });
+    var q = 'trashed = false and (' + batch.map(function(p) {
+      if (!/^[A-Za-z0-9_-]+$/.test(p.id)) throw new Error('INVENTORY_FOLDER_ID_INVALID');
+      return "'" + p.id + "' in parents";
+    }).join(' or ') + ')';
+    var token = '';
+    do {
+      if (++pages > 500) throw new Error('INVENTORY_PAGE_LIMIT');
+      var url = 'https://www.googleapis.com/drive/v3/files?pageSize=1000&q=' + encodeURIComponent(q) +
+        '&fields=' + encodeURIComponent('nextPageToken,incompleteSearch,files(id,name,mimeType,size,md5Checksum,parents)') +
+        (token ? '&pageToken=' + encodeURIComponent(token) : '');
+      var response = UrlFetchApp.fetch(url, {headers:{Authorization:'Bearer ' + ScriptApp.getOAuthToken()},
+                                           muteHttpExceptions:true});
+      if (response.getResponseCode() !== 200) throw new Error('INVENTORY_HTTP_' + response.getResponseCode());
+      var doc = JSON.parse(response.getContentText());
+      if (doc.incompleteSearch || !Array.isArray(doc.files)) throw new Error('INVENTORY_INCOMPLETE');
+      doc.files.forEach(function(file) {
+        var parent = parents[(file.parents || [])[0]];
+        if (!parent) throw new Error('INVENTORY_PARENT_MISMATCH');
+        if (file.name.indexOf('._') === 0) return; // Bridge transactional staging.
+        if (parent === market && ['BASE','DAILY','REPAIR_PATCH','CORPORATE_ACTIONS'].indexOf(file.name) < 0) return;
+        if (parent === market && file.mimeType !== folderMime) throw new Error('INVENTORY_SOURCE_FOLDER_REQUIRED');
+        if (!/^[A-Za-z0-9_.-]+$/.test(file.name)) throw new Error('INVENTORY_NAME_INVALID');
+        var path = parent + '/' + file.name;
+        if (seen[path]) throw new Error('INVENTORY_DUPLICATE_PATH');
+        seen[path] = true;
+        if (path.split('/').length > 6 || entries.length >= 50000) throw new Error('INVENTORY_SIZE_LIMIT');
+        var entry = {id:path, name:file.name, mimeType:file.mimeType};
+        if (file.mimeType === folderMime) pending.push({id:file.id,path:path});
+        else {
+          if (!/^[a-f0-9]{32}$/.test(file.md5Checksum || '')) throw new Error('INVENTORY_FINGERPRINT_MISSING');
+          entry.size = Number(file.size); entry.md5 = file.md5Checksum;
+        }
+        entries.push(entry);
+      });
+      token = doc.nextPageToken || '';
+    } while (token);
+  }
+  return {schema:1,market:market,entries:entries};
 }
 
 function bridgeReadChunk_(file, body) {

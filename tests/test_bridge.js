@@ -193,3 +193,48 @@ assert.throws(
 console.log('bridge sealed path, scoped auth, queue isolation and row dedup PASS');
 
 require("./test_monthly_schedule.js");
+
+// Batched input inventory: metadata only, complete pagination, market isolation.
+const invContext = vm.createContext({});
+vm.runInContext(source, invContext);
+invContext.bridgeFolder_ = () => ({getId: () => 'MARKET_ROOT'});
+invContext.ScriptApp = {getOAuthToken: () => 'test-oauth'};
+const invFolder = 'application/vnd.google-apps.folder';
+const invRows = [
+  {id:'DAILY_ID',name:'DAILY',mimeType:invFolder,parents:['MARKET_ROOT']},
+  {id:'FOREIGN_ID',name:'CONTROL',mimeType:invFolder,parents:['MARKET_ROOT']},
+];
+for (let n = 0; n < 60; n++) {
+  const name = '2026-01-' + String(n).padStart(2,'0');
+  invRows.push({id:'DAY_' + n,name,mimeType:invFolder,parents:['DAILY_ID']});
+  invRows.push({id:'FILE_' + n,name:'part-0001.ndjson.gz',mimeType:'application/x-gzip',
+               parents:['DAY_' + n],size:'12',md5Checksum:'a'.repeat(32)});
+}
+let invCalls = 0;
+invContext.UrlFetchApp = {fetch(url, options) {
+  invCalls++;
+  assert.equal(options.headers.Authorization, 'Bearer test-oauth');
+  const params = new URL(url).searchParams;
+  const ids = [...params.get('q').matchAll(/'([^']+)' in parents/g)].map(m => m[1]);
+  assert.equal(ids.includes('FOREIGN_ID'), false);
+  const matches = invRows.filter(f => ids.includes(f.parents[0]));
+  const start = Number(params.get('pageToken') || 0);
+  const files = matches.slice(start, start + 25);
+  const doc = {files, incompleteSearch:false};
+  if (start + 25 < matches.length) doc.nextPageToken = String(start + 25);
+  return {getResponseCode: () => 200, getContentText: () => JSON.stringify(doc)};
+}};
+const inv = invContext.bridgeSourceInventory_({}, 'HK');
+assert.equal(inv.market, 'HK');
+assert.equal(inv.entries.filter(e => e.md5).length, 60);
+assert.equal(inv.entries.some(e => e.id.includes('/CONTROL')), false);
+assert(invCalls < 15, 'one batched metadata scan, not one Bridge call per history folder');
+assert.doesNotThrow(() => context.bridgeScopeAuthorize_('US','source_inventory','US'));
+assert.throws(() => context.bridgeScopeAuthorize_('US','source_inventory','HK'), /SCOPE_PATH_DENIED/);
+invContext.UrlFetchApp.fetch = () => ({getResponseCode:()=>200,
+  getContentText:()=>JSON.stringify({files:[],incompleteSearch:true})});
+assert.throws(() => invContext.bridgeSourceInventory_({}, 'US'), /INVENTORY_INCOMPLETE/);
+invContext.UrlFetchApp.fetch = () => ({getResponseCode:()=>200,
+  getContentText:()=>JSON.stringify({files:[invRows[0],invRows[0]]})});
+assert.throws(() => invContext.bridgeSourceInventory_({}, 'US'), /INVENTORY_DUPLICATE_PATH/);
+console.log('Incremental source inventory pagination, batch traversal and isolation PASS');

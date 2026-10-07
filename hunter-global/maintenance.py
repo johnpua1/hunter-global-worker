@@ -46,13 +46,19 @@ def main() -> None:
                                        dt.date(2026, 9, 25).isoformat()))
         LOG.info("options market=%s rows=%d", market, monthly(drive, market))
     incomplete = []
-    for market in MARKETS:
+    for index, market in enumerate(MARKETS):
+        # Reserve a share of the remaining existing budget for each market.
+        # A large US backlog must not consume the entire HK allocation.
+        now = time.monotonic()
+        market_deadline = now + (deadline - now) / (len(MARKETS) - index)
         # run_repair reserves its final 300 seconds for queue commit/readback.
-        if time.monotonic() >= deadline - 300:
+        if now >= market_deadline - 300:
             LOG.error("MAINTENANCE_REPAIR market=%s status=NOT_RUN reason=TIME_BUDGET", market)
             incomplete.append(market + ":NOT_RUN")
             continue
-        result = run_repair(drive, market, deadline=deadline)
+        LOG.info("MAINTENANCE_REPAIR_BUDGET market=%s seconds=%.1f",
+                 market, market_deadline - now)
+        result = run_repair(drive, market, deadline=market_deadline)
         complete = result.get("open") == 0 and result.get("timed_out") is False
         LOG.log(logging.INFO if complete else logging.ERROR,
                 "MAINTENANCE_REPAIR market=%s status=%s result=%s", market,

@@ -1036,8 +1036,15 @@ function monthlyV2() {
   var active = bridgeFile_(root, 'ACTIVE_POINTER');
   if (active) {
     var pointer = JSON.parse(active.getBlob().getDataAsString('UTF-8'));
+    var noticeFile = bridgeFile_(root, 'US/CONTROL/MONTH_NOTICE.json');
+    var notice = noticeFile ? JSON.parse(noticeFile.getBlob().getDataAsString('UTF-8')) : null;
+    // The worker commits the notice after ACTIVE_POINTER. A pointer alone
+    // must not suppress retries when that final write was interrupted.
     if (pointer.month_file === 'MONTH_' + expectedMonth &&
-        pointer.hk_month_file === 'HK_MONTH_' + expectedMonth) {
+        pointer.hk_month_file === 'HK_MONTH_' + expectedMonth && notice &&
+        notice.month_file === pointer.month_file &&
+        notice.hk_month_file === pointer.hk_month_file &&
+        notice.pointer_version === pointer.version) {
       var alreadyNext = hunterNextMonthCandidate_(expectedMonth + '-01');
       return {ok:true, skipped:true, reason:'MONTH_ALREADY_COMMITTED',
               expectedMonth:expectedMonth,

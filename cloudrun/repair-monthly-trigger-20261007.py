@@ -28,7 +28,11 @@ def patch_source(remote, candidate):
         start, end, old = section(remote, name, following)
         new = section(candidate, name, following)[2]
         baseline = (ROOT / 'tests/fixtures' / (name + '-before-20261007.js')).read_text()
-        if old.strip() not in (baseline.strip(), new.strip()):
+        accepted = {baseline.strip(), new.strip()}
+        prior = ROOT / 'tests/fixtures' / (name + '-before-notice-20261007.js')
+        if prior.exists():
+            accepted.add(prior.read_text().strip())
+        if old.strip() not in accepted:
             raise RuntimeError('MONTHLY_SOURCE_CHANGED_REVIEW_REQUIRED:' + name)
         remote = remote[:start] + new + remote[end:]
     return remote
@@ -93,7 +97,7 @@ def main():
     clone(ids[0], work / 'readback')
     if sources(work / 'readback') != expected:
         raise RuntimeError('MONTHLY_SOURCE_READBACK_FAILED')
-    print('MONTHLY_SOURCE_VERIFIED=commit_before_advance;retry_current_month_on_failure')
+    print('MONTHLY_SOURCE_VERIFIED=pointer_and_notice_before_advance;retry_current_month_on_failure')
     print('MONTHLY_TRIGGER_AND_WEBAPP_URL=unchanged;no_execution_started')
 
 

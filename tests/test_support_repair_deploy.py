@@ -57,3 +57,12 @@ class SupportRepairDeployTests(unittest.TestCase):
         self.assertEqual(monthly_patch.patch_source(expected,candidate),expected)
         with self.assertRaisesRegex(RuntimeError,'SOURCE_CHANGED'):
             monthly_patch.patch_source(remote.replace('var result = runMonthly();','var result = changedMonthly();'),candidate)
+
+    def test_month_patch_accepts_the_deployed_commit_before_advance_version(self):
+        candidate=(ROOT/'bridge/Gateway.gs').read_text()
+        a,b,_=monthly_patch.section(candidate,'monthlyV2','listMonthlyTrigger')
+        prior=(ROOT/'tests/fixtures/monthlyV2-before-notice-20261007.js').read_text()
+        remote=candidate[:a]+prior+candidate[b:]
+        self.assertEqual(monthly_patch.patch_source(remote,candidate),candidate)
+        with self.assertRaisesRegex(RuntimeError,'SOURCE_CHANGED'):
+            monthly_patch.patch_source(remote.replace('var result = runMonthly();','var result = altered();'),candidate)

@@ -48,3 +48,13 @@ class MaintenanceCompletionTests(unittest.TestCase):
     def test_transport_failure_propagates(self):
         with self.assertRaisesRegex(RuntimeError, 'BRIDGE_FAILED'):
             self.invoke([0,100], [RuntimeError('BRIDGE_FAILED')])
+
+    def test_us_receives_bounded_share_and_hk_keeps_remaining_time(self):
+        with self.assertRaisesRegex(RuntimeError, 'US:INCOMPLETE'):
+            self.invoke([0,100,1700], [{'open':10,'timed_out':True}, {'open':0,'timed_out':False}])
+        self.assertEqual(self.calls[0].kwargs['deadline'], 1700)
+        self.assertEqual(self.calls[1].kwargs['deadline'], 3300)
+
+    def test_quick_us_returns_unused_time_to_hk(self):
+        self.invoke([0,100,200], [{'open':0,'timed_out':False}] * 2)
+        self.assertEqual(self.calls[1].kwargs['deadline'], 3300)

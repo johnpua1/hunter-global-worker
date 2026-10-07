@@ -42,7 +42,7 @@ class _NoBridgeRedirect(urllib.request.HTTPRedirectHandler):
 
 def bridge_read_response(url: str, payload: dict, timeout: float) -> dict:
     """Independent, read-only retry after an unusable ContentService response."""
-    if payload.get("op") not in {"file", "list", "read", "read_chunk", "source_inventory"}:
+    if payload.get("op") not in {"file", "list", "read", "read_chunk", "read_verified_chunk", "source_inventory"}:
         raise ValueError("BRIDGE_READ_FALLBACK_WRITE_DENIED")
     opener = urllib.request.build_opener(_NoBridgeRedirect)
     from execution_budget import timeout as budget_timeout
@@ -132,6 +132,7 @@ class Drive:
         self.key = os.environ["APPS_SCRIPT_SHARED_KEY"]
         self.http = requests.Session()
         self.folders: dict[str, str] = {"": ""}
+        self._read_state = {"guard": threading.Lock(), "locks": {}, "memory": {}}
 
     def fork_reader(self):
         """Keep this connection's configuration with an independent HTTP session."""
@@ -139,6 +140,8 @@ class Drive:
         reader.url, reader.key = self.url, self.key
         reader.http = requests.Session()
         reader.folders = dict(self.folders)
+        if hasattr(self, '_read_state'):
+            reader._read_state = self._read_state
         return reader
 
     def health(self):
@@ -171,7 +174,7 @@ class Drive:
                        int(os.getenv("HUNTER_BRIDGE_ATTEMPTS", "8")))
         for attempt in range(attempts):
             try:
-                reading = op in ("file", "list", "read", "read_chunk", "source_inventory")
+                reading = op in ("file", "list", "read", "read_chunk", "read_verified_chunk", "source_inventory")
                 started = time.monotonic()
                 if reading:
                     timeout = float(os.getenv("HUNTER_BRIDGE_READ_TIMEOUT_SECONDS", "30"))
@@ -213,7 +216,7 @@ class Drive:
                         raise ValueError("BRIDGE_RESPONSE_REDIRECT_UNRESOLVED:" + op)
                     result = response.json()
                 except ValueError:
-                    if op not in {"file", "list", "read", "read_chunk", "source_inventory"}:
+                    if op not in {"file", "list", "read", "read_chunk", "read_verified_chunk", "source_inventory"}:
                         raise
                     LOG.warning("BRIDGE_NON_JSON op=%s path=%s status=%s bytes=%d",
                                 op, fields.get("path", ""), response.status_code,
@@ -244,6 +247,8 @@ class Drive:
                 required = {"read": ("data_base64", "sha256"),
                             "source_inventory": ("data_base64", "sha256"),
                             "read_chunk": ("data_base64", "sha256", "offset", "length", "size", "eof"),
+                            "read_verified_chunk": ("data_base64", "sha256", "offset", "length", "size", "eof",
+                                                    "file_sha256", "compressed_sha256", "revision", "encoding"),
                             "put": ("file", "sha256"), "append": ("file", "sha256"),
                             "list": ("files",), "file": ("file",), "folder": ("folder",)}
                 if not all(field in result for field in required[op]):
@@ -302,6 +307,15 @@ class Drive:
         # range reads for any non-trivial file instead of one giant response.
         chunk_threshold = max(64_000, int(os.getenv("HUNTER_BRIDGE_CHUNK_THRESHOLD_BYTES", "262144")))
         expected = int(info.get("size") or 0) if info else 0
+        if (os.getenv('HUNTER_READ_CHECKPOINTS') == '1' and expected > 262144
+                and clean.startswith(('US/', 'HK/'))
+                and ('/PHASE2/' in clean or '/CONTROL/INCREMENTAL_CACHE/' in clean
+                     or '/CONTROL/PHASE2_RESUME/' in clean or clean.endswith('/CURRENT_UNIVERSE.json'))):
+            from durable_reads import read_large
+            try:
+                return read_large(self, clean, info)
+            except (requests.RequestException, ValueError) as exc:
+                raise RuntimeError('LARGE_READ_TRANSPORT_RETRY_REQUIRED') from exc
         if expected <= chunk_threshold:
             try:
                 # A confirmed nonempty file can use the independent range API

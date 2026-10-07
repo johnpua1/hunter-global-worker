@@ -93,3 +93,36 @@ result. The monitor ends after at most seven hours; closing Cloud Shell can
 interrupt monitoring, while already-started Cloud Run work continues. Tomorrow's
 normal auto entry uses the same durable cache and completion rules; the recovery
 argument override never changes the scheduled entrypoint.
+
+## Large-file transfer recovery, October 8
+
+The first production follow-up showed US exhausting its work budget while
+reading the 6,289,429-byte PHASE2 history, before entering cached price inputs.
+File-level input checkpoints did not cover that read. HK also repeatedly
+downloaded a tail pack after its own checkpoint cleared the decoded pack map.
+
+`HUNTER_READ_CHECKPOINTS=1` enables revision-bound reads for large PHASE2 files,
+the current universe, input cache packs and staged results. The existing Bridge
+adds the read-only `read_verified_chunk` operation: at most 128 KiB of raw data,
+gzip transport, chunk hash, full-file hash and file revision. Each verified
+piece and a CAS manifest are saved under the market's `CONTROL/READ_CACHE`.
+An interrupted execution restores saved pieces and fetches only missing offsets.
+Same-size revisions, changed source hashes, corrupt pieces and invalid offsets
+cannot be accepted. A final identity/full-file hash check precedes use. Small
+files and ordinary BASE/DAILY source reads retain their existing transport.
+
+The worker retains up to 32 MB of validated large reads per process, shared by
+its reader sessions. Input-cache commits retain verified decoded packs and use
+already-held tail members, avoiding remote reload of the cache just written.
+A transient large-read transport failure is explicit and eligible for bounded
+recovery; it is not treated as cache corruption followed by a full source scan.
+
+Run `bash cloudrun/deploy-large-read-fix-20261008.sh <pinned-commit-sha>`.
+This updates the existing Bridge deployment in place, preserving other script
+files and trigger configuration. Each market's real history chunk must pass a
+read-only compressed-transfer preflight before any image build or job update.
+The script then deploys both daily templates and uses the guarded recovery and
+monitoring flow above. Active executions continue using their original worker
+image; Bridge changes remain backward compatible with them. Cloud Shell still
+hosts this one-off monitor; disconnecting does not stop started Cloud Run work
+but may stop monitoring and additional launches.

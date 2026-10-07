@@ -106,7 +106,7 @@ function doPost(e) {
       }
       return bridgeJson_({ok: true, files: entries});
     }
-    if (op === 'file' || op === 'read' || op === 'read_chunk') {
+    if (op === 'file' || op === 'read' || op === 'read_chunk' || op === 'read_verified_chunk') {
       var file = bridgeFile_(root, path);
       if (!file) {
         if (op === 'file') return bridgeJson_({ok: true, file: null});
@@ -114,6 +114,7 @@ function doPost(e) {
       }
       if (op === 'file') return bridgeJson_({ok: true, file: bridgeInfo_(file, path)});
       if (op === 'read_chunk') return bridgeReadChunk_(file, body);
+      if (op === 'read_verified_chunk') return bridgeVerifiedChunk_(file, body);
       if (file.getSize() > 10000000) throw new Error('READ_SIZE_LIMIT');
       var raw = file.getBlob().getBytes();
       return bridgeJson_({ok: true, sha256: bridgeSha_(raw),
@@ -151,7 +152,7 @@ function bridgeAuthScope_(props, presented) {
 }
 function bridgeScopeAuthorize_(scope, op, path) {
   if (scope === 'LEGACY') return;
-  if (['folder','list','file','read','read_chunk','source_inventory','put','append'].indexOf(op) < 0)
+  if (['folder','list','file','read','read_chunk','read_verified_chunk','source_inventory','put','append'].indexOf(op) < 0)
     throw new Error('SCOPE_OP_DENIED');
   if (!path) throw new Error('SCOPE_ROOT_DENIED');
   if (scope === 'MONTH') {
@@ -253,7 +254,31 @@ function bridgeFile_(root, path) {
   return file;
 }
 function bridgeInfo_(file, path) {
-  return {id: path, name: file.getName(), mimeType: file.getMimeType(), size: file.getSize()};
+  var info = {id: path, name: file.getName(), mimeType: file.getMimeType(), size: file.getSize()};
+  if (typeof file.getId === 'function' && typeof file.getLastUpdated === 'function')
+    info.revision = file.getId() + ':' + file.getLastUpdated().getTime();
+  return info;
+}
+
+// Small compressed responses with a stable file revision and full-content hash.
+// Existing read/read_chunk clients remain backward compatible during deployment.
+function bridgeVerifiedChunk_(file, body) {
+  var revision = file.getId() + ':' + file.getLastUpdated().getTime();
+  if (typeof body.revision !== 'string' || body.revision !== revision)
+    throw new Error('READ_SOURCE_CHANGED');
+  var size = Number(file.getSize()), offset = Number(body.offset), length = Number(body.length);
+  if (size > 30000000 || !Number.isInteger(offset) || !Number.isInteger(length) ||
+      offset < 0 || offset >= size || length < 1 || length > 131072)
+    throw new Error('READ_VERIFIED_RANGE_INVALID');
+  var bytes = file.getBlob().getBytes();
+  if (bytes.length !== size || revision !== file.getId() + ':' + file.getLastUpdated().getTime())
+    throw new Error('READ_SOURCE_CHANGED');
+  var part = bytes.slice(offset, Math.min(offset + length, size));
+  var zipped = Utilities.gzip(Utilities.newBlob(part, 'application/octet-stream')).getBytes();
+  return bridgeJson_({ok:true, revision:revision, size:size, offset:offset, length:part.length,
+    eof:offset + part.length === size, encoding:'gzip', sha256:bridgeSha_(part),
+    file_sha256:bridgeSha_(bytes), compressed_sha256:bridgeSha_(zipped),
+    data_base64:Utilities.base64Encode(zipped)});
 }
 
 // Batch metadata requests inside the existing Bridge. No source blob reads,

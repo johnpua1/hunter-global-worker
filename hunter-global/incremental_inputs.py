@@ -114,7 +114,9 @@ class InputCache:
                              self.market, key, len(self.loaded_packs[key]))
                 except WorkBudgetExceeded:
                     raise
-                except (ValueError, KeyError, zipfile.BadZipFile, RuntimeError, OSError, requests.RequestException):
+                except (ValueError, KeyError, zipfile.BadZipFile, RuntimeError, OSError, requests.RequestException) as exc:
+                    if str(exc) == 'LARGE_READ_TRANSPORT_RETRY_REQUIRED':
+                        raise
                     # Corruption is a cache miss, never an accepted source.
                     self.loaded_packs[key] = {}
                     LOG.warning('INPUT_CACHE_PACK_REBUILD market=%s pack=%s', self.market, key)
@@ -188,10 +190,13 @@ class InputCache:
         # Fill the previous small tail pack; daily append growth doesn't create
         # one more remote cache read per trading day forever.
         packs = {k: dict(v) for k, v in self.manifest['packs'].items()}
+        written_groups = {}
         tail = next((k for k in sorted(packs, key=int, reverse=True)
                      if packs[k]['size'] < PACK_TARGET // 2), None)
         if pending and tail is not None:
-            previous = self.load_pack(writer, tail)
+            tail_paths = [p for p, e in entries.items() if str(e['pack']) == tail]
+            previous = ({p: self.memory[p] for p in tail_paths}
+                        if all(p in self.memory for p in tail_paths) else self.load_pack(writer, tail))
             for path, entry in list(entries.items()):
                 if str(entry['pack']) == tail:
                     if (path not in pending and path in previous and digest(previous[path]) == entry['sha256']
@@ -224,6 +229,7 @@ class InputCache:
                 raise RuntimeError('INPUT_CACHE_PACK_TOO_LARGE')
             writer.put(self.pack_path(key, slot), data, mime='application/octet-stream')
             packs[key] = {'slot': slot, 'sha256': digest(data), 'size': len(data)}
+            written_groups[key] = dict(group)
             for path, data in group.items():
                 entries[path] = {**fingerprint(data), 'sha256': digest(data), 'pack': int(key)}
         used = {str(e['pack']) for e in entries.values()}
@@ -233,7 +239,9 @@ class InputCache:
         kwargs = {'expected_sha': digest(self.original)} if self.original is not None else {'immutable': True}
         writer.put(self.pointer, data, **kwargs)
         self.original, self.manifest = data, doc
-        self.loaded_packs.clear(); self.dirty.clear()
+        self.loaded_packs = {k: v for k, v in self.loaded_packs.items() if k in used}
+        self.loaded_packs.update(written_groups)
+        self.dirty.clear()
         LOG.info('INPUT_CACHE_COMMITTED market=%s files=%d packs=%d source_reads=%d cache_hits=%d',
                  self.market, len(entries), len(doc['packs']), self.misses, self.hits)
 

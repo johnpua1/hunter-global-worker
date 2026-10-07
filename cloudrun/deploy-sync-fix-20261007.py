@@ -116,7 +116,9 @@ def main():
                 'a6de79fb94a1c4fbd9f99312f4744d4aa0d8d67f',
                 '6cbba32e4754868e93da9f00ca19371e92a5e8e5',
                 '859323f28a76057b51c5e807feec2db6a9aa3b5f',
-                '64dbb5ede192a66f4fd16eebef1f33521f07fb7b', sha}
+                '64dbb5ede192a66f4fd16eebef1f33521f07fb7b',
+                '1d59d88cf7d6d2a3982d739f787b96830a69653f',
+                '03c564db8f9537cc48ced6cec21cda3b1546486f', sha}
     jobs = {'hunter-us-daily': ['--mode', 'auto', '--market', 'US'],
             'hunter-hk-daily': ['--mode', 'auto', '--market', 'HK'],
             'hunter-maintenance': ['/app/maintenance.py']}

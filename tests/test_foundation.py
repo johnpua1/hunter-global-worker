@@ -245,7 +245,7 @@ class FoundationTests(unittest.TestCase):
     @patch("repair.load_market", return_value=object())
     @patch("repair.decide")
     @patch("repair.current_universe")
-    def test_repairs_drain_in_persisted_chunks_without_base_writes(self, universe, decide_repair, base):
+    def test_unresolved_repairs_remain_pending_and_retry_next_run(self, universe, decide_repair, base):
         drive = MemoryDrive()
         universe.return_value = [{"security_id": "US-000001"}]
         drive.data["US/CALENDAR_BASE.ndjson.gz"] = lines_gz([{"date": "2026-01-02"}])
@@ -256,9 +256,20 @@ class FoundationTests(unittest.TestCase):
                                       "reason": "NO_INDEPENDENT_EVIDENCE",
                                       "verified_at_myt": "2026-09-27T08:00:00+08:00"}
         result = run_repair(drive, "US", chunk_size=20)
-        self.assertEqual(result["open"], 0)
+        self.assertEqual(result["open"], 52)
         self.assertEqual(result["processed"], 52)
+        self.assertFalse(result["timed_out"])
         self.assertEqual(drive.writes, ["REPAIR_QUEUE.json"] * 3)
+        self.assertEqual(decide_repair.call_count, 52)
+        # A later source recovery can resolve them, without touching BASE or
+        # reprocessing unresolved entries repeatedly inside a single run.
+        decide_repair.return_value = {"result": "VALIDATED_NO_DATA_DEFECT", "accepted": False,
+                                     "reason": "NO_TRADE_BAR_VALID_OR_NOT_REPRODUCED",
+                                     "verified_at_myt": "2026-10-07T10:00:00+08:00"}
+        recovered = run_repair(drive, "US", chunk_size=20)
+        self.assertEqual(recovered["processed"], 52)
+        self.assertEqual(recovered["open"], 0)
+        self.assertEqual(drive.writes, ["REPAIR_QUEUE.json"] * 6)
         self.assertEqual(run_repair(drive, "US")["processed"], 0)
 
     def test_derived_reads_flat_and_sharded_repair_patches(self):

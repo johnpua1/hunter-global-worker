@@ -10,6 +10,22 @@ from production_guard import check_at_start, fingerprint, safe_error_summary
 
 
 class ProductionGuardTests(unittest.TestCase):
+    def test_monthly_job_checks_the_fingerprint_normally(self):
+        env = {"CLOUD_RUN_JOB": "hunter-monthly-v2", "CLOUD_RUN_TASK_COUNT": "1",
+               "HUNTER_SOURCE_SHA": "a" * 40}
+        argv = ["/app/runner.py", "--mode", "monthly"]
+        env["HUNTER_CONFIG_SHA256"] = fingerprint(
+            job=env["CLOUD_RUN_JOB"], environ=env, argv=argv,
+            service_account="sa@example.test", cpu_limit="100000", memory_limit="100000")
+        with patch.dict(os.environ, env, clear=True), \
+             patch.object(sys, "argv", argv), \
+             patch("production_guard._service_account_email", return_value="sa@example.test"), \
+             patch("production_guard._read_limit", return_value="100000"), \
+             self.assertLogs("hunter.guard", level=logging.INFO) as logs:
+            check_at_start()
+        self.assertIn("HUNTER_CONFIG_OK worker=hunter-monthly-v2", logs.output[0])
+        self.assertNotIn("HUNTER_CONFIG_DRIFT", " ".join(logs.output))
+
     def test_fingerprint_changes_with_identity_and_secret_without_exposing_secret(self):
         config = dict(job="hunter-us-daily", environ={
             "APPS_SCRIPT_SHARED_KEY": "sensitive-value", "FETCH_WORKERS": "10",

@@ -1,4 +1,4 @@
-"""Read-only configuration drift check for the three Cloud Run jobs.
+"""Read-only configuration drift check for the four Cloud Run jobs.
 
 The expected fingerprint is enrolled after a production image and job template
 are verified. Never log the inputs: one of them is the Bridge credential.
@@ -27,7 +27,7 @@ ENV_KEYS = (
     "HUNTER_ACTIONS_CUTOVER",
     "HUNTER_SOURCE_SHA",
 )
-EXPECTED_JOBS = {"hunter-us-daily", "hunter-hk-daily", "hunter-maintenance"}
+EXPECTED_JOBS = {"hunter-us-daily", "hunter-hk-daily", "hunter-maintenance", "hunter-monthly-v2"}
 HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 

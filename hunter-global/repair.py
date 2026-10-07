@@ -18,6 +18,8 @@ import requests
 from runner import Drive, compact, digest, fetch_security, load_market, now_myt, retry_http, parse_lines_gz
 from foundation import current_universe
 
+PENDING_STATUSES = {"OPEN", "UNRESOLVED"}
+
 
 def second_source_close(ticker: str, market: str, start: str | None = None,
                         end: str | None = None) -> dict[str, float]:
@@ -179,7 +181,7 @@ def decide(drive: Drive, item: dict, security: dict, state=None, base_cache=None
 def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
                chunk_size: int = 25, shard_index: int | None = None,
                shard_count: int | None = None) -> dict:
-    """Persist each chunk before the Cloud Run deadline; restarts skip terminal rows."""
+    """Persist chunks; retry unresolved rows once per invocation, never in a loop."""
     if deadline is None:
         deadline = time.monotonic() + int(os.getenv("REPAIR_TIME_BUDGET_SECONDS", "3300"))
     securities = {s["security_id"]: s for s in current_universe(drive, market)}
@@ -187,12 +189,14 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
     state = None
     base_cache = {}
     base_cache_lock = threading.Lock()
+    attempted = set()
     while time.monotonic() < deadline - 300:
         raw = drive.read("REPAIR_QUEUE.json")
         doc = json.loads(raw)
         candidates = [(i, x) for i, x in enumerate(doc["items"])
                       if x.get("market") == market
-                      and x.get("status", "OPEN") == "OPEN"
+                      and x.get("status", "OPEN") in PENDING_STATUSES
+                      and i not in attempted
                       and (shard_count is None or shard_index is None
                            or i % shard_count == shard_index)]
         if not candidates:
@@ -286,7 +290,7 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
         for _ in range(12):
             latest = json.loads(raw)
             for index, item in updates.items():
-                if latest["items"][index].get("status", "OPEN") == "OPEN":
+                if latest["items"][index].get("status", "OPEN") in PENDING_STATUSES:
                     latest["items"][index] = item
             try:
                 drive.put_fast("REPAIR_QUEUE.json", compact(latest), expected_sha=digest(raw))
@@ -300,9 +304,10 @@ def run_repair(drive: Drive, market: str, *, deadline: float | None = None,
         else:
             raise RuntimeError("REPAIR_QUEUE_CAS_EXHAUSTED")
         processed += len(updates)
+        attempted.update(updates)
     final_items = drive.json("REPAIR_QUEUE.json")["items"]
     remaining = sum(
-        x.get("market") == market and x.get("status", "OPEN") == "OPEN"
+        x.get("market") == market and x.get("status", "OPEN") in PENDING_STATUSES
         and (shard_count is None or shard_index is None or i % shard_count == shard_index)
         for i, x in enumerate(final_items))
     return {"market": market, "processed": processed, "accepted": accepted_count,

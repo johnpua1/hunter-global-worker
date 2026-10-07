@@ -335,7 +335,24 @@ class Drive:
                   "sha256": digest(content), "mime": mime, "immutable": immutable}
         if expected_sha is not None:
             fields["expected_sha256"] = expected_sha
-        result = self._call("put", **fields)
+        try:
+            result = self._call("put", **fields)
+        except (requests.Timeout, requests.ConnectionError, ValueError, RuntimeError) as exc:
+            # A CAS write may commit before its response is lost. Replaying
+            # that request then correctly reports STALE_WRITE. Reconcile only
+            # the exact desired bytes; never overwrite a competing writer.
+            if (expected_sha is None or immutable or
+                    isinstance(exc, RuntimeError) and str(exc) != "BRIDGE_STALE_WRITE"):
+                raise
+            try:
+                info = self.file(path)
+                identical = info is not None and digest(self.read(path)) == fields["sha256"]
+            except (requests.RequestException, ValueError, RuntimeError):
+                identical = False
+            if not identical:
+                raise exc
+            LOG.info("PUT_COMMIT_CONFIRMED path=%s", path)
+            return info
         if result["sha256"] != digest(content):
             raise RuntimeError("BRIDGE_WRITE_SHA_MISMATCH:" + path)
         if digest(self.read(path)) != digest(content):

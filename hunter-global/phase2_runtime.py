@@ -365,7 +365,7 @@ def compose_prices(drive,market,wanted,daily_rows=None):
 
 def calculate_reactions(drive,market,history,daily_rows=None):
     events=history.get('events',[])
-    targets=[e for e in events if e.get('event_status')!='REVISED' and (not e.get('reaction_status') or e.get('reaction_status') in ('PENDING_PRICE','PARTIAL'))]
+    targets=[e for e in events if e.get('event_status')!='REVISED' and (not e.get('reaction_status') or e.get('reaction_status') in ('PENDING_PRICE','PARTIAL','PRICE_MISSING'))]
     if not targets:return history
     prices,sessions=compose_prices(drive,market,{e['security_id'] for e in targets},daily_rows=daily_rows)
     for event in targets:
@@ -395,6 +395,20 @@ def calculate_reactions(drive,market,history,daily_rows=None):
             else:event['day5_reason']='PRICE_MISSING'
         event['reaction_status']='COMPLETE' if event['day5_pct'] is not None and event['day1_volume_ratio'] is not None else 'PARTIAL'
     return history
+
+def validate_history_transition(market,previous_ids,history,active):
+    """Keep historical identities even after an issuer leaves the active pool."""
+    events=history['events'];ids={e['event_id'] for e in events}
+    if len(ids)!=len(events):raise RuntimeError('PHASE2_HISTORY_DUPLICATE_EVENT')
+    if not previous_ids.issubset(ids):raise RuntimeError('PHASE2_HISTORY_EVENT_REMOVED')
+    for event in events:
+        sid=event['security_id'];eid=event['event_id']
+        if not sid.startswith(market+'-') or eid!=sid+':'+event['report_date']:
+            raise RuntimeError('PHASE2_HISTORY_IDENTITY_MISMATCH')
+        # Current source events must resolve to an active issuer. Existing
+        # historical records are retained, including excluded/delisted issuers.
+        if sid not in active and eid not in previous_ids:
+            raise RuntimeError('PHASE2_HISTORY_NEW_INACTIVE_EVENT')
 
 def daily(drive:Drive,market:str,daily_rows=None):
     LOG.info('PHASE2_STAGE market=%s stage=load_inputs',market)
@@ -431,11 +445,11 @@ def daily(drive:Drive,market:str,daily_rows=None):
         raise RuntimeError('PHASE2_' + market + '_CALENDAR_SOURCE_INCOMPLETE')
     LOG.info('PHASE2_STAGE market=%s stage=history',market)
     history_raw=drive.read(history_path);history=unpack(json.loads(history_raw),active)
+    previous_ids={event['event_id'] for event in history['events']}
     history=update_history(market,old_calendar,new_calendar,history,today)
     LOG.info('PHASE2_STAGE market=%s stage=reactions',market)
     history=calculate_reactions(drive,market,history,daily_rows=daily_rows)
-    assert len({e['event_id'] for e in history['events']})==len(history['events'])
-    assert all(e['security_id'] in active for e in history['events'])
+    validate_history_transition(market,previous_ids,history,active)
     LOG.info('PHASE2_STAGE market=%s stage=write_results',market)
     drive.put(history_path,compact(pack(history)),expected_sha=digest(history_raw))
     drive.put(calendar_path,compact(new_calendar),expected_sha=digest(calendar_raw))

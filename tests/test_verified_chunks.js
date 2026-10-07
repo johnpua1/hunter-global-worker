@@ -4,6 +4,7 @@ const ctx=vm.createContext({});vm.runInContext(fs.readFileSync('bridge/Gateway.g
 const bytes=Buffer.from('{"repeated":"financial history"}\n'.repeat(200000));
 let stamp=1;
 const file={getId:()=> 'history',getLastUpdated:()=>new Date(stamp),getSize:()=>bytes.length,
+            getName:()=> 'EARNINGS_HISTORY.json',getMimeType:()=> 'application/json',
             getBlob:()=>({getBytes:()=>Array.from(bytes)})};
 ctx.bridgeJson_=x=>x;
 ctx.Utilities={DigestAlgorithm:{SHA_256:'sha'},
@@ -11,6 +12,8 @@ ctx.Utilities={DigestAlgorithm:{SHA_256:'sha'},
  newBlob:raw=>({getBytes:()=>raw}),gzip:blob=>({getBytes:()=>Array.from(zlib.gzipSync(Buffer.from(blob.getBytes())))}),
  base64Encode:raw=>Buffer.from(raw).toString('base64')};
 const first=ctx.bridgeVerifiedChunk_(file,{revision:'history:1',offset:0,length:131072});
+assert.equal(ctx.bridgeInfo_(file, 'US/PHASE2/EARNINGS_HISTORY.json').revision, 'history:1');
+assert.throws(()=>ctx.bridgeInfo_({...file,getId:undefined}, 'US/test'), /getId/);
 assert.equal(first.file_sha256,crypto.createHash('sha256').update(bytes).digest('hex'));
 assert.deepEqual(zlib.gunzipSync(Buffer.from(first.data_base64,'base64')),bytes.subarray(0,131072));
 assert.ok(first.data_base64.length < 4000);

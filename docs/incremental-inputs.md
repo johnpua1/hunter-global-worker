@@ -126,3 +126,24 @@ monitoring flow above. Active executions continue using their original worker
 image; Bridge changes remain backward compatible with them. Cloud Shell still
 hosts this one-off monitor; disconnecting does not stop started Cloud Run work
 but may stop monitoring and additional launches.
+
+
+### Bridge preflight correction (October 8)
+
+A live deployment stopped before worker build/update with the ambiguous
+`COMPRESSED_BRIDGE_UPGRADE_REQUIRED` marker. That marker alone did not distinguish
+a missing history file from metadata lacking a revision, nor establish which
+Bridge version the job actually reached.
+
+The release now resolves each daily job's exact existing URL binding instead of
+assuming the latest named secret version. Only those existing deployments in the
+selected Bridge project are updated. Each version is cloned read-only and its
+Gateway source compared before worker preflight. File metadata always calls the
+Drive File revision methods; it never silently omits the revision for a failed
+JavaScript typeof capability check. The file response identifies the read protocol.
+Preflight tolerates a bounded propagation interval and reports distinct, market-
+specific errors. Real compressed US and HK reads must still pass before worker
+build/update. Existing executions and the 7200-second task timeout are unchanged.
+
+Local tests verify these branches; the live cause and completion remain subject
+to Cloud Shell readback. No prior failure is reclassified as a completed sync.

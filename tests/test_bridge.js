@@ -141,6 +141,7 @@ function folder(name) {
       const file = {name: value.name, trashed: false,
         getName() { return this.name; }, getBlob: () => value,
         getMimeType: () => value.mime, getSize: () => value.content.length,
+        getId: () => 'fixture-' + files.length, getLastUpdated: () => new Date(1),
         setName(next) { this.name = next; }, setTrashed(next) { this.trashed = next; }};
       files.push(file);
       return file;

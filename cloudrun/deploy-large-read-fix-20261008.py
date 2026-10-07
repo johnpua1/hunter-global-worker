@@ -21,6 +21,30 @@ deployment = resume.deployment
 base = resume.base
 gc = base.recovery.gc
 PREVIOUS = 'fbff4716b50c8593180d6bcee3789a5fdb31e950'
+PRIOR_LARGE_READ = '2668473a8cb4700134fd22cbd2b490ba3ebd9ac9'
+
+
+def probe_metadata(reader, market):
+    path = market + '/PHASE2/EARNINGS_HISTORY.json'
+    reason = 'BRIDGE_VERSION_NOT_SERVING'
+    for attempt in range(6):
+        response = reader._call('file', path=path, _attempts=2)
+        info = response.get('file')
+        if response.get('read_protocol') != 'verified-chunks-v2':
+            reason = 'BRIDGE_VERSION_NOT_SERVING'
+        elif info is None:
+            reason = 'PHASE2_HISTORY_FILE_MISSING'
+        elif not info.get('revision'):
+            raise RuntimeError(market + '_BRIDGE_REVISION_FIELD_MISSING')
+        elif int(info.get('size') or 0) <= 0:
+            raise RuntimeError(market + '_PHASE2_HISTORY_FILE_EMPTY')
+        else:
+            return path, info
+        if attempt < 5:
+            print('BRIDGE_PREFLIGHT_WAIT=' + market + ';reason=' + reason
+                  + ';attempt=' + str(attempt + 1), flush=True)
+            time.sleep(5)
+    raise RuntimeError(market + '_' + reason)
 
 
 def preflight_bridge(doc, market):
@@ -42,10 +66,7 @@ def preflight_bridge(doc, market):
         os.environ.update(HUNTER_BRIDGE_READ_TIMEOUT_SECONDS='90', HUNTER_BRIDGE_ATTEMPTS='2')
         reader = Reader()
         try:
-            path = market + '/PHASE2/EARNINGS_HISTORY.json'
-            info = reader.file(path)
-            if not info or not info.get('revision'):
-                raise RuntimeError('COMPRESSED_BRIDGE_UPGRADE_REQUIRED')
+            path, info = probe_metadata(reader, market)
             length = min(131072, int(info['size']))
             result = reader._call('read_verified_chunk', path=path, revision=info['revision'],
                                   offset=0, length=length, _attempts=2)
@@ -84,7 +105,7 @@ def deploy(sha):
     for market in resume.TARGETS:
         doc = gc('run', 'jobs', 'describe', 'hunter-' + market.lower() + '-daily')
         c = deployment.container(doc, market)
-        if (c['image'] not in {base.BASE_IMAGE + PREVIOUS, base.BASE_IMAGE + sha}
+        if (c['image'] not in {base.BASE_IMAGE + PREVIOUS, base.BASE_IMAGE + PRIOR_LARGE_READ, base.BASE_IMAGE + sha}
                 or base.deploy.daily_runtime(doc) != (7200, 0)):
             raise RuntimeError('EXPECTED_DEPLOYMENT_REQUIRED')
         docs[market] = doc

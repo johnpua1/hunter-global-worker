@@ -1,9 +1,14 @@
 import contextlib
+import base64
+import gzip
+import hashlib
 import importlib.util
 import io
 import pathlib
+import sys
 import unittest
 from unittest.mock import patch
+from unittest.mock import Mock
 import test_resumable_release as release
 
 path=pathlib.Path(__file__).resolve().parents[1]/'cloudrun/deploy-large-read-fix-20261008.py'
@@ -22,6 +27,53 @@ def config(market,new=False):
     return doc
 
 class LargeReadDeploymentTests(unittest.TestCase):
+    def test_old_endpoint_can_settle_without_redeploying_or_launching(self):
+        info={'revision':'file:1','size':10}
+        reader=Mock()
+        reader._call.side_effect=[{'ok':True,'file':{'size':10}},
+            {'ok':True,'read_protocol':'verified-chunks-v2','file':info}]
+        with patch.object(mod.time,'sleep') as sleep, contextlib.redirect_stdout(io.StringIO()):
+            path,got=mod.probe_metadata(reader,'US')
+        self.assertEqual(got,info)
+        self.assertEqual(path,'US/PHASE2/EARNINGS_HISTORY.json')
+        sleep.assert_called_once_with(5)
+        self.assertTrue(all(c.args==('file',) for c in reader._call.call_args_list))
+
+    def test_preflight_reasons_are_distinct_and_bounded(self):
+        cases=[({'ok':True,'file':{'size':10}},'US_BRIDGE_VERSION_NOT_SERVING',6),
+               ({'ok':True,'read_protocol':'verified-chunks-v2','file':None},'US_PHASE2_HISTORY_FILE_MISSING',6),
+               ({'ok':True,'read_protocol':'verified-chunks-v2','file':{'size':10}},'US_BRIDGE_REVISION_FIELD_MISSING',1)]
+        for response,reason,count in cases:
+            reader=Mock();reader._call.return_value=response
+            with patch.object(mod.time,'sleep'),contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError,reason):mod.probe_metadata(reader,'US')
+            self.assertEqual(reader._call.call_count,count)
+
+    def test_actual_preflight_checks_compressed_bytes_for_both_markets(self):
+        sys.path.insert(0,str(mod.ROOT/'hunter-global'))
+        import runner
+        data=b'financial history'*10000
+        part=data[:131072];packed=gzip.compress(part)
+        sha=lambda raw:hashlib.sha256(raw).hexdigest()
+        for market in ('US','HK'):
+            calls=[]
+            def call(_reader,op,**kw):
+                calls.append(op)
+                self.assertEqual(kw['path'],market+'/PHASE2/EARNINGS_HISTORY.json')
+                if op=='file':return {'ok':True,'read_protocol':'verified-chunks-v2',
+                    'file':{'revision':'history:1','size':len(data)}}
+                self.assertEqual(op,'read_verified_chunk')
+                return {'revision':'history:1','size':len(data),'offset':0,'length':len(part),
+                    'encoding':'gzip','sha256':sha(part),'compressed_sha256':sha(packed),
+                    'data_base64':base64.b64encode(packed).decode()}
+            def env(_doc,_entry,key):
+                return 'https://script.google.com/macros/s/test/exec' if key.endswith('URL') else 'test-key'
+            with patch.object(runner.Drive,'_call',call),patch.object(mod.base.deploy,'preflight_env_value',side_effect=env), \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                mod.preflight_bridge(config(market),market)
+            self.assertEqual(calls,['file','read_verified_chunk'])
+            self.assertIn('COMPRESSED_READ_VERIFIED='+market,output.getvalue())
+
     def test_bridge_must_pass_before_build_or_job_update(self):
         with patch.object(mod,'gc',return_value=config('US')) as gc, \
              patch.object(mod,'preflight_bridge',side_effect=RuntimeError('CAPABILITY_MISSING')), \

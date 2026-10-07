@@ -12,9 +12,8 @@ chmod 700 "$SCRIPT_DIR"
 if ! npx -y "$CLASP" show-authorized-user --json >/dev/null 2>&1; then
   npx -y "$CLASP" login --no-localhost
 fi
-BRIDGE_URL="$(gcloud secrets versions access latest --secret APPS_SCRIPT_WEBAPP_URL --project rgs-hunter-global)"
-DEPLOYMENT_ID="$(printf '%s' "$BRIDGE_URL" | sed -n 's#^https://script.google.com/macros/s/\([^/]*\)/exec$#\1#p')"
-test -n "$DEPLOYMENT_ID"
+BOUND_DEPLOYMENTS="$(python3 "$ROOT/cloudrun/bridge-release-check-20261008.py" bindings)"
+test -n "$BOUND_DEPLOYMENTS"
 SCRIPT_ID="$(npx -y "$CLASP" list-scripts | python3 -c 'import re,sys
 hits=[]
 for line in sys.stdin:
@@ -32,10 +31,13 @@ cp "$ROOT/bridge/appsscript.json" appsscript.json
 python3 "$ROOT/cloudrun/normalize-clasp-dir.py" "$SCRIPT_DIR"
 python3 "$ROOT/cloudrun/guard-apps-script-governed.py" "$SCRIPT_DIR"
 # Verify this exact existing deployment, never create another URL or trigger.
-DEPLOYMENTS="$(npx -y "$CLASP" list-deployments)"
-RESOLVED="$(printf '%s\n' "$DEPLOYMENTS" | python3 "$ROOT/cloudrun/resolve-clasp-deployment.py" --preferred "$DEPLOYMENT_ID")"
-test "$RESOLVED" = "$DEPLOYMENT_ID"
+while IFS= read -r DEPLOYMENT_ID; do
+  python3 "$ROOT/cloudrun/bridge-release-check-20261008.py" resolve "$SCRIPT_ID" "$DEPLOYMENT_ID"
+done <<< "$BOUND_DEPLOYMENTS"
 npx -y "$CLASP" push --force
-npx -y "$CLASP" update-deployment "$DEPLOYMENT_ID" --description "Hunter durable compressed reads ${EXPECTED_SHA}"
+while IFS= read -r DEPLOYMENT_ID; do
+  npx -y "$CLASP" update-deployment "$DEPLOYMENT_ID" --description "Hunter durable compressed reads ${EXPECTED_SHA}"
+  python3 "$ROOT/cloudrun/bridge-release-check-20261008.py" verify "$SCRIPT_ID" "$DEPLOYMENT_ID"
+done <<< "$BOUND_DEPLOYMENTS"
 cd "$ROOT"
 python3 cloudrun/deploy-large-read-fix-20261008.py "$EXPECTED_SHA"

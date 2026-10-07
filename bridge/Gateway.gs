@@ -109,10 +109,10 @@ function doPost(e) {
     if (op === 'file' || op === 'read' || op === 'read_chunk' || op === 'read_verified_chunk') {
       var file = bridgeFile_(root, path);
       if (!file) {
-        if (op === 'file') return bridgeJson_({ok: true, file: null});
+        if (op === 'file') return bridgeJson_({ok: true, file: null, read_protocol: 'verified-chunks-v2'});
         throw new Error('FILE_NOT_FOUND');
       }
-      if (op === 'file') return bridgeJson_({ok: true, file: bridgeInfo_(file, path)});
+      if (op === 'file') return bridgeJson_({ok: true, file: bridgeInfo_(file, path), read_protocol: 'verified-chunks-v2'});
       if (op === 'read_chunk') return bridgeReadChunk_(file, body);
       if (op === 'read_verified_chunk') return bridgeVerifiedChunk_(file, body);
       if (file.getSize() > 10000000) throw new Error('READ_SIZE_LIMIT');
@@ -255,8 +255,9 @@ function bridgeFile_(root, path) {
 }
 function bridgeInfo_(file, path) {
   var info = {id: path, name: file.getName(), mimeType: file.getMimeType(), size: file.getSize()};
-  if (typeof file.getId === 'function' && typeof file.getLastUpdated === 'function')
-    info.revision = file.getId() + ':' + file.getLastUpdated().getTime();
+  // Drive File methods are required, not optional test-double capabilities.
+  // Never silently publish metadata without the revision needed by readers.
+  info.revision = file.getId() + ':' + file.getLastUpdated().getTime();
   return info;
 }
 

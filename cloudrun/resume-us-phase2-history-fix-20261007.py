@@ -17,7 +17,7 @@ base = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(base)
 recovery = base.recovery
 JOB = base.JOB
-OLD = 'hunter-us-daily-l4ptp'
+OLD = 'hunter-us-daily-w4m6s'
 PREVIOUS = '0d662bba78b9c4860e929abce418da68c594c86b'
 
 
@@ -112,6 +112,9 @@ def main():
     # A receipt committed during build/cancellation always wins.
     if not base.preflight(after):return
     if eligible() is None:return
+    launch_config=recovery.gc('run','jobs','describe',JOB)
+    if base.configuration(launch_config)!=base.configuration(after):
+        raise RuntimeError('US_CONFIGURATION_CHANGED_BEFORE_LAUNCH')
     override=base.ARGS+['--phase2-only','--as-of',base.DATE]
     own=recovery.name(recovery.gc('run','jobs','execute',JOB,'--args='+','.join(override),'--async'))
     if not re.fullmatch(re.escape(JOB)+r'-[a-z0-9]+',own):

@@ -115,12 +115,19 @@ gcloud builds submit "$ROOT" --tag "$IMAGE" --project "$GCP_PROJECT_ID" --region
 deploy_job() {
   local name="$1" runtime_sa="$2" key_secret="$3"; shift 3
   local action=create
+  local task_timeout=60m max_retries=1
+  # DAILY needs an uninterrupted window for backfill plus derived results.
+  # Same 120-minute maximum task-attempt budget; maintenance is unchanged.
+  if [[ "$name" == hunter-us-daily || "$name" == hunter-hk-daily ]]; then
+    task_timeout=120m
+    max_retries=0
+  fi
   if gcloud run jobs describe "$name" --region "$REGION" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
     action=update
   fi
   gcloud run jobs "$action" "$name" --image "$IMAGE" --region "$REGION" \
     --project "$GCP_PROJECT_ID" --service-account "$runtime_sa" \
-    --cpu 1 --memory 512Mi --tasks 1 --task-timeout 60m --max-retries 1 \
+    --cpu 1 --memory 512Mi --tasks 1 --task-timeout "$task_timeout" --max-retries "$max_retries" \
     --set-env-vars 'HUNTER_ACTIONS_CUTOVER=CONFIRMED,FETCH_WORKERS=10' \
     --set-secrets "APPS_SCRIPT_WEBAPP_URL=${URL_SECRET}:latest,APPS_SCRIPT_SHARED_KEY=${key_secret}:latest" \
     "$@"

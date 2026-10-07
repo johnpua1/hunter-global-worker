@@ -14,6 +14,43 @@ recovery = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(recovery)
 
 
+def daily_runtime(doc):
+    """Read the explicit task budget from Cloud Run v1 or v2 job metadata."""
+    try:
+        task = doc['spec']['template']['spec']['template']['spec']
+        timeout = task['timeoutSeconds']
+    except KeyError:
+        try:
+            task = doc['template']['template']
+            timeout = task['timeout']
+        except KeyError:
+            raise RuntimeError('DAILY_RUNTIME_CONFIGURATION_MISSING') from None
+    seconds = str(timeout).removesuffix('s')
+    retries = task.get('maxRetries')
+    if not seconds.isdigit() or type(retries) is not int or retries < 0:
+        raise RuntimeError('DAILY_RUNTIME_CONFIGURATION_INVALID')
+    return int(seconds), retries
+
+
+def runtime_repair_flags(doc):
+    # Reallocate the existing two 60-minute attempts to one 120-minute attempt.
+    # Do not silently increase a differently configured production budget.
+    if daily_runtime(doc) not in {(3600, 1), (7200, 0)}:
+        raise RuntimeError('DAILY_RUNTIME_BUDGET_NOT_APPROVED')
+    return ['--task-timeout=120m', '--max-retries=0']
+
+
+def runtime_capacity(doc):
+    if 'spec' in doc:
+        execution = doc['spec']['template']['spec']
+        task = execution['template']['spec']
+    else:
+        execution = doc['template']
+        task = execution['template']
+    return (execution.get('taskCount'), execution.get('parallelism'),
+            [c.get('resources') for c in task['containers']])
+
+
 def secret_aliases(doc):
     """Collect Cloud Run v1 secret lookup names without reading any values."""
     aliases = {}
@@ -85,6 +122,9 @@ def main():
             'hunter-maintenance': ['/app/maintenance.py']}
     if '--daily-only' in sys.argv:
         jobs.pop('hunter-maintenance')
+    repair_timeout = '--repair-timeout' in sys.argv
+    if repair_timeout and '--daily-only' not in sys.argv:
+        raise RuntimeError('TIMEOUT_REPAIR_REQUIRES_DAILY_ONLY')
     work = pathlib.Path(tempfile.mkdtemp(prefix='hunter-sync-repair-'))
     for job, args in jobs.items():
         before = recovery.gc('run', 'jobs', 'describe', job)
@@ -92,6 +132,9 @@ def main():
         if (len(rows) != 1 or rows[0].get('args') != args or
                 rows[0].get('image') not in {base + ':' + s for s in approved}):
             raise RuntimeError('UNEXPECTED_JOB_CONFIGURATION:' + job)
+        if repair_timeout:
+            runtime_repair_flags(before)
+            runtime_capacity(before)
         (work / (job + '.before.json')).write_text(json.dumps(before))
     if '--daily-only' in sys.argv:
         # Verify the exact URLs/credentials currently configured in Cloud Run,
@@ -121,19 +164,35 @@ def main():
     subprocess.run(['gcloud', 'builds', 'submit', str(ROOT), '--config=' + str(config),
                     '--project=' + recovery.PROJECT, '--region=' + recovery.REGION, '--quiet'], check=True)
     for job in jobs:
+        before = json.loads((work / (job + '.before.json')).read_text())
+        if repair_timeout:
+            current = recovery.gc('run', 'jobs', 'describe', job)
+            if (daily_runtime(current) != daily_runtime(before)
+                    or runtime_capacity(current) != runtime_capacity(before)
+                    or list(recovery.containers(current)) != list(recovery.containers(before))):
+                raise RuntimeError('JOB_CHANGED_DURING_BUILD:' + job)
+        runtime_flags = runtime_repair_flags(before) if repair_timeout else []
         settings = {'HUNTER_SOURCE_SHA': sha}
         if job.endswith('-daily'):
             settings.update(DAILY_READ_WORKERS='2', DERIVED_READ_WORKERS='2',
                             HUNTER_BRIDGE_READ_TIMEOUT_SECONDS='90')
         recovery.gc('run', 'jobs', 'update', job, '--image=' + image,
-                    '--update-env-vars=' + ','.join(k + '=' + v for k, v in settings.items()))
+                    '--update-env-vars=' + ','.join(k + '=' + v for k, v in settings.items()),
+                    *runtime_flags)
         after = recovery.gc('run', 'jobs', 'describe', job)
         rows = list(recovery.containers(after))
         env = {v['name']: v.get('value') for v in rows[0].get('env', [])} if len(rows) == 1 else {}
         if (len(rows) != 1 or rows[0].get('image') != image or rows[0].get('args') != jobs[job]
                 or any(env.get(k) != v for k, v in settings.items())):
             raise RuntimeError('DEPLOY_READBACK_FAILED:' + job)
+        if repair_timeout:
+            if daily_runtime(after) != (7200, 0) or runtime_capacity(after) != runtime_capacity(before):
+                raise RuntimeError('DAILY_RUNTIME_READBACK_FAILED:' + job)
+            print('RUNTIME_VERIFIED=' + job + ':timeout=7200,retries=0,capacity=unchanged', flush=True)
         print('DEPLOY_VERIFIED=' + job, flush=True)
+    if '--no-start' in sys.argv:
+        print('JOBS_UPDATED_ONLY=existing_executions_unchanged;next_execution_uses_new_configuration', flush=True)
+        return
     for market in ('us', 'hk'):
         recovery.JOB = 'hunter-' + market + '-daily'
         active = [r for r in recovery.executions() if recovery.state(r) == 'ACTIVE']

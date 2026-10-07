@@ -307,7 +307,9 @@ def append_daily_date(drive: Drive, market: str, date: str, securities: list[dic
     return run
 
 
-def run_daily(drive: Drive, market: str, workers: int, daily_rows=None):
+def run_daily(drive: Drive, market: str, workers: int, daily_rows=None, patch_snapshot=None):
+    if patch_snapshot is not None:
+        patch_snapshot.clear()
     started = time.monotonic()
     LOG.info("SYNC_STAGE market=%s stage=load_base", market)
     base = load_market(drive, market)
@@ -354,7 +356,7 @@ def run_daily(drive: Drive, market: str, workers: int, daily_rows=None):
         # This invocation already validated every existing row and committed
         # each new append. Do not repeat the entire remote history scan for
         # every pending date; ranking still reads current patches/actions.
-        build(drive, market, date, daily_rows=daily_rows)
+        build(drive, market, date, daily_rows=daily_rows, patch_snapshot=patch_snapshot)
         previous["last_completed_date"] = date
         previous["updated_at_myt"] = now_myt()
         drive.put(checkpoint, compact(previous))

@@ -59,7 +59,11 @@ def read_files(drive: Drive, market: str, folder: str, suffix):
     return sorted(paths)
 
 
-def build(drive: Drive, market: str, date: str, daily_rows=None):
+def build(drive: Drive, market: str, date: str, daily_rows=None, patch_snapshot=None):
+    # Publish only a complete, successful build's inputs to the next stage.
+    # Each pending date replaces the snapshot after its daily writes finish.
+    if patch_snapshot is not None:
+        patch_snapshot.clear()
     LOG.info("DERIVED_STAGE market=%s date=%s stage=load_inputs", market, date)
     state = load_market(drive, market)
     universe = current_universe(drive, market)
@@ -193,4 +197,7 @@ def build(drive: Drive, market: str, date: str, daily_rows=None):
                        "benchmark": None, "mae_mfe_anchor": None})
     if not drive.file(path) or digest(drive.read(path)) != digest(payload):
         drive.put(path, payload)
+    if patch_snapshot is not None:
+        patch_snapshot.update(market=market, as_of=date, files=len(patch_paths),
+                              patches=dict(patches))
     return len(derived)

@@ -927,7 +927,8 @@ def validate_phase2_resume(drive, market, date):
     return checkpoint
 
 
-def finish_phase2_daily(drive, market, daily_rows=None, force=False, expected_date=None):
+def finish_phase2_daily(drive, market, daily_rows=None, force=False, expected_date=None,
+                       patch_snapshot=None):
     """Resume Phase 2 even when DAILY committed before a previous interruption."""
     path = f"{market}/CONTROL/DAILY_CHECKPOINT.json"
     raw = drive.read(path)
@@ -935,12 +936,16 @@ def finish_phase2_daily(drive, market, daily_rows=None, force=False, expected_da
     date = checkpoint["last_completed_date"]
     if expected_date is not None and date != expected_date:
         raise RuntimeError("PHASE2_RESUME_CHECKPOINT_CHANGED")
+    if patch_snapshot and (patch_snapshot.get("market") != market
+                           or patch_snapshot.get("as_of") != date):
+        raise RuntimeError("PHASE2_PATCH_SNAPSHOT_IDENTITY_MISMATCH")
     if checkpoint.get("phase2_completed_date") == date and not force:
         LOG.info("PHASE2_ALREADY_COMMITTED market=%s date=%s", market, date)
         return
     from phase2_runtime import daily as run_phase2_daily
     LOG.info("PHASE2_START market=%s date=%s", market, date)
-    result = run_phase2_daily(drive, market, daily_rows=daily_rows)
+    result = run_phase2_daily(drive, market, daily_rows=daily_rows,
+                             patch_snapshot=patch_snapshot)
     if result.get("status") == "INITIAL_SNAPSHOT_PENDING":
         raise RuntimeError("PHASE2_INITIAL_SNAPSHOT_PENDING:" + market)
     checkpoint["phase2_completed_date"] = date
@@ -1036,7 +1041,9 @@ def main():
     for market in markets:
         seed_corporate_actions(drive, market)
         daily_rows = {}
-        result = run_foundation_daily(drive, market, workers, daily_rows=daily_rows)
+        patch_snapshot = {}
+        result = run_foundation_daily(drive, market, workers, daily_rows=daily_rows,
+                                     patch_snapshot=patch_snapshot)
         LOG.info("daily market=%s sessions=%d written=%d", market, len(result),
                  sum(item.get("written", 0) for item in result))
         if args.mode == "daily-core":
@@ -1045,7 +1052,8 @@ def main():
         if not result:
             LOG.info("NO_NEW_SESSION market=%s", market)
         if all(item.get("status") == "COMPLETE" for item in result):
-            finish_phase2_daily(drive, market, daily_rows=daily_rows, force=bool(result))
+            finish_phase2_daily(drive, market, daily_rows=daily_rows, force=bool(result),
+                                patch_snapshot=patch_snapshot)
         else:
             LOG.warning("phase2 daily deferred until foundation completes market=%s", market)
             raise RuntimeError("DAILY_INCOMPLETE:" + market + ":" +

@@ -321,7 +321,9 @@ def update_history(market,old_calendar,new_calendar,history,today,refresh_eps=Tr
     assert len(byid)==len(events)
     return history
 
-def compose_prices(drive,market,wanted,daily_rows=None):
+def compose_prices(drive,market,wanted,daily_rows=None,patch_snapshot=None):
+    if patch_snapshot and patch_snapshot.get('market') != market:
+        raise RuntimeError('PHASE2_PATCH_SNAPSHOT_MARKET_MISMATCH')
     from runner import load_market, map_drive_reads
     state=load_market(drive,market);base=defaultdict(list);patches=defaultdict(list);daily=defaultdict(list)
     # Recovery uses the existing bounded derived reader pool for both markets.
@@ -337,14 +339,20 @@ def compose_prices(drive,market,wanted,daily_rows=None):
         for row in rows:
             if row['security_id'] in wanted:base[row['security_id']].append(row)
         LOG.info('PHASE2_BASE_PROGRESS market=%s completed=%d total=%d',market,number,len(paths))
-    LOG.info('PHASE2_STAGE market=%s stage=patch_inventory',market)
-    paths=read_files(drive,market,'REPAIR_PATCH','.json')
-    for number,doc in enumerate(map_drive_reads(drive,read_json,paths,workers),1):
-        items=doc.get('items') if isinstance(doc,dict) else None
-        if not isinstance(items,list):items=[doc] if isinstance(doc,dict) else []
-        for item in items:
-            if item.get('security_id') in wanted:patches[item['security_id']].append(item)
-        LOG.info('PHASE2_PATCH_PROGRESS market=%s completed=%d total=%d',market,number,len(paths))
+    if patch_snapshot:
+        for sid in wanted:
+            patches[sid].extend(patch_snapshot['patches'].get(sid,[]))
+        LOG.info('PHASE2_PATCH_REUSED market=%s date=%s files=%d',
+                 market,patch_snapshot['as_of'],patch_snapshot['files'])
+    else:
+        LOG.info('PHASE2_STAGE market=%s stage=patch_inventory',market)
+        paths=read_files(drive,market,'REPAIR_PATCH','.json')
+        for number,doc in enumerate(map_drive_reads(drive,read_json,paths,workers),1):
+            items=doc.get('items') if isinstance(doc,dict) else None
+            if not isinstance(items,list):items=[doc] if isinstance(doc,dict) else []
+            for item in items:
+                if item.get('security_id') in wanted:patches[item['security_id']].append(item)
+            LOG.info('PHASE2_PATCH_PROGRESS market=%s completed=%d total=%d',market,number,len(paths))
     days = daily_segments(drive,market)
     if daily_rows is None:
         paths=[]
@@ -363,11 +371,11 @@ def compose_prices(drive,market,wanted,daily_rows=None):
     for path in read_files(drive,market,'CORPORATE_ACTIONS','.json'):actions.extend(drive.json(path))
     return {sid:{row.get('trade_date',row.get('date')):row for row in split_adjust(compose(base[sid],patches[sid],daily[sid]),actions)} for sid in wanted},sorted(set(state.calendar)|set(days))
 
-def calculate_reactions(drive,market,history,daily_rows=None):
+def calculate_reactions(drive,market,history,daily_rows=None,patch_snapshot=None):
     events=history.get('events',[])
     targets=[e for e in events if e.get('event_status')!='REVISED' and (not e.get('reaction_status') or e.get('reaction_status') in ('PENDING_PRICE','PARTIAL','PRICE_MISSING'))]
     if not targets:return history
-    prices,sessions=compose_prices(drive,market,{e['security_id'] for e in targets},daily_rows=daily_rows)
+    prices,sessions=compose_prices(drive,market,{e['security_id'] for e in targets},daily_rows=daily_rows,patch_snapshot=patch_snapshot)
     for event in targets:
         sid=event['security_id'];day=event['report_date'];session=event['session']
         choices=[i for i,s in enumerate(sessions) if (s>=day if market=='US' and session=='BMO' else s>day)]
@@ -410,7 +418,7 @@ def validate_history_transition(market,previous_ids,history,active):
         if sid not in active and eid not in previous_ids:
             raise RuntimeError('PHASE2_HISTORY_NEW_INACTIVE_EVENT')
 
-def daily(drive:Drive,market:str,daily_rows=None):
+def daily(drive:Drive,market:str,daily_rows=None,patch_snapshot=None):
     LOG.info('PHASE2_STAGE market=%s stage=load_inputs',market)
     sector_path=f'{market}/PHASE2/SECTOR_MAP.json'
     calendar_path=f'{market}/PHASE2/EARNINGS_CALENDAR.json'
@@ -448,7 +456,7 @@ def daily(drive:Drive,market:str,daily_rows=None):
     previous_ids={event['event_id'] for event in history['events']}
     history=update_history(market,old_calendar,new_calendar,history,today)
     LOG.info('PHASE2_STAGE market=%s stage=reactions',market)
-    history=calculate_reactions(drive,market,history,daily_rows=daily_rows)
+    history=calculate_reactions(drive,market,history,daily_rows=daily_rows,patch_snapshot=patch_snapshot)
     validate_history_transition(market,previous_ids,history,active)
     LOG.info('PHASE2_STAGE market=%s stage=write_results',market)
     drive.put(history_path,compact(pack(history)),expected_sha=digest(history_raw))

@@ -14,11 +14,13 @@ import logging
 import os
 import re
 import threading
+import time
 import zipfile
 import requests
 from contextlib import contextmanager
 
 from runner import compact, digest
+from execution_budget import WorkBudgetExceeded
 
 LOG = logging.getLogger('hunter.incremental')
 FOLDER = 'application/vnd.google-apps.folder'
@@ -67,12 +69,15 @@ class InputCache:
             except (ValueError, KeyError, TypeError, AttributeError):
                 LOG.warning('INPUT_CACHE_REBUILD market=%s reason=MANIFEST_INVALID', market)
         self.memory, self.loaded_packs, self.dirty = {}, {}, set()
-        self.guard = threading.Lock()
+        self.guard = threading.RLock()
+        self.checkpoint_at = time.monotonic()
         self.locks = {}
         self.hits = self.misses = 0
         LOG.info('INPUT_CACHE_OPEN market=%s indexed_files=%d cached_files=%d', market,
                  sum(e.get('mimeType') != FOLDER for e in self.records.values()),
                  len(self.manifest['entries']))
+        LOG.info('INPUT_CACHE_RESUME market=%s unchanged_saved_files=%d', market,
+                 sum(self.matches(p, e) for p, e in self.manifest['entries'].items()))
 
     def source(self, path):
         parts = path.split('/')
@@ -107,6 +112,8 @@ class InputCache:
                                                  if str(e['pack']) == key}
                     LOG.info('INPUT_PACK_RESTORED market=%s pack=%s files=%d',
                              self.market, key, len(self.loaded_packs[key]))
+                except WorkBudgetExceeded:
+                    raise
                 except (ValueError, KeyError, zipfile.BadZipFile, RuntimeError, OSError, requests.RequestException):
                     # Corruption is a cache miss, never an accepted source.
                     self.loaded_packs[key] = {}
@@ -115,28 +122,35 @@ class InputCache:
 
     def read(self, reader, path):
         with self.lock('source:' + path):
-            if path in self.memory:
-                self.hits += 1
-                return self.memory[path]
-            entry = self.manifest['entries'].get(path)
-            if entry and self.matches(path, entry):
-                data = self.load_pack(reader, entry['pack']).get(path)
-                if data is not None and digest(data) == entry['sha256'] and fingerprint(data) == {
-                        'md5': entry['md5'], 'size': entry['size']}:
-                    self.memory[path] = data
+            with self.guard:
+                if path in self.memory:
                     self.hits += 1
-                    return data
+                    return self.memory[path]
+                entry = self.manifest['entries'].get(path)
+                if entry and self.matches(path, entry):
+                    data = self.load_pack(reader, entry['pack']).get(path)
+                    if data is not None and digest(data) == entry['sha256'] and fingerprint(data) == {
+                            'md5': entry['md5'], 'size': entry['size']}:
+                        self.memory[path] = data
+                        self.hits += 1
+                        return data
             LOG.info('INPUT_SOURCE_READ market=%s path=%s', self.market, path)
-            data = reader.read(path)
             info = self.records.get(path)
+            data = (reader.read_known(path, info) if info is not None and hasattr(reader, 'read_known')
+                    else reader.read(path))
             if not info or fingerprint(data) != {'md5': info.get('md5'), 'size': int(info.get('size', -1))}:
                 raise RuntimeError('INPUT_SOURCE_CHANGED_DURING_READ:' + path)
-            self.memory[path] = data
-            self.dirty.add(path)
-            self.misses += 1
+            with self.guard:
+                self.memory[path] = data
+                self.dirty.add(path)
+                self.misses += 1
             return data
 
     def written(self, path, data, mime):
+        with self.guard:
+            self._written(path, data, mime)
+
+    def _written(self, path, data, mime):
         # Only called after the existing append/put SHA verification succeeds.
         self.records[path] = {'id': path, 'name': path.rsplit('/', 1)[-1],
                               'mimeType': mime, **fingerprint(data)}
@@ -147,7 +161,26 @@ class InputCache:
         self.memory[path] = data
         self.dirty.add(path)
 
+    def checkpoint(self):
+        # The lock also bounds uncommitted work while another reader saves.
+        with self.guard:
+            if self.dirty and (len(self.dirty) >= 25 or time.monotonic() - self.checkpoint_at >= 120
+                               or sum(len(self.memory[p]) for p in self.dirty) >= 6_000_000):
+                self.flush()
+
     def flush(self):
+        from execution_budget import saving
+        with self.guard, saving():
+            # Never share a requests.Session with a reader still in flight.
+            writer = self.raw.fork_reader() if hasattr(self.raw, 'fork_reader') else self.raw
+            try:
+                self._flush(writer)
+                self.checkpoint_at = time.monotonic()
+            finally:
+                if writer is not self.raw:
+                    writer.http.close()
+
+    def _flush(self, writer):
         entries = {p: dict(e) for p, e in self.manifest['entries'].items() if self.matches(p, e)}
         pending = {p: self.memory[p] for p in self.dirty}
         if not pending and entries == self.manifest['entries']:
@@ -158,7 +191,7 @@ class InputCache:
         tail = next((k for k in sorted(packs, key=int, reverse=True)
                      if packs[k]['size'] < PACK_TARGET // 2), None)
         if pending and tail is not None:
-            previous = self.load_pack(self.raw, tail)
+            previous = self.load_pack(writer, tail)
             for path, entry in list(entries.items()):
                 if str(entry['pack']) == tail:
                     if (path not in pending and path in previous and digest(previous[path]) == entry['sha256']
@@ -189,7 +222,7 @@ class InputCache:
             data = buffer.getvalue()
             if len(data) > PACK_LIMIT:
                 raise RuntimeError('INPUT_CACHE_PACK_TOO_LARGE')
-            self.raw.put(self.pack_path(key, slot), data, mime='application/octet-stream')
+            writer.put(self.pack_path(key, slot), data, mime='application/octet-stream')
             packs[key] = {'slot': slot, 'sha256': digest(data), 'size': len(data)}
             for path, data in group.items():
                 entries[path] = {**fingerprint(data), 'sha256': digest(data), 'pack': int(key)}
@@ -198,7 +231,7 @@ class InputCache:
                'packs': {k: v for k, v in packs.items() if k in used}}
         data = compact(doc)
         kwargs = {'expected_sha': digest(self.original)} if self.original is not None else {'immutable': True}
-        self.raw.put(self.pointer, data, **kwargs)
+        writer.put(self.pointer, data, **kwargs)
         self.original, self.manifest = data, doc
         self.loaded_packs.clear(); self.dirty.clear()
         LOG.info('INPUT_CACHE_COMMITTED market=%s files=%d packs=%d source_reads=%d cache_hits=%d',
@@ -217,7 +250,11 @@ class CachedDrive:
 
     def read(self, path):
         path = path.strip('/')
-        return self.cache.read(self.raw, path) if self.cache.source(path) else self.raw.read(path)
+        if not self.cache.source(path):
+            return self.raw.read(path)
+        data = self.cache.read(self.raw, path)
+        self.cache.checkpoint()
+        return data
 
     def json(self, path):
         return json.loads(self.read(path))
@@ -236,27 +273,32 @@ class CachedDrive:
         result = self.raw.put(path, content, mime=mime, **kwargs)
         if self.cache.source(path):
             self.cache.written(path, content, mime)
+            self.cache.checkpoint()
         return result
 
     def append(self, path, content, mime='application/json'):
         result = self.raw.append(path, content, mime)
         if self.cache.source(path):
             self.cache.written(path, content, mime)
+            self.cache.checkpoint()
         return result
 
     def put_fast(self, path, content, mime='application/json', **kwargs):
         result = self.raw.put_fast(path, content, mime=mime, **kwargs)
         if self.cache.source(path):
             self.cache.written(path, content, mime)
+            self.cache.checkpoint()
         return result
 
 
-def save_inputs(drive):
+def save_inputs(drive, strict=True):
     if isinstance(drive, CachedDrive):
         try:
             drive.cache.flush()
         except Exception as exc:
             LOG.error('INPUT_CACHE_SAVE_FAILED market=%s type=%s', drive.cache.market, type(exc).__name__)
+            if strict:
+                raise
 
 
 @contextmanager
@@ -265,11 +307,15 @@ def incremental_inputs(raw, market):
         yield raw
         return
     cache = InputCache(raw, market)
+    failed = False
     try:
         yield CachedDrive(raw, cache)
+    except BaseException:
+        failed = True
+        raise
     finally:
         # A performance cache never fabricates or erases completion. On a cache
         # failure the next run can still reconstruct verified source inputs.
-        save_inputs(CachedDrive(raw, cache))
+        save_inputs(CachedDrive(raw, cache), strict=not failed)
         LOG.info('INPUT_CACHE_SUMMARY market=%s source_reads=%d cache_hits=%d',
                  market, cache.misses, cache.hits)

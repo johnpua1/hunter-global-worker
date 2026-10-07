@@ -45,11 +45,12 @@ def bridge_read_response(url: str, payload: dict, timeout: float) -> dict:
     if payload.get("op") not in {"file", "list", "read", "read_chunk", "source_inventory"}:
         raise ValueError("BRIDGE_READ_FALLBACK_WRITE_DENIED")
     opener = urllib.request.build_opener(_NoBridgeRedirect)
+    from execution_budget import timeout as budget_timeout
     request = urllib.request.Request(url, data=compact(payload), method="POST",
                                      headers={"Content-Type": "application/json"})
     for _ in range(4):
         try:
-            with opener.open(request, timeout=timeout) as response:
+            with opener.open(request, timeout=budget_timeout(timeout)) as response:
                 return json.loads(response.read().decode("utf-8-sig"))
         except urllib.error.HTTPError as exc:
             if exc.code not in (301, 302, 303, 307, 308):
@@ -164,6 +165,7 @@ class Drive:
         raise AssertionError("unreachable")
 
     def _call(self, op: str, *, _attempts: int | None = None, **fields) -> dict:
+        from execution_budget import timeout as budget_timeout
         request = {"op": op, "key": self.key, **fields}
         attempts = max(1, _attempts if _attempts is not None else
                        int(os.getenv("HUNTER_BRIDGE_ATTEMPTS", "8")))
@@ -180,7 +182,7 @@ class Drive:
                 # ContentService redirects to a one-time response resource.
                 # Handle that hop explicitly, as the control-plane client does;
                 # never silently turn an intermediate /exec redirect into GET.
-                response = self.http.post(self.url, json=request, timeout=timeout,
+                response = self.http.post(self.url, json=request, timeout=budget_timeout(timeout),
                                           allow_redirects=False)
                 response_hop = False
                 for hop in range(4):
@@ -196,7 +198,7 @@ class Drive:
                         break
                     # Every response hop is GET-only; do not replay a write or
                     # forward the shared key when ContentService redirects again.
-                    response = self.http.get(location, timeout=timeout, allow_redirects=False)
+                    response = self.http.get(location, timeout=budget_timeout(timeout), allow_redirects=False)
                     response_hop = True
                 try:
                     # A 404 on ContentService's disposable response URL is not
@@ -217,7 +219,7 @@ class Drive:
                                 op, fields.get("path", ""), response.status_code,
                                 len(response.content))
                     try:
-                        result = bridge_read_response(self.url, request, timeout)
+                        result = bridge_read_response(self.url, request, budget_timeout(timeout))
                     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
                         LOG.warning("BRIDGE_READ_FALLBACK_ERROR op=%s path=%s offset=%s length=%s status=%s type=%s",
                                     op, fields.get("path", ""), fields.get("offset"),
@@ -286,10 +288,14 @@ class Drive:
     def file(self, path: str) -> dict | None:
         return self._call("file", path=path.strip("/")).get("file")
 
-    def read(self, path: str) -> bytes:
+    def read_known(self, path: str, info: dict) -> bytes:
+        """Reuse the complete source inventory; InputCache verifies its fingerprint."""
+        return self.read(path, _info=info)
+
+    def read(self, path: str, *, _info=None) -> bytes:
         import base64
         clean = path.strip("/")
-        info = self.file(clean)
+        info = self.file(clean) if _info is None else _info
         # Apps Script ContentService becomes unreliable for multi-MB JSON
         # responses because the redirected googleusercontent response can sit
         # idle long enough to hit the worker's read timeout. Use bounded Drive
@@ -1001,6 +1007,9 @@ def main():
         raise RuntimeError("SINGLE_WRITER_NOT_CONFIRMED: disable Apps Script triggers first")
     workers = max(1, min(10, int(os.getenv("FETCH_WORKERS", "6"))))
     from incremental_inputs import incremental_inputs
+    from execution_budget import start as start_budget
+    if args.mode in ('auto', 'daily', 'daily-core'):
+        start_budget()
     if args.phase2_only:
         validate_phase2_resume(drive, args.market, args.as_of)
         with incremental_inputs(drive, args.market) as inputs:

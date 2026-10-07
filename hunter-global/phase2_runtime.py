@@ -419,6 +419,10 @@ def validate_history_transition(market,previous_ids,history,active):
             raise RuntimeError('PHASE2_HISTORY_NEW_INACTIVE_EVENT')
 
 def daily(drive:Drive,market:str,daily_rows=None,patch_snapshot=None):
+    from phase2_resume import resume, stage_and_publish
+    recovered = resume(drive, market)
+    if recovered is not None:
+        return recovered
     LOG.info('PHASE2_STAGE market=%s stage=load_inputs',market)
     sector_path=f'{market}/PHASE2/SECTOR_MAP.json'
     calendar_path=f'{market}/PHASE2/EARNINGS_CALENDAR.json'
@@ -459,7 +463,8 @@ def daily(drive:Drive,market:str,daily_rows=None,patch_snapshot=None):
     history=calculate_reactions(drive,market,history,daily_rows=daily_rows,patch_snapshot=patch_snapshot)
     validate_history_transition(market,previous_ids,history,active)
     LOG.info('PHASE2_STAGE market=%s stage=write_results',market)
-    drive.put(history_path,compact(pack(history)),expected_sha=digest(history_raw))
-    drive.put(calendar_path,compact(new_calendar),expected_sha=digest(calendar_raw))
-    return {'market':market,'calendar_events':len(new_calendar['events']),
-            'history_events':len(history['events']),'sectors_refreshed':len(target)}
+    result = {'market':market,'calendar_events':len(new_calendar['events']),
+              'history_events':len(history['events']),'sectors_refreshed':len(target)}
+    return stage_and_publish(drive, market,
+        [(history_path, compact(pack(history)), digest(history_raw)),
+         (calendar_path, compact(new_calendar), digest(calendar_raw))], result)

@@ -4,6 +4,7 @@ import datetime as dt
 import html as html_mod
 import json
 import logging
+import os
 import re
 import time
 from collections import defaultdict
@@ -321,24 +322,40 @@ def update_history(market,old_calendar,new_calendar,history,today,refresh_eps=Tr
     return history
 
 def compose_prices(drive,market,wanted,daily_rows=None):
-    from runner import load_market
+    from runner import load_market, map_drive_reads
     state=load_market(drive,market);base=defaultdict(list);patches=defaultdict(list);daily=defaultdict(list)
-    for batch in range(1,state.checkpoint['total_batches']+1):
-        for row in parse_lines_gz(drive.read(f'{market}/BASE/batch-{batch:04d}.ndjson.gz')):
+    # HK recovery uses the same bounded reader pool already configured for
+    # derived data. US behavior is unchanged by this targeted deployment.
+    workers=max(1,min(6,int(os.getenv('DERIVED_READ_WORKERS','4')))) if market=='HK' else 1
+    def read_gzip(reader,path):
+        return parse_lines_gz(reader.read(path))
+    def read_json(reader,path):
+        return reader.json(path)
+    paths=[f'{market}/BASE/batch-{batch:04d}.ndjson.gz'
+           for batch in range(1,state.checkpoint['total_batches']+1)]
+    LOG.info('PHASE2_STAGE market=%s stage=base_reads total=%d',market,len(paths))
+    for number,rows in enumerate(map_drive_reads(drive,read_gzip,paths,workers),1):
+        for row in rows:
             if row['security_id'] in wanted:base[row['security_id']].append(row)
-    for path in read_files(drive,market,'REPAIR_PATCH','.json'):
-        doc=drive.json(path)
+        LOG.info('PHASE2_BASE_PROGRESS market=%s completed=%d total=%d',market,number,len(paths))
+    LOG.info('PHASE2_STAGE market=%s stage=patch_inventory',market)
+    paths=read_files(drive,market,'REPAIR_PATCH','.json')
+    for number,doc in enumerate(map_drive_reads(drive,read_json,paths,workers),1):
         items=doc.get('items') if isinstance(doc,dict) else None
         if not isinstance(items,list):items=[doc] if isinstance(doc,dict) else []
         for item in items:
             if item.get('security_id') in wanted:patches[item['security_id']].append(item)
+        LOG.info('PHASE2_PATCH_PROGRESS market=%s completed=%d total=%d',market,number,len(paths))
     days = daily_segments(drive,market)
     if daily_rows is None:
+        paths=[]
         for day in days:
             LOG.info('PHASE2_DAILY_READ market=%s date=%s',market,day)
-            for path in read_files(drive,market,'DAILY/'+day,('.ndjson.gz','.ndjson.gzip')):
-                for row in parse_lines_gz(drive.read(path)):
-                    if row['security_id'] in wanted:daily[row['security_id']].append(row)
+            paths.extend(read_files(drive,market,'DAILY/'+day,('.ndjson.gz','.ndjson.gzip')))
+        for number,rows in enumerate(map_drive_reads(drive,read_gzip,paths,workers),1):
+            for row in rows:
+                if row['security_id'] in wanted:daily[row['security_id']].append(row)
+            LOG.info('PHASE2_DAILY_PROGRESS market=%s completed=%d total=%d',market,number,len(paths))
     else:
         for sid in wanted:
             daily[sid].extend(daily_rows.get(sid,[]))
@@ -381,6 +398,7 @@ def calculate_reactions(drive,market,history,daily_rows=None):
     return history
 
 def daily(drive:Drive,market:str,daily_rows=None):
+    LOG.info('PHASE2_STAGE market=%s stage=load_inputs',market)
     sector_path=f'{market}/PHASE2/SECTOR_MAP.json'
     calendar_path=f'{market}/PHASE2/EARNINGS_CALENDAR.json'
     history_path=f'{market}/PHASE2/EARNINGS_HISTORY.json'
@@ -394,9 +412,12 @@ def daily(drive:Drive,market:str,daily_rows=None):
     full=today.weekday()==0
     target=set(active) if full else set(active)-set(prior_rows)
     dropped=set(prior_rows)-set(active)
+    LOG.info('PHASE2_STAGE market=%s stage=sectors targets=%d dropped=%d',market,len(target),len(dropped))
     if target or dropped:
         new_rows,errors,ambiguous=(sector_us(active,index,target,prior_rows) if market=='US'
                                    else sector_hk(active,index,target,prior_rows))
+        if market=='HK' and errors:
+            raise RuntimeError('PHASE2_HK_SECTOR_SOURCE_INCOMPLETE')
         if errors:
             new_rows=[{**prior_rows[row['security_id']], 'source_refresh_error':errors}
                       if row.get('source') is None and row['security_id'] in prior_rows and prior_rows[row['security_id']].get('source')
@@ -406,14 +427,21 @@ def daily(drive:Drive,market:str,daily_rows=None):
         prior.update(fetched_at=dt.datetime.now(MYT).isoformat(timespec='seconds'),source_errors=errors,identity_ambiguous=ambiguous)
         assert len(prior['rows'])==len(active) and {r['security_id'] for r in prior['rows']}==set(active)
         drive.put(sector_path,compact(prior),expected_sha=digest(sector_raw))
+    LOG.info('PHASE2_STAGE market=%s stage=calendar',market)
     calendar_raw=drive.read(calendar_path);old_calendar=json.loads(calendar_raw)
     new_calendar=us_calendar(active,index,today) if market=='US' else hk_calendar(active,index,today)
+    # Do not replace the last usable HK calendar/history with an empty failed
+    # source response, or publish a successful Phase 2 receipt for that attempt.
+    if market=='HK' and new_calendar.get('source_errors'):
+        raise RuntimeError('PHASE2_HK_CALENDAR_SOURCE_INCOMPLETE')
+    LOG.info('PHASE2_STAGE market=%s stage=history',market)
     history_raw=drive.read(history_path);history=unpack(json.loads(history_raw),active)
     history=update_history(market,old_calendar,new_calendar,history,today)
     LOG.info('PHASE2_STAGE market=%s stage=reactions',market)
     history=calculate_reactions(drive,market,history,daily_rows=daily_rows)
     assert len({e['event_id'] for e in history['events']})==len(history['events'])
     assert all(e['security_id'] in active for e in history['events'])
+    LOG.info('PHASE2_STAGE market=%s stage=write_results',market)
     drive.put(history_path,compact(pack(history)),expected_sha=digest(history_raw))
     drive.put(calendar_path,compact(new_calendar),expected_sha=digest(calendar_raw))
     return {'market':market,'calendar_events':len(new_calendar['events']),

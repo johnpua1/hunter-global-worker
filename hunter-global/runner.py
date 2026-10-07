@@ -862,12 +862,36 @@ def _enforce_cloud_run_topology(args) -> None:
         raise RuntimeError(f"TOPOLOGY_RUNTIME_MISMATCH:{job}:MONTHLY_MARKET_MUST_BE_NONE")
 
 
-def finish_phase2_daily(drive, market, daily_rows=None, force=False):
+def validate_phase2_resume(drive, market, date):
+    """An explicit HK recovery may only enrich an already committed daily close."""
+    if market != "HK" or not date:
+        raise RuntimeError("PHASE2_RESUME_REQUIRES_HK_AND_DATE")
+    # Reject malformed dates before any writes or source requests.
+    dt.date.fromisoformat(date)
+    checkpoint = drive.json(f"{market}/CONTROL/DAILY_CHECKPOINT.json")
+    if checkpoint.get("market") != market or checkpoint.get("last_completed_date") != date:
+        raise RuntimeError("PHASE2_RESUME_CHECKPOINT_MISMATCH")
+    rank = drive.json(f"{market}/DERIVED/{date}/RANK.json")
+    rows = rank.get("rows", [])
+    parts = rank.get("detail_parts")
+    if (rank.get("market") != market or rank.get("as_of") != date or not rows
+            or type(parts) is not int or parts != (len(rows) + 249) // 250
+            or len({r["security_id"] for r in rows}) != len(rows)):
+        raise RuntimeError("PHASE2_RESUME_RANK_INVALID")
+    for batch in range(1, parts + 1):
+        if not drive.file(f"{market}/DERIVED/{date}/batch-{batch:04d}.json"):
+            raise RuntimeError("PHASE2_RESUME_DETAIL_MISSING")
+    return checkpoint
+
+
+def finish_phase2_daily(drive, market, daily_rows=None, force=False, expected_date=None):
     """Resume Phase 2 even when DAILY committed before a previous interruption."""
     path = f"{market}/CONTROL/DAILY_CHECKPOINT.json"
     raw = drive.read(path)
     checkpoint = json.loads(raw)
     date = checkpoint["last_completed_date"]
+    if expected_date is not None and date != expected_date:
+        raise RuntimeError("PHASE2_RESUME_CHECKPOINT_CHANGED")
     if checkpoint.get("phase2_completed_date") == date and not force:
         LOG.info("PHASE2_ALREADY_COMMITTED market=%s date=%s", market, date)
         return
@@ -889,11 +913,15 @@ def main():
                                            "bootstrap", "calendar", "monthly"), default="probe")
     parser.add_argument("--market", choices=MARKETS, help="Run one market in an independent job")
     parser.add_argument("--as-of", help="Explicit historical close for calendar/derived")
+    parser.add_argument("--phase2-only", action="store_true",
+                        help="Resume HK Phase 2 for an already committed --as-of close")
     parser.add_argument("--snapshot", help="Use an existing immutable SNAPSHOT_<date> for monthly mode")
     parser.add_argument("--validation", action="store_true",
                         help="Require exact G178 validation statuses in monthly mode")
     args = parser.parse_args()
     _enforce_cloud_run_topology(args)
+    if args.phase2_only and (args.mode != "auto" or args.market != "HK" or not args.as_of):
+        raise RuntimeError("PHASE2_RESUME_REQUIRES_AUTO_HK_AND_DATE")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     from production_guard import check_at_start
     check_at_start()
@@ -911,6 +939,10 @@ def main():
     if os.getenv("HUNTER_ACTIONS_CUTOVER") != "CONFIRMED":
         raise RuntimeError("SINGLE_WRITER_NOT_CONFIRMED: disable Apps Script triggers first")
     workers = max(1, min(10, int(os.getenv("FETCH_WORKERS", "6"))))
+    if args.phase2_only:
+        validate_phase2_resume(drive, "HK", args.as_of)
+        finish_phase2_daily(drive, "HK", expected_date=args.as_of)
+        return
     if args.mode == "monthly":
         from combined_monthly import run_combined_monthly
         LOG.info("monthly result=%s",

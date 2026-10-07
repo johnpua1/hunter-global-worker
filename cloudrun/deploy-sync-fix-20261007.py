@@ -120,6 +120,12 @@ def main():
     jobs = {'hunter-us-daily': ['--mode', 'auto', '--market', 'US'],
             'hunter-hk-daily': ['--mode', 'auto', '--market', 'HK'],
             'hunter-maintenance': ['/app/maintenance.py']}
+    support_only = '--support-only' in sys.argv
+    if support_only and ('--daily-only' in sys.argv or '--no-start' not in sys.argv):
+        raise RuntimeError('SUPPORT_REPAIR_REQUIRES_NO_START_AND_NO_DAILY')
+    if support_only:
+        jobs = {'hunter-maintenance': ['/app/maintenance.py'],
+                'hunter-monthly-v2': ['--mode', 'monthly']}
     if '--daily-only' in sys.argv:
         jobs.pop('hunter-maintenance')
     repair_timeout = '--repair-timeout' in sys.argv
@@ -132,11 +138,14 @@ def main():
         if (len(rows) != 1 or rows[0].get('args') != args or
                 rows[0].get('image') not in {base + ':' + s for s in approved}):
             raise RuntimeError('UNEXPECTED_JOB_CONFIGURATION:' + job)
+        if support_only:
+            daily_runtime(before)
+            runtime_capacity(before)
         if repair_timeout:
             runtime_repair_flags(before)
             runtime_capacity(before)
         (work / (job + '.before.json')).write_text(json.dumps(before))
-    if '--daily-only' in sys.argv:
+    if '--daily-only' in sys.argv or support_only:
         # Verify the exact URLs/credentials currently configured in Cloud Run,
         # not the GitHub diagnostic secret. Values stay in this process only.
         sys.path.insert(0, str(ROOT / 'hunter-global'))
@@ -149,11 +158,16 @@ def main():
                 for name in ('APPS_SCRIPT_WEBAPP_URL', 'APPS_SCRIPT_SHARED_KEY'):
                     os.environ[name] = preflight_env_value(before, values.get(name, {}), name)
                 os.environ.update(HUNTER_BRIDGE_READ_TIMEOUT_SECONDS='90', HUNTER_BRIDGE_ATTEMPTS='2')
-                market = job.split('-')[1].upper()
-                doc = Drive().json(market + '/CURRENT_UNIVERSE.json')
-                if doc.get('market') != market or not doc.get('securities'):
-                    raise RuntimeError('PREFLIGHT_CONTENT_INVALID:' + market)
-                print('PRODUCTION_CONFIG_FULL_READ_PASS=' + market + ':' + str(len(doc['securities'])), flush=True)
+                markets = ('US', 'HK') if support_only else (job.split('-')[1].upper(),)
+                drive = Drive()
+                for market in markets:
+                    doc = drive.json(market + '/CURRENT_UNIVERSE.json')
+                    if doc.get('market') != market or not doc.get('securities'):
+                        raise RuntimeError('PREFLIGHT_CONTENT_INVALID:' + market)
+                    if support_only:
+                        drive.file(market + '/CONTROL/DAILY_RUN_2026-10-06.json')
+                    label = job + ':' + market if support_only else market
+                    print('PRODUCTION_CONFIG_FULL_READ_PASS=' + label + ':' + str(len(doc['securities'])), flush=True)
         finally:
             os.environ.clear()
             os.environ.update(original_env)
@@ -165,7 +179,7 @@ def main():
                     '--project=' + recovery.PROJECT, '--region=' + recovery.REGION, '--quiet'], check=True)
     for job in jobs:
         before = json.loads((work / (job + '.before.json')).read_text())
-        if repair_timeout:
+        if repair_timeout or support_only:
             current = recovery.gc('run', 'jobs', 'describe', job)
             if (daily_runtime(current) != daily_runtime(before)
                     or runtime_capacity(current) != runtime_capacity(before)
@@ -185,6 +199,10 @@ def main():
         if (len(rows) != 1 or rows[0].get('image') != image or rows[0].get('args') != jobs[job]
                 or any(env.get(k) != v for k, v in settings.items())):
             raise RuntimeError('DEPLOY_READBACK_FAILED:' + job)
+        if support_only:
+            if daily_runtime(after) != daily_runtime(before) or runtime_capacity(after) != runtime_capacity(before):
+                raise RuntimeError('SUPPORT_RUNTIME_READBACK_FAILED:' + job)
+            print('SUPPORT_RUNTIME_VERIFIED=' + job + ':budget_and_capacity_unchanged', flush=True)
         if repair_timeout:
             if daily_runtime(after) != (7200, 0) or runtime_capacity(after) != runtime_capacity(before):
                 raise RuntimeError('DAILY_RUNTIME_READBACK_FAILED:' + job)

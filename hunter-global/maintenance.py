@@ -45,11 +45,23 @@ def main() -> None:
         materialize(drive, market, max(checkpoint["last_completed_date"],
                                        dt.date(2026, 9, 25).isoformat()))
         LOG.info("options market=%s rows=%d", market, monthly(drive, market))
+    incomplete = []
     for market in MARKETS:
-        if time.monotonic() >= deadline - 120:
-            break
-        LOG.info("repair market=%s result=%s", market, run_repair(drive, market,
-                                                       deadline=deadline))
+        # run_repair reserves its final 300 seconds for queue commit/readback.
+        if time.monotonic() >= deadline - 300:
+            LOG.error("MAINTENANCE_REPAIR market=%s status=NOT_RUN reason=TIME_BUDGET", market)
+            incomplete.append(market + ":NOT_RUN")
+            continue
+        result = run_repair(drive, market, deadline=deadline)
+        complete = result.get("open") == 0 and result.get("timed_out") is False
+        LOG.log(logging.INFO if complete else logging.ERROR,
+                "MAINTENANCE_REPAIR market=%s status=%s result=%s", market,
+                "QUEUE_DRAINED" if complete else "INCOMPLETE", result)
+        if not complete:
+            incomplete.append(market + ":INCOMPLETE")
+    if incomplete:
+        raise RuntimeError("MAINTENANCE_REPAIR_INCOMPLETE:" + ",".join(incomplete))
+    LOG.info("MAINTENANCE_COMPLETE markets=US,HK")
 
 
 if __name__ == "__main__":

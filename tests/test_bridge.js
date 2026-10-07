@@ -191,3 +191,5 @@ assert.throws(
   /SCOPE_FOREIGN_QUEUE_MUTATION/
 );
 console.log('bridge sealed path, scoped auth, queue isolation and row dedup PASS');
+
+require("./test_monthly_schedule.js");

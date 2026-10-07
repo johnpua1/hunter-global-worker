@@ -16,6 +16,24 @@ spec.loader.exec_module(runner)
 
 
 class DriveReadResilienceTests(unittest.TestCase):
+    def test_expired_404_response_restarts_from_exec_and_preserves_file_result(self):
+        drive = runner.Drive.__new__(runner.Drive)
+        drive.url, drive.key = 'https://script.google.com/macros/s/test/exec', 'key'
+        old, fresh = mock.Mock(), mock.Mock()
+        drive.http = old
+        old.post.return_value = mock.Mock(status_code=302, headers={'Location':'https://script.googleusercontent.com/expired'})
+        expired = mock.Mock(status_code=404)
+        expired.raise_for_status.side_effect = runner.requests.HTTPError('HTTP 404')
+        old.get.return_value = expired
+        fresh.post.return_value = mock.Mock(status_code=200)
+        fresh.post.return_value.json.return_value = {'ok': True, 'file': None}
+        with mock.patch.object(runner.requests, 'Session', return_value=fresh), mock.patch.object(runner.time, 'sleep'):
+            self.assertEqual(drive._call('file', path='US/CONTROL/DAILY_RUN_2026-10-06.json', _attempts=2), {'ok':True,'file':None})
+        old.close.assert_called_once()
+        self.assertEqual(fresh.post.call_args.args[0], drive.url)
+        fresh.get.assert_not_called()
+        expired.json.assert_not_called()
+
     def test_second_content_redirect_completes_reads_and_writes_without_reposting(self):
         for op, payload in [('file', {'ok': True, 'file': {'size': 123}}),
                             ('append', {'ok': True, 'file': {}, 'sha256': 'abc'}),

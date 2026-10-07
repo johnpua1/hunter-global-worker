@@ -978,8 +978,13 @@ function installMonthlyTriggerAt(dateObj, expectedMonth) {
   ]);
   if (!/^\d{4}-\d{2}$/.test(String(expectedMonth || '')))
     throw new Error('MONTH_EXPECTED_INVALID');
-  clearMonthlyTriggers_();
+  // Create the replacement before removing the existing retry.
+  var previous = ScriptApp.getProjectTriggers().filter(function (trigger) {
+    var handler = trigger.getHandlerFunction();
+    return handler === 'monthlyV2' || handler === 'quarterlyV2';
+  });
   var trigger = ScriptApp.newTrigger('monthlyV2').timeBased().at(dateObj).create();
+  previous.forEach(function (old) { ScriptApp.deleteTrigger(old); });
   var props = PropertiesService.getScriptProperties();
   props.setProperty('HUNTER_MONTH_NEXT_TRIGGER', dateObj.toISOString());
   props.setProperty('HUNTER_MONTH_EXPECTED', expectedMonth);
@@ -1022,9 +1027,23 @@ function monthlyV2() {
   var expectedMonth = String(props.getProperty('HUNTER_MONTH_EXPECTED') || '');
   if (!/^\d{4}-\d{2}$/.test(expectedMonth)) throw new Error('MONTH_EXPECTED_NOT_CONFIGURED');
 
+  // Keep this month scheduled even if reads or asynchronous dispatch fail.
+  var retry = hunterMonthlyRetry_(expectedMonth);
   var rootId = props.getProperty('HUNTER_GLOBAL_FOLDER_ID');
   if (!rootId) throw new Error('ROOT_NOT_CONFIGURED');
   var root = DriveApp.getFolderById(rootId);
+
+  var active = bridgeFile_(root, 'ACTIVE_POINTER');
+  if (active) {
+    var pointer = JSON.parse(active.getBlob().getDataAsString('UTF-8'));
+    if (pointer.month_file === 'MONTH_' + expectedMonth &&
+        pointer.hk_month_file === 'HK_MONTH_' + expectedMonth) {
+      var alreadyNext = hunterNextMonthCandidate_(expectedMonth + '-01');
+      return {ok:true, skipped:true, reason:'MONTH_ALREADY_COMMITTED',
+              expectedMonth:expectedMonth,
+              next:installMonthlyTriggerAt(alreadyNext.at, alreadyNext.expectedMonth)};
+    }
+  }
 
   function checkpointDate_(market) {
     var folder = bridgeFolder_(root, market + '/CONTROL', false);
@@ -1042,25 +1061,12 @@ function monthlyV2() {
   if (usDate.slice(0,7) !== expectedMonth || hkDate.slice(0,7) !== expectedMonth) {
     return {ok:true, skipped:true, reason:'WAIT_FIRST_US_AND_HK_SESSION_DAILY',
             expectedMonth:expectedMonth, US:usDate, HK:hkDate,
-            next:hunterMonthlyRetry_(expectedMonth)};
-  }
-
-  var active = bridgeFile_(root, 'ACTIVE_POINTER');
-  if (active) {
-    var pointer = JSON.parse(active.getBlob().getDataAsString('UTF-8'));
-    if (pointer.month_file === 'MONTH_' + expectedMonth &&
-        pointer.hk_month_file === 'HK_MONTH_' + expectedMonth) {
-      var alreadyNext = hunterNextMonthCandidate_(usDate);
-      return {ok:true, skipped:true, reason:'MONTH_ALREADY_COMMITTED',
-              US:usDate, HK:hkDate,
-              next:installMonthlyTriggerAt(alreadyNext.at, alreadyNext.expectedMonth)};
-    }
+            next:retry};
   }
 
   var result = runMonthly();
-  var next = hunterNextMonthCandidate_(usDate);
-  installMonthlyTriggerAt(next.at, next.expectedMonth);
-  return {ok:true, skipped:false, US:usDate, HK:hkDate, run:result};
+  return {ok:true, skipped:Boolean(result.skipped), reason:'WAIT_MONTH_COMMIT',
+          expectedMonth:expectedMonth, US:usDate, HK:hkDate, run:result, next:retry};
 }
 
 function listMonthlyTrigger() {

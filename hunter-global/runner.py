@@ -270,42 +270,51 @@ class Drive:
         # idle long enough to hit the worker's read timeout. Use bounded Drive
         # range reads for any non-trivial file instead of one giant response.
         chunk_threshold = max(64_000, int(os.getenv("HUNTER_BRIDGE_CHUNK_THRESHOLD_BYTES", "262144")))
-        if info and int(info.get("size") or 0) > chunk_threshold:
-            expected = int(info["size"])
-            chunk_size = max(64_000, min(1_000_000, int(os.getenv("HUNTER_BRIDGE_CHUNK_BYTES", "524288"))))
-            offset = 0
-            chunks = []
-            while offset < expected:
-                try:
-                    result = self._call("read_chunk", path=clean, offset=offset,
-                                        length=min(chunk_size, expected - offset), _attempts=2)
-                except (requests.RequestException, ValueError):
-                    # Retry the same offset with a smaller response, instead of
-                    # repeatedly requesting a chunk that the Bridge cannot serve.
-                    if chunk_size <= 64_000:
-                        raise
-                    chunk_size = max(64_000, chunk_size // 2)
-                    LOG.warning("BRIDGE_READ_REDUCE_CHUNK path=%s offset=%d bytes=%d",
-                                clean, offset, chunk_size)
-                    continue
-                if int(result["offset"]) != offset or int(result["size"]) != expected:
-                    raise RuntimeError("BRIDGE_READ_CHUNK_POSITION_MISMATCH:" + path)
+        expected = int(info.get("size") or 0) if info else 0
+        if expected <= chunk_threshold:
+            try:
+                # A confirmed nonempty file can use the independent range API
+                # after bounded transport retries, including for tiny JSON.
+                result = self._call("read", path=clean, _attempts=2 if expected > 0 else None)
+            except (requests.RequestException, ValueError):
+                if expected <= 0:
+                    raise
+                LOG.warning("BRIDGE_READ_RANGE_FALLBACK path=%s bytes=%d", clean, expected)
+            else:
                 data = base64.b64decode(result["data_base64"], validate=True)
-                if (not data or len(data) > min(chunk_size, expected - offset) or
-                        len(data) != int(result["length"]) or digest(data) != result["sha256"]):
-                    raise RuntimeError("BRIDGE_READ_CHUNK_SHA_MISMATCH:" + path)
-                chunks.append(data)
-                offset += len(data)
-                if result["eof"] and offset != expected:
-                    raise RuntimeError("BRIDGE_READ_CHUNK_EARLY_EOF:" + path)
-            data = b"".join(chunks)
-            if len(data) != expected:
-                raise RuntimeError("BRIDGE_READ_CHUNK_SIZE_MISMATCH:" + path)
-            return data
-        result = self._call("read", path=clean)
-        data = base64.b64decode(result["data_base64"], validate=True)
-        if digest(data) != result["sha256"]:
-            raise RuntimeError("BRIDGE_READ_SHA_MISMATCH:" + path)
+                if digest(data) != result["sha256"]:
+                    raise RuntimeError("BRIDGE_READ_SHA_MISMATCH:" + path)
+                return data
+        expected = int(info["size"])
+        chunk_size = min(expected, max(64_000, min(1_000_000, int(os.getenv("HUNTER_BRIDGE_CHUNK_BYTES", "524288")))))
+        offset = 0
+        chunks = []
+        while offset < expected:
+            try:
+                result = self._call("read_chunk", path=clean, offset=offset,
+                                    length=min(chunk_size, expected - offset), _attempts=2)
+            except (requests.RequestException, ValueError):
+                # Retry the same offset with a smaller response, instead of
+                # repeatedly requesting a chunk that the Bridge cannot serve.
+                if chunk_size <= 64_000:
+                    raise
+                chunk_size = max(64_000, chunk_size // 2)
+                LOG.warning("BRIDGE_READ_REDUCE_CHUNK path=%s offset=%d bytes=%d",
+                            clean, offset, chunk_size)
+                continue
+            if int(result["offset"]) != offset or int(result["size"]) != expected:
+                raise RuntimeError("BRIDGE_READ_CHUNK_POSITION_MISMATCH:" + path)
+            data = base64.b64decode(result["data_base64"], validate=True)
+            if (not data or len(data) > min(chunk_size, expected - offset) or
+                    len(data) != int(result["length"]) or digest(data) != result["sha256"]):
+                raise RuntimeError("BRIDGE_READ_CHUNK_SHA_MISMATCH:" + path)
+            chunks.append(data)
+            offset += len(data)
+            if result["eof"] and offset != expected:
+                raise RuntimeError("BRIDGE_READ_CHUNK_EARLY_EOF:" + path)
+        data = b"".join(chunks)
+        if len(data) != expected:
+            raise RuntimeError("BRIDGE_READ_CHUNK_SIZE_MISMATCH:" + path)
         return data
 
     def json(self, path: str) -> Any:

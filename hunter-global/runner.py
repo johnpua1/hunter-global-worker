@@ -219,6 +219,9 @@ class Drive:
                     try:
                         result = bridge_read_response(self.url, request, timeout)
                     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+                        LOG.warning("BRIDGE_READ_FALLBACK_ERROR op=%s path=%s offset=%s length=%s status=%s type=%s",
+                                    op, fields.get("path", ""), fields.get("offset"),
+                                    fields.get("length"), getattr(exc, "code", None), type(exc).__name__)
                         raise ValueError("BRIDGE_READ_FALLBACK_FAILED:" + type(exc).__name__) from None
                     LOG.info("BRIDGE_READ_FALLBACK_RESPONSE op=%s path=%s", op, fields.get("path", ""))
                 if not isinstance(result, dict):
@@ -305,9 +308,14 @@ class Drive:
             except (requests.RequestException, ValueError):
                 # Retry the same offset with a smaller response, instead of
                 # repeatedly requesting a chunk that the Bridge cannot serve.
-                if chunk_size <= 64_000:
+                # A small file can fail ContentService too. The old 64 KB
+                # floor made its range fallback repeat the entire failed
+                # response and then abort (observed on a 378-byte US file).
+                # Shrink the actual remaining request, including a short tail.
+                requested = min(chunk_size, expected - offset)
+                if requested <= 64:
                     raise
-                chunk_size = max(64_000, chunk_size // 2)
+                chunk_size = max(64, requested // 2)
                 LOG.warning("BRIDGE_READ_REDUCE_CHUNK path=%s offset=%d bytes=%d",
                             clean, offset, chunk_size)
                 continue

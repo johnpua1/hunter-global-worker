@@ -182,6 +182,7 @@ class Drive:
                 # never silently turn an intermediate /exec redirect into GET.
                 response = self.http.post(self.url, json=request, timeout=timeout,
                                           allow_redirects=False)
+                response_hop = False
                 for hop in range(4):
                     if response.status_code not in (301, 302, 303, 307, 308):
                         break
@@ -196,8 +197,16 @@ class Drive:
                     # Every response hop is GET-only; do not replay a write or
                     # forward the shared key when ContentService redirects again.
                     response = self.http.get(location, timeout=timeout, allow_redirects=False)
-                response.raise_for_status()
+                    response_hop = True
                 try:
+                    # A 404 on ContentService's disposable response URL is not
+                    # a Drive FILE_NOT_FOUND. Reissue this read through the
+                    # independent client, from /exec, just like non-JSON hops.
+                    # Canonical endpoint errors and all writes retain their
+                    # existing error handling; no write enters this fallback.
+                    if reading and response_hop and response.status_code == 404:
+                        raise ValueError("BRIDGE_READ_RESPONSE_EXPIRED:" + op)
+                    response.raise_for_status()
                     if response.status_code in (301, 302, 303, 307, 308):
                         raise ValueError("BRIDGE_RESPONSE_REDIRECT_UNRESOLVED:" + op)
                     result = response.json()

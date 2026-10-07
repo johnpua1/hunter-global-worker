@@ -22,13 +22,15 @@ class DriveReadResilienceTests(unittest.TestCase):
         old, fresh = mock.Mock(), mock.Mock()
         drive.http = old
         old.post.return_value = mock.Mock(status_code=302, headers={'Location':'https://script.googleusercontent.com/expired'})
-        expired = mock.Mock(status_code=404)
+        expired = mock.Mock(status_code=404, content=b'')
         expired.raise_for_status.side_effect = runner.requests.HTTPError('HTTP 404')
         old.get.return_value = expired
         fresh.post.return_value = mock.Mock(status_code=200)
         fresh.post.return_value.json.return_value = {'ok': True, 'file': None}
-        with mock.patch.object(runner.requests, 'Session', return_value=fresh), mock.patch.object(runner.time, 'sleep'):
+        with mock.patch.object(runner.requests, 'Session', return_value=fresh), mock.patch.object(runner.time, 'sleep'), \
+                mock.patch.object(runner, 'bridge_read_response', side_effect=ValueError('expired too')) as fallback:
             self.assertEqual(drive._call('file', path='US/CONTROL/DAILY_RUN_2026-10-06.json', _attempts=2), {'ok':True,'file':None})
+            fallback.assert_called_once()
         old.close.assert_called_once()
         self.assertEqual(fresh.post.call_args.args[0], drive.url)
         fresh.get.assert_not_called()

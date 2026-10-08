@@ -1,0 +1,10 @@
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ARG HUNTER_SOURCE_SHA=UNSPECIFIED
+ENV HUNTER_SOURCE_SHA=$HUNTER_SOURCE_SHA
+WORKDIR /app
+RUN pip install --no-cache-dir requests==2.32.5
+# No Phase 2, analytics, foundation or old resume modules in this image.
+COPY hunter-global/daily_transport.py /app/runner.py
+COPY hunter-global/daily_transport.py hunter-global/continuation.py hunter-global/execution_budget.py hunter-global/write_recovery.py hunter-global/daily_data_only.py /app/
+ENTRYPOINT ["python", "/app/daily_data_only.py"]

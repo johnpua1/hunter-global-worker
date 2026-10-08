@@ -1,0 +1,162 @@
+name: Hunter date-scoped current repair 20261009
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/hunter-date-only-repair-20261009.yml'
+permissions:
+  contents: read
+concurrency:
+  group: hunter-date-only-repair-20261009
+  cancel-in-progress: false
+jobs:
+  repair-current-dates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 95
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install existing Hunter requirements
+        run: python -m pip install -r hunter-global/requirements.txt
+      - name: Repair only dated FETCH_FAILED records without historical data reads
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+          HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '90'
+          HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS: '180'
+        run: |
+          python - <<'PY'
+          import concurrent.futures
+          import json
+          import os
+          from collections import Counter
+          from types import SimpleNamespace
+          
+          from runner import Drive, compact, digest
+          from repair import decide, PENDING_STATUSES
+          
+          TARGETS = (("HK", "2026-10-08", 650), ("US", "2026-10-07", 100))
+          ALLOWED = {"FETCH_FAILED"}
+          QUEUE_PATH = "REPAIR_QUEUE.json"
+          
+          def entry_key(item):
+              return (item.get("market"), item.get("security_id"), item.get("category"), item.get("trade_date"))
+          
+          class DateRunReadOnly:
+              """Permit the production repair evaluator to read only this date's run status."""
+              def __init__(self, market, date):
+                  self.path = f"{market}/CONTROL/DAILY_RUN_{date}.json"
+              def file(self, path):
+                  if path != self.path:
+                      raise RuntimeError("HISTORICAL_FILE_ACCESS_DENIED")
+                  return {"verified": True}
+              def json(self, path):
+                  if path != self.path:
+                      raise RuntimeError("HISTORICAL_JSON_ACCESS_DENIED")
+                  return {"status": "COMPLETE"}
+          
+          drive = Drive()
+          drive.health()
+          source = json.loads(drive.read(QUEUE_PATH))
+          if not isinstance(source.get("items"), list):
+              raise RuntimeError("REPAIR_QUEUE_SCHEMA_INVALID")
+          
+          resolved = {}
+          for market, date, cap in TARGETS:
+              run = drive.json(f"{market}/CONTROL/DAILY_RUN_{date}.json")
+              if run.get("status") != "COMPLETE" or run.get("market") != market or run.get("trade_date") != date:
+                  raise RuntimeError(f"DAILY_RUN_NOT_COMPLETE:{market}:{date}")
+              universe = drive.json(f"{market}/CURRENT_UNIVERSE.json")
+              securities = {s["security_id"]: s for s in universe["securities"]}
+              pending = [x for x in source["items"] if x.get("market") == market
+                         and x.get("trade_date") == date
+                         and x.get("status", "OPEN") in PENDING_STATUSES]
+              if not pending or len(pending) > cap:
+                  raise RuntimeError(f"DATE_TARGET_BOUNDARY_FAILURE:{market}:{len(pending)}")
+              print(f"TARGET market={market} date={date} pending={len(pending)} categories={dict(Counter(x['category'] for x in pending))}", flush=True)
+              guarded = DateRunReadOnly(market, date)
+              state = SimpleNamespace(calendar=[date])
+              candidates = [x for x in pending if x.get("category") in ALLOWED
+                            and x.get("batch") is None]
+          
+              def verify(item):
+                  security = securities.get(item.get("security_id"))
+                  if security is None:
+                      return entry_key(item), None, "SECURITY_NOT_IN_CURRENT_UNIVERSE"
+                  if security.get("market") != market or security.get("listing_status", "ACTIVE") != "ACTIVE":
+                      return entry_key(item), None, "NON_ACTIVE_OR_IDENTITY_MISMATCH"
+                  try:
+                      answer = decide(guarded, item, security, state)
+                  except Exception as error:
+                      return entry_key(item), None, "DECIDE_FAILED:" + type(error).__name__
+                  if (answer.get("accepted") is True and answer.get("result") == "RESOLVED"
+                          and len(answer.get("rows", [])) == 1
+                          and answer["rows"][0].get("date") == date
+                          and answer["rows"][0].get("security_id") == item["security_id"]):
+                      return entry_key(item), answer, "VERIFIED"
+                  return entry_key(item), None, answer.get("reason") or answer.get("result") or "NO_VALID_BAR"
+          
+              with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+                  checked = list(pool.map(verify, candidates))
+              verdicts = Counter(status for _, _, status in checked)
+              print(f"FETCH market={market} attempts={len(checked)} verdicts={dict(verdicts)}", flush=True)
+              for key, answer, status in checked:
+                  if status != "VERIFIED":
+                      continue
+                  m, sid, category, day = key
+                  identity = digest(compact({"market": m, "security_id": sid,
+                                             "category": category, "batch": None,
+                                             "trade_date": day}))[:24]
+                  path = f"{m}/REPAIR_PATCH/{identity[:2]}/{identity}.json"
+                  existing = drive.file(path)
+                  if existing:
+                      previous = drive.json(path)
+                      if not (previous.get("accepted") is True
+                              and previous.get("result") == "RESOLVED"
+                              and previous.get("security_id") == sid
+                              and len(previous.get("rows", [])) == 1
+                              and previous["rows"][0].get("date") == date):
+                          raise RuntimeError(f"EXISTING_PATCH_CONFLICT:{market}:{sid}")
+                  else:
+                      drive.append(path, compact(answer))
+                  resolved[key] = {"patch_path": path,
+                                   "verified_at_myt": answer["verified_at_myt"],
+                                   "reason": "DATE_ONLY_YAHOO_BAR_VERIFIED"}
+              print(f"PATCHED market={market} date={date} accepted={sum(k[0]==market for k in resolved)}", flush=True)
+          
+          if resolved:
+              for iteration in range(8):
+                  original = drive.read(QUEUE_PATH)
+                  current = json.loads(original)
+                  touched = 0
+                  for item in current["items"]:
+                      key = entry_key(item)
+                      if key in resolved and item.get("status", "OPEN") in PENDING_STATUSES:
+                          item.update(status="RESOLVED", **resolved[key])
+                          touched += 1
+                  if not touched:
+                      break
+                  try:
+                      drive.put_fast(QUEUE_PATH, compact(current), expected_sha=digest(original))
+                      break
+                  except RuntimeError as error:
+                      if "BRIDGE_STALE_WRITE" not in str(error):
+                          raise
+              else:
+                  raise RuntimeError("QUEUE_CAS_RETRY_EXHAUSTED")
+          
+          final = drive.json(QUEUE_PATH)
+          for market, day, cap in TARGETS:
+              rows = [x for x in final["items"] if x.get("market") == market and x.get("trade_date") == day]
+              pending = [x for x in rows if x.get("status", "OPEN") in PENDING_STATUSES]
+              saved = sum(1 for x in rows if entry_key(x) in resolved and x.get("status")=="RESOLVED")
+              expected = sum(k[0] == market for k in resolved)
+              if saved != expected:
+                  raise RuntimeError(f"READBACK_REPAIR_COUNT_MISMATCH:{market}:{saved}:{expected}")
+              print(f"FINAL market={market} date={day} new_verified={saved} open={len(pending)} "
+                    f"open_types={dict(Counter(x['category'] for x in pending))}", flush=True)
+          print("SCOPE=TARGET_DATES_ONLY NO_BASE_NO_HISTORICAL_DAILY_NO_PHASE2", flush=True)
+          PY

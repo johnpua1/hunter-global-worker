@@ -1,7 +1,7 @@
 # Daily incremental update requirement
 
-User instruction confirmed 2026-10-09 00:51 MYT. Applies to US and HK daily
-data, indicator and ranking updates. This records the required behavior; it
+User instruction confirmed 2026-10-09 00:51 MYT, clarified 00:54 MYT. Applies
+to US and HK updates, including daily data, indicators and ranking. This records the required behavior; it
 does not claim that the current production worker already implements it.
 
 ## Required behavior
@@ -14,13 +14,24 @@ does not claim that the current production worker already implements it.
 - Advance indicators using persisted calculation state plus the newly supplied
   bars. Reading bounded calculation/checkpoint state is distinct from loading
   historical raw data, source archives or all old repair files again.
-- A confirmed correction may update its explicitly affected dates/securities;
-  it must not trigger an unbounded market-wide historical rebuild.
+- Existing historical business data is read-only archival material for a
+  separately requested query or analysis that actually needs it. No update
+  task may invoke that query exception as part of its own preparation.
+- Update tasks, including daily runs and recovery, must not scan, verify,
+  read back, review, audit, rewrite or delete existing historical business
+  data. Inserting a genuinely missing date is not permission to revisit dates
+  that already have committed data.
+- Historical corrections are not automatically authorized by an update job;
+  they require a separate, explicitly scoped user instruction.
 - Keep existing US work scoped to 2026-10-07 and HK work to 2026-10-08 until
   that closeout completes. Never silently extend those recovery goals.
 - Continue daily scheduling without requiring routine Cloud Shell commands.
 
 ## No silent fallback
+
+The persisted calculation/checkpoint state referenced above must be a dedicated
+operational state, not a relabelled historical archive or yesterday's business
+output that is scanned to reconstruct missing state.
 
 If the calculation state needed for a delta update is absent, incompatible or
 incomplete, report the specific missing state. Do not automatically re-read

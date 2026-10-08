@@ -36,6 +36,7 @@ def fingerprint(data):
 class InputCache:
     def __init__(self, raw, market):
         self.raw, self.market = raw, market
+        self.blocked = False
         self.prefix = market + '/CONTROL/INCREMENTAL_CACHE/'
         self.pointer = self.prefix + 'MANIFEST.json'
         self.records = {}
@@ -67,6 +68,7 @@ class InputCache:
                         raise ValueError('hash')
                 self.manifest = doc
             except (ValueError, KeyError, TypeError, AttributeError):
+                self.refuse_rebuild('MANIFEST_INVALID', self.pointer)
                 LOG.warning('INPUT_CACHE_REBUILD market=%s reason=MANIFEST_INVALID', market)
         self.memory, self.loaded_packs, self.dirty = {}, {}, set()
         self.loaded_pack_versions = {}
@@ -79,6 +81,14 @@ class InputCache:
                  len(self.manifest['entries']))
         LOG.info('INPUT_CACHE_RESUME market=%s unchanged_saved_files=%d', market,
                  sum(self.matches(p, e) for p, e in self.manifest['entries'].items()))
+
+    def refuse_rebuild(self, reason, path):
+        from continuation import enabled as continue_only
+        if continue_only():
+            self.blocked = True
+            LOG.error('INPUT_CACHE_REBUILD_FORBIDDEN market=%s reason=%s path=%s',
+                      self.market, reason, path)
+            raise RuntimeError('INPUT_CACHE_REBUILD_FORBIDDEN:' + path)
 
     def source(self, path):
         parts = path.split('/')
@@ -128,6 +138,7 @@ class InputCache:
                 except (ValueError, KeyError, zipfile.BadZipFile, RuntimeError, OSError, requests.RequestException) as exc:
                     if str(exc) == 'LARGE_READ_TRANSPORT_RETRY_REQUIRED':
                         raise
+                    self.refuse_rebuild(type(exc).__name__, self.pack_path(key, spec['slot']))
                     # Corruption is a cache miss, never an accepted source.
                     self.loaded_packs[key] = {}
                     LOG.warning('INPUT_CACHE_PACK_REBUILD market=%s pack=%s', self.market, key)
@@ -158,6 +169,7 @@ class InputCache:
                         self.memory[path] = data
                         self.hits += 1
                         return data
+                    self.refuse_rebuild('CACHED_ENTRY_UNUSABLE', path)
             LOG.info('INPUT_SOURCE_READ market=%s path=%s', self.market, path)
             with self.guard:
                 found = self.records.get(path)
@@ -350,10 +362,11 @@ def incremental_inputs(raw, market):
         failed = True
         raise
     finally:
-        # A performance cache never fabricates or erases completion. On a cache
-        # failure the next run can still reconstruct verified source inputs.
+        # Never rewrite/rebuild a failed continuation cache on exit.
         from continuation import enabled as continue_only
-        if continue_only() and getattr(raw, '_continuation_state', {}).get('write_uncertain'):
+        if continue_only() and getattr(cache, 'blocked', False) is True:
+            LOG.error('INPUT_CACHE_SAVE_SKIPPED_REBUILD_FORBIDDEN market=%s', market)
+        elif continue_only() and getattr(raw, '_continuation_state', {}).get('write_uncertain'):
             LOG.error('INPUT_CACHE_SAVE_SKIPPED_UNCERTAIN_WRITE market=%s', market)
         else:
             save_inputs(CachedDrive(raw, cache), strict=not failed)

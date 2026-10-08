@@ -306,6 +306,25 @@ class Drive:
         """Reuse the complete source inventory; InputCache verifies its fingerprint."""
         return self.read(path, _info=info)
 
+    def read_checkpoint_piece(self, path: str) -> bytes:
+        """Read one manifest-named immutable chunk without a metadata round trip."""
+        import base64
+        match = re.fullmatch(r'(US|HK)/CONTROL/READ_CACHE/[a-f0-9]{64}/part-([a-f0-9]{64})\.gz', path)
+        if not match:
+            raise RuntimeError('READ_CHECKPOINT_PIECE_PATH_INVALID')
+        state = self._continuation_state
+        with state['guard']:
+            lock = state['locks'].setdefault(path, threading.RLock())
+        with lock:
+            if path in state['memory']:
+                return state['memory'][path]
+            result = self._call('read', path=path, _attempts=2)
+            raw = base64.b64decode(result['data_base64'], validate=True)
+            if len(raw) > 262144 or digest(raw) != match[2] or result['sha256'] != match[2]:
+                raise RuntimeError('LARGE_READ_COMPRESSED_HASH_MISMATCH')
+            state['memory'][path] = raw
+            return raw
+
     def read(self, path: str, *, _info=None) -> bytes:
         from continuation import enabled as continue_only
         if not continue_only() or not hasattr(self, '_continuation_state'):

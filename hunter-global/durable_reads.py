@@ -1,11 +1,13 @@
 """Version-bound, compressed large-file reads with durable chunk checkpoints."""
 import base64
+import contextvars
 import gzip
 import json
 import logging
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from execution_budget import WorkBudgetExceeded, saving
 from runner import compact, digest
@@ -78,6 +80,48 @@ def _decode(raw, spec):
     return data
 
 
+def _restore_pieces(drive, root, pieces, state, path):
+    """At most four in-flight restores across this execution, ordered output."""
+    from continuation import enabled as continue_only
+    accelerated = (continue_only() and hasattr(drive, 'read_checkpoint_piece')
+                   and hasattr(drive, 'fork_reader'))
+    if not accelerated or not pieces:
+        return [_decode(drive.read(root + 'part-' + p['compressed_sha256'] + '.gz'), p)
+                for p in pieces]
+    with state['guard']:
+        slots = state.setdefault('restore_slots', threading.BoundedSemaphore(4))
+    local = threading.local()
+    readers, guard = [], threading.Lock()
+    def read(piece):
+        with slots:
+            if not hasattr(local, 'reader'):
+                local.reader = drive.fork_reader()
+                with guard:
+                    readers.append(local.reader)
+            raw = local.reader.read_checkpoint_piece(root + 'part-' + piece['compressed_sha256'] + '.gz')
+            return _decode(raw, piece)
+    pool = ThreadPoolExecutor(max_workers=min(4, len(pieces)))
+    pending, chunks, restored = {}, [], 0
+    try:
+        for i in range(min(4, len(pieces))):
+            pending[i] = pool.submit(contextvars.copy_context().run, read, pieces[i])
+        for i in range(len(pieces)):
+            data = pending.pop(i).result()
+            chunks.append(data); restored += len(data)
+            LOG.info('LARGE_READ_RESTORE_PROGRESS path=%s completed=%d total=%d bytes_restored=%d',
+                     path, i + 1, len(pieces), restored)
+            next_index = i + 4
+            if next_index < len(pieces):
+                pending[next_index] = pool.submit(contextvars.copy_context().run, read, pieces[next_index])
+        return chunks
+    finally:
+        for future in pending.values():
+            future.cancel()
+        pool.shutdown(wait=True, cancel_futures=True)
+        for reader in readers:
+            reader.http.close()
+
+
 def read_large(drive, path, info):
     if not info.get('revision'):
         info = drive.file(path)
@@ -104,15 +148,15 @@ def read_large(drive, path, info):
         doc = json.loads(prior) if prior is not None else {}
         if doc.get('schema') != 1 or any(doc.get(k) != v for k, v in identity.items()):
             doc = {'schema': 1, **identity, 'file_sha256': None, 'next_offset': 0, 'pieces': []}
-        chunks, offset = [], 0
+        offset = 0
         for piece in doc['pieces']:
             if (piece['offset'] != offset or not 0 < piece['length'] <= CHUNK
                     or not re.fullmatch('[a-f0-9]{64}', piece['compressed_sha256'])):
                 raise RuntimeError('LARGE_READ_MANIFEST_INVALID')
-            data = _decode(drive.read(root + 'part-' + piece['compressed_sha256'] + '.gz'), piece)
-            chunks.append(data); offset += len(data)
+            offset += piece['length']
         if offset != doc['next_offset'] or offset > identity['size']:
             raise RuntimeError('LARGE_READ_MANIFEST_OFFSET_INVALID')
+        chunks = _restore_pieces(drive, root, doc['pieces'], state, path)
         LOG.info('LARGE_READ_RESUME path=%s bytes_saved=%d total=%d', path, offset, identity['size'])
         while offset < identity['size']:
             length = min(CHUNK, identity['size'] - offset)

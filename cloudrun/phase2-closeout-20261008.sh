@@ -17,13 +17,20 @@ if ! python3 -c 'import requests' >/dev/null 2>&1; then
   python3 -m pip install --quiet --target "$phase2_work/deps" requests
 fi
 PYTHONPATH="$phase2_work/deps${PYTHONPATH:+:$PYTHONPATH}" python3 -u - "$phase2_work" "$phase2_sha" <<'PHASE2_PY' 2>&1 | tee "$HOME/hunter-phase2-closeout.log"
-import contextlib, datetime as dt, fcntl, importlib.util, os, pathlib, re, sys, time
+import concurrent.futures, contextlib, datetime as dt, fcntl, importlib.util, os, pathlib, re, sys, time
 from zoneinfo import ZoneInfo
 
 ROOT, SHA = pathlib.Path(sys.argv[1]), sys.argv[2]
 GOAL = {"US": "2026-10-07", "HK": "2026-10-07"}
 LOCK_ERROR = "BRIDGE_Lock timeout: another process was holding the lock for too long."
 CANCELLED_BY_THIS_MONITOR = set()
+OBSERVED_FAILURES = {
+    "hunter-us-daily-6wgdv": ("US", "DAILY_INCOMPLETE:US:MARKET_WIDE_DATA_UNAVAILABLE", "US_SOURCE_WAIT_THEN_ONE_RESUME"),
+    "hunter-hk-daily-jcwng": ("HK", "BRIDGE_Service error: Drive", "HK_CONFIRMED_READ_CACHE_FAILURE_ONE_RESUME"),
+}
+OBSERVED_RECOVERY_USED = set()
+LAST_FATAL = {}
+US_SOURCE = {"next_check": 0.0, "ready": False}
 TZ = ZoneInfo("Asia/Kuala_Lumpur")
 LOCK = open(pathlib.Path.home() / "hunter-phase2-closeout.lock", "a")
 try:
@@ -36,7 +43,7 @@ spec = importlib.util.spec_from_file_location("phase2_closeout_helpers", ROOT / 
 r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)
 sys.path.insert(0, str(ROOT / "hunter-global"))
-from runner import Drive, validate_phase2_resume, closed_dates_since
+from runner import Drive, validate_phase2_resume, closed_dates_since, fetch_security
 
 def emit(text):
     print(dt.datetime.now(TZ).strftime("%m-%d %H:%M:%S MYT") + " " + text, flush=True)
@@ -94,7 +101,7 @@ def peer_active(market):
     # queued executions, before reading checkpoints or starting another job.
     return [name for peer in GOAL if peer != market for name in active(r.executions(peer))]
 
-def recoverable_failure(name):
+def recoverable_failure(name, market):
     if name in CANCELLED_BY_THIS_MONITOR:
         return "OWN_COMPETING_EXECUTION_CANCELLED"
     query = ('resource.type="cloud_run_job" AND labels."run.googleapis.com/execution_name"="' + name
@@ -105,6 +112,11 @@ def recoverable_failure(name):
         message = str(row.get("textPayload") or row.get("jsonPayload", {}).get("message", ""))
         fatal = next((line.partition("hunter halted:")[2].strip()
                       for line in message.splitlines() if "hunter halted:" in line), "")
+        LAST_FATAL[name] = fatal
+        observed = OBSERVED_FAILURES.get(name)
+        if (observed and observed[:2] == (market, fatal)
+                and name not in OBSERVED_RECOVERY_USED):
+            return observed[2]
         if fatal == LOCK_ERROR:
             # Gateway.waitLock fails before the write transaction begins.
             # STALE_WRITE, hash conflicts and unrelated errors stay fatal.
@@ -115,6 +127,43 @@ def recoverable_failure(name):
     if r.timeout_failure(name):
         return "EXISTING_RESUMABLE_INTERRUPTION"
     return None
+
+def us_source_ready():
+    # This check runs in Cloud Shell. It only gates one retry; the Cloud Run
+    # worker still has to pass its full coverage and persistence checks.
+    if time.monotonic() < US_SOURCE["next_check"]:
+        return US_SOURCE["ready"]
+    symbols = ("AAPL", "MSFT", "AMZN", "GOOGL", "SPY")
+    date = GOAL["US"]
+    keys = ("HUNTER_HTTP_RETRY_ATTEMPTS", "HUNTER_HTTP_TIMEOUT_SECONDS")
+    saved = {key: os.environ.get(key) for key in keys}
+
+    def probe(symbol):
+        security = {"market": "US", "ticker": symbol, "security_id": "US:" + symbol}
+        rows, flags, _, reason = fetch_security(security, [date], date, daily=True)
+        ok = (len(rows) == 1 and rows[0].get("date") == date
+              and "PASS_DAILY" in flags and "DATA_SUSPECT" not in flags)
+        detail = "READY" if ok else str(reason or "INVALID_TARGET_BAR").split(":", 1)[0]
+        return symbol, ok, safe(detail)
+
+    emit("US SOURCE_CHECK=QUERY1 TARGET=" + date + " SAMPLES=5")
+    try:
+        os.environ.update(HUNTER_HTTP_RETRY_ATTEMPTS="1", HUNTER_HTTP_TIMEOUT_SECONDS="12")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+            results = list(pool.map(probe, symbols))
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    ready = sum(ok for _, ok, _ in results)
+    US_SOURCE.update(next_check=time.monotonic() + 300, ready=ready == len(symbols))
+    emit("US SOURCE_COMPLETE_OHLCV=" + str(ready) + "/5 "
+         + " ".join(symbol + "=" + detail for symbol, _, detail in results))
+    if not US_SOURCE["ready"]:
+        emit("US WAIT_SOURCE_TARGET=" + date + ";下次小样本检查在5分钟后；本次不启动美股整批执行")
+    return US_SOURCE["ready"]
 
 seen = {}
 def progress(market, name):
@@ -158,14 +207,18 @@ def step(market, doc, attempts):
         return date
     latest, state = head(rows)
     if state == "FAILED":
-        reason = recoverable_failure(latest)
+        reason = recoverable_failure(latest, market)
         if reason is None:
             progress(market, latest)
+            if LAST_FATAL.get(latest):
+                emit(market + " LATEST_FATAL=" + safe(LAST_FATAL[latest]))
             raise RuntimeError("UNRECOGNIZED_FAILURE_REQUIRES_TARGETED_FIX:" + latest)
         emit(market + " RECOVERABLE_FAILURE=" + reason + " EXECUTION=" + latest)
     key = (market, stage, date)
     if attempts.get(key, 0) >= 3:
         raise RuntimeError("BOUNDED_RESUME_LIMIT_REACHED")
+    if market == "US" and stage == "NEW_SESSION" and not us_source_ready():
+        return None
     args = ["--mode", "auto", "--market", market]
     if stage == "PHASE2":
         with reader(doc, market) as d:
@@ -185,6 +238,8 @@ def step(market, doc, attempts):
     if active(latest_rows) or head(latest_rows) != head(rows) or peer_active(market):
         return None
     attempts[key] = attempts.get(key, 0) + 1
+    if latest in OBSERVED_FAILURES:
+        OBSERVED_RECOVERY_USED.add(latest)
     job = "hunter-" + market.lower() + "-daily"
     result = r.gc("run", "jobs", "execute", job, "--args=" + ",".join(args), "--async")
     own = r.base.recovery.name(result)
@@ -199,7 +254,7 @@ def step(market, doc, attempts):
     return None
 
 def main():
-    emit("VERSION=20261008_SELF_INIT_US_FIRST;GOAL=US:2026-10-07,HK:2026-10-07;保留现有执行，串行续跑")
+    emit("VERSION=20261008_SOURCE_WAIT_AND_HK_RESUME;GOAL=US:2026-10-07,HK:2026-10-07;保留现有执行，串行续跑")
     docs = {}
     for market in GOAL:
         doc = r.gc("run", "jobs", "describe", "hunter-" + market.lower() + "-daily")

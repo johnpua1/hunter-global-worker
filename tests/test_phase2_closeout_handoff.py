@@ -114,7 +114,7 @@ class CloseoutHandoffTests(unittest.TestCase):
     def run_main(self, proof_error=None):
         mod = self.mod
         docs = {m: self.config(m) for m in ('US', 'HK')}
-        with patch.object(mod.hk_deployment, 'deploy_hk', return_value={'status': 'VERIFIED', 'docs': docs}), \
+        with patch.object(mod.pack_deployment, 'deploy_us', return_value={'status': 'VERIFIED', 'docs': docs}), \
              patch.object(mod.r, 'executions', return_value=[]), \
              patch.object(mod.r, 'checkpoint', side_effect=lambda doc, m: self.completed(m)), \
              patch.object(mod, 'full_proof', side_effect=proof_error) as proof, \

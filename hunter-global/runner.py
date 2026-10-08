@@ -15,6 +15,7 @@ import logging
 import math
 import os
 import random
+import re
 import sys
 import time
 import threading
@@ -370,6 +371,38 @@ class Drive:
     def json(self, path: str) -> Any:
         return json.loads(self.read(path))
 
+    def _verify_pack_write(self, path: str, content: bytes):
+        """Read the stored pack's full SHA through the existing revision-bound API.
+
+        The Bridge hashes every persisted byte, independently of the put ACK.
+        Returning a small verified sample avoids downloading and checkpointing
+        the entire ZIP just to compare it with bytes already in this process.
+        """
+        import base64
+        info = self.file(path)
+        if (not info or not info.get('revision') or info.get('id') != path
+                or int(info.get('size', -1)) != len(content)):
+            raise RuntimeError('PACK_WRITE_IDENTITY_MISMATCH')
+        length = min(4096, len(content))
+        proof = self._call('read_verified_chunk', path=path, revision=info['revision'],
+                           offset=0, length=length, _attempts=2)
+        encoded = base64.b64decode(proof['data_base64'], validate=True)
+        sample = gzip.decompress(encoded)
+        if (proof['revision'] != info['revision'] or proof['size'] != len(content)
+                or proof['offset'] != 0 or proof['length'] != length
+                or proof['encoding'] != 'gzip' or proof['eof'] != (length == len(content))
+                or proof['compressed_sha256'] != digest(encoded)
+                or proof['sha256'] != digest(sample) or sample != content[:length]
+                or proof['file_sha256'] != digest(content)):
+            raise RuntimeError('PACK_WRITE_READBACK_MISMATCH')
+        current = self.file(path)
+        if (not current or current.get('id') != path
+                or current.get('revision') != info['revision']
+                or int(current.get('size', -1)) != len(content)):
+            raise RuntimeError('PACK_WRITE_REVISION_CHANGED')
+        LOG.info('INPUT_PACK_WRITE_VERIFIED path=%s bytes=%d proof_bytes=%d',
+                 path, len(content), length)
+
     def put(self, path: str, content: bytes, mime: str = "application/json", immutable=False, expected_sha=None):
         import base64
         fields = {"path": path.strip("/"), "data_base64": base64.b64encode(content).decode("ascii"),
@@ -396,7 +429,13 @@ class Drive:
             return info
         if result["sha256"] != digest(content):
             raise RuntimeError("BRIDGE_WRITE_SHA_MISMATCH:" + path)
-        if digest(self.read(path)) != digest(content):
+        if (len(content) > 262144 and re.fullmatch(
+                r'(US|HK)/CONTROL/INCREMENTAL_CACHE/pack-[0-9]{5,}-[01]\.zip', fields['path'])):
+            try:
+                self._verify_pack_write(fields['path'], content)
+            except (requests.RequestException, ValueError) as exc:
+                raise RuntimeError('LARGE_READ_TRANSPORT_RETRY_REQUIRED') from exc
+        elif digest(self.read(path)) != digest(content):
             raise RuntimeError("DRIVE_READBACK_MISMATCH:" + path)
         return result["file"]
 

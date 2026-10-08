@@ -25,7 +25,7 @@ import concurrent.futures, contextlib, datetime as dt, fcntl, importlib.util, os
 from zoneinfo import ZoneInfo
 
 ROOT, SHA = pathlib.Path(sys.argv[1]), sys.argv[2]
-EXPECTED_SHA = {"US": "2e8dd74363e2f13ea15f7a1ad1d6b24624e88086", "HK": SHA}
+EXPECTED_SHA = {"US": SHA, "HK": "f6df22e438c8da201bc1759826bd84b72dda299c"}
 GOAL = {"US": "2026-10-07", "HK": "2026-10-07"}
 LOCK_ERROR = "BRIDGE_Lock timeout: another process was holding the lock for too long."
 CANCELLED_BY_THIS_MONITOR = set()
@@ -48,9 +48,9 @@ except BlockingIOError:
 spec = importlib.util.spec_from_file_location("phase2_closeout_helpers", ROOT / "cloudrun/deploy-large-read-fix-20261008.py")
 r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)
-spec = importlib.util.spec_from_file_location("phase2_hk_checkpoint_deployment", ROOT / "cloudrun/deploy-hk-read-cache-recovery-20261008.py")
-hk_deployment = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(hk_deployment)
+spec = importlib.util.spec_from_file_location("phase2_us_pack_deployment", ROOT / "cloudrun/deploy-us-pack-readback-20261008.py")
+pack_deployment = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(pack_deployment)
 sys.path.insert(0, str(ROOT / "hunter-global"))
 from runner import Drive, validate_phase2_resume, closed_dates_since, fetch_security
 
@@ -185,7 +185,7 @@ def progress(market, name):
             text = row.get("textPayload") or row.get("jsonPayload", {}).get("message", "")
             match = re.search(r"(?:PHASE2_|INPUT_CACHE_|INPUT_PACK_|LARGE_READ_|SYNC_)[A-Z_]+[^\n]*", str(text))
             if match:
-                emit(market + " " + name + " " + safe(match.group()))
+                emit(market + " " + name + " LOG_AT=" + str(row.get("timestamp", "UNKNOWN")) + " " + safe(match.group()))
             seen[market] = row.get("timestamp")
     except Exception:
         emit(market + " PROGRESS_LOG_UNAVAILABLE;现有任务保留")
@@ -239,7 +239,7 @@ def step(market, doc, attempts):
             raise RuntimeError("NEW_SESSION_NOT_EXACTLY_FROZEN_GOAL")
     current = r.gc("run", "jobs", "describe", "hunter-" + market.lower() + "-daily")
     r.verify(doc, current, market, EXPECTED_SHA[market])
-    if r.base.configuration(doc) != r.base.configuration(current):
+    if pack_deployment.configuration(r, doc) != pack_deployment.configuration(r, current):
         raise RuntimeError("CONFIGURATION_CHANGED_NO_START")
     if choose(r.checkpoint(current, market), market) != (stage, date):
         return None
@@ -263,23 +263,12 @@ def step(market, doc, attempts):
     return None
 
 def main():
-    emit("VERSION=20261008_HK_READ_CACHE_RECOVERY;GOAL=US:2026-10-07,HK:2026-10-07;港股修复断点保存，美股保留，串行续跑")
+    emit("VERSION=20261008_US_PACK_HASH_READBACK;GOAL=US:2026-10-07,HK:2026-10-07;美股缓存完整哈希校验修复，保留已有执行与缓存")
     deadline = time.monotonic() + 7 * 3600
-    while time.monotonic() < deadline:
-        prepared = hk_deployment.deploy_hk(r, SHA)
-        if prepared["status"] == "VERIFIED":
-            docs = prepared["docs"]
-            break
-        if prepared["status"] != "WAIT_HK_ACTIVE":
-            raise RuntimeError("HK_DEPLOYMENT_STATE_UNKNOWN")
-        emit("HK KEEP_RUNNING=" + ",".join(prepared["active"]["HK"]) + ";等待该执行结束后再更新港股模板")
-        for market in GOAL:
-            names = active(r.executions(market))
-            if names:
-                progress(market, names[0])
-        time.sleep(45)
-    else:
-        raise RuntimeError("MONITOR_TIME_LIMIT_EXISTING_CLOUD_RUN_EXECUTIONS_PRESERVED")
+    prepared = pack_deployment.deploy_us(r, SHA)
+    if prepared["status"] != "VERIFIED":
+        raise RuntimeError("US_PACK_DEPLOYMENT_NOT_VERIFIED")
+    docs = prepared["docs"]
     for market in GOAL:
         doc = docs[market]
         r.verify(doc, doc, market, EXPECTED_SHA[market])

@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 (
 set -euo pipefail
-phase2_sha=2e8dd74363e2f13ea15f7a1ad1d6b24624e88086
+umask 077
+phase2_sha="${1:-}"
+if [[ ! "$phase2_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  echo 'STOPPED=请使用包含固定版本号的完整下载执行命令'; exit 1
+fi
 phase2_work="$(mktemp -d "$HOME/hunter-phase2-closeout.XXXXXX")"
 trap 'rm -rf -- "$phase2_work"' EXIT
 printf '%s\n' 'PREPARING_PINNED_SOURCE=正在自动准备固定版本收口代码'
@@ -12,21 +16,23 @@ GIT_TERMINAL_PROMPT=0 git -C "$phase2_work/source" fetch -q --depth=1 \
 if [ "$(git -C "$phase2_work/source" rev-parse FETCH_HEAD)" != "$phase2_sha" ]; then
   echo 'STOPPED=SOURCE_SHA_MISMATCH'; exit 1
 fi
-git -C "$phase2_work/source" archive "$phase2_sha" -- cloudrun hunter-global | tar -x -C "$phase2_work"
+git -C "$phase2_work/source" checkout -q --detach FETCH_HEAD
 if ! python3 -c 'import requests' >/dev/null 2>&1; then
   python3 -m pip install --quiet --target "$phase2_work/deps" requests
 fi
-PYTHONPATH="$phase2_work/deps${PYTHONPATH:+:$PYTHONPATH}" python3 -u - "$phase2_work" "$phase2_sha" <<'PHASE2_PY' 2>&1 | tee "$HOME/hunter-phase2-closeout.log"
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$phase2_work/deps${PYTHONPATH:+:$PYTHONPATH}" python3 -u - "$phase2_work/source" "$phase2_sha" <<'PHASE2_PY' 2>&1 | tee -a "$HOME/hunter-phase2-closeout.log"
 import concurrent.futures, contextlib, datetime as dt, fcntl, importlib.util, os, pathlib, re, sys, time
 from zoneinfo import ZoneInfo
 
 ROOT, SHA = pathlib.Path(sys.argv[1]), sys.argv[2]
+EXPECTED_SHA = {"US": "2e8dd74363e2f13ea15f7a1ad1d6b24624e88086", "HK": SHA}
 GOAL = {"US": "2026-10-07", "HK": "2026-10-07"}
 LOCK_ERROR = "BRIDGE_Lock timeout: another process was holding the lock for too long."
 CANCELLED_BY_THIS_MONITOR = set()
 OBSERVED_FAILURES = {
     "hunter-us-daily-6wgdv": ("US", "DAILY_INCOMPLETE:US:MARKET_WIDE_DATA_UNAVAILABLE", "US_SOURCE_WAIT_THEN_ONE_RESUME"),
     "hunter-hk-daily-jcwng": ("HK", "BRIDGE_Service error: Drive", "HK_CONFIRMED_READ_CACHE_FAILURE_ONE_RESUME"),
+    "hunter-hk-daily-cc7hv": ("HK", "BRIDGE_Service error: Drive", "HK_PATCHED_READ_CACHE_FAILURE_ONE_RESUME"),
 }
 OBSERVED_RECOVERY_USED = set()
 LAST_FATAL = {}
@@ -36,12 +42,15 @@ LOCK = open(pathlib.Path.home() / "hunter-phase2-closeout.lock", "a")
 try:
     fcntl.flock(LOCK, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
-    print("MONITOR_ALREADY_RUNNING=已有收口程序；没有重复启动任务", flush=True)
-    sys.exit(0)
+    print("MONITOR_ALREADY_RUNNING=旧监控仍在运行；请在旧监控终端按一次Ctrl+C后重跑此命令；现有云端执行保留", flush=True)
+    sys.exit(1)
 
 spec = importlib.util.spec_from_file_location("phase2_closeout_helpers", ROOT / "cloudrun/deploy-large-read-fix-20261008.py")
 r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)
+spec = importlib.util.spec_from_file_location("phase2_hk_checkpoint_deployment", ROOT / "cloudrun/deploy-hk-read-cache-recovery-20261008.py")
+hk_deployment = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hk_deployment)
 sys.path.insert(0, str(ROOT / "hunter-global"))
 from runner import Drive, validate_phase2_resume, closed_dates_since, fetch_security
 
@@ -229,7 +238,7 @@ def step(market, doc, attempts):
         if not pending or pending[-1] != GOAL[market]:
             raise RuntimeError("NEW_SESSION_NOT_EXACTLY_FROZEN_GOAL")
     current = r.gc("run", "jobs", "describe", "hunter-" + market.lower() + "-daily")
-    r.verify(doc, current, market, SHA)
+    r.verify(doc, current, market, EXPECTED_SHA[market])
     if r.base.configuration(doc) != r.base.configuration(current):
         raise RuntimeError("CONFIGURATION_CHANGED_NO_START")
     if choose(r.checkpoint(current, market), market) != (stage, date):
@@ -254,16 +263,29 @@ def step(market, doc, attempts):
     return None
 
 def main():
-    emit("VERSION=20261008_SOURCE_WAIT_AND_HK_RESUME;GOAL=US:2026-10-07,HK:2026-10-07;保留现有执行，串行续跑")
-    docs = {}
+    emit("VERSION=20261008_HK_READ_CACHE_RECOVERY;GOAL=US:2026-10-07,HK:2026-10-07;港股修复断点保存，美股保留，串行续跑")
+    deadline = time.monotonic() + 7 * 3600
+    while time.monotonic() < deadline:
+        prepared = hk_deployment.deploy_hk(r, SHA)
+        if prepared["status"] == "VERIFIED":
+            docs = prepared["docs"]
+            break
+        if prepared["status"] != "WAIT_HK_ACTIVE":
+            raise RuntimeError("HK_DEPLOYMENT_STATE_UNKNOWN")
+        emit("HK KEEP_RUNNING=" + ",".join(prepared["active"]["HK"]) + ";等待该执行结束后再更新港股模板")
+        for market in GOAL:
+            names = active(r.executions(market))
+            if names:
+                progress(market, names[0])
+        time.sleep(45)
+    else:
+        raise RuntimeError("MONITOR_TIME_LIMIT_EXISTING_CLOUD_RUN_EXECUTIONS_PRESERVED")
     for market in GOAL:
-        doc = r.gc("run", "jobs", "describe", "hunter-" + market.lower() + "-daily")
-        r.verify(doc, doc, market, SHA)
+        doc = docs[market]
+        r.verify(doc, doc, market, EXPECTED_SHA[market])
         if r.base.deploy.daily_runtime(doc) != (7200, 0):
             raise RuntimeError("EXPECTED_EXISTING_RUNTIME_REQUIRED:" + market)
-        docs[market] = doc
     attempts, done, stopped = {}, {}, {}
-    deadline = time.monotonic() + 7 * 3600
     while time.monotonic() < deadline:
         for market, doc in docs.items():
             if market in done or market in stopped:

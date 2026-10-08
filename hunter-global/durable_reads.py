@@ -5,12 +5,65 @@ import json
 import logging
 import re
 import threading
+import time
 
-from execution_budget import saving
+from execution_budget import WorkBudgetExceeded, saving
 from runner import compact, digest
 
 LOG = logging.getLogger(__name__)
 CHUNK = 131072
+_DRIVE_SERVICE_ERROR = 'BRIDGE_Service error: Drive'
+
+
+def _checkpoint_commit(drive, path, content, *, immutable=False, expected_sha=None):
+    """Confirm exact bytes, or retain the original write precondition."""
+    info = drive.file(path)
+    if not info:
+        if expected_sha is not None:
+            raise RuntimeError('BRIDGE_STALE_WRITE')
+        return None
+    current = drive.read(path)
+    if current == content:
+        return info
+    if immutable:
+        raise RuntimeError('BRIDGE_IMMUTABLE_CONFLICT')
+    if digest(current) != expected_sha:
+        raise RuntimeError('BRIDGE_STALE_WRITE')
+    return None
+
+
+def _put_checkpoint(drive, path, content, **kwargs):
+    """Recover only the observed Drive service failure on read-cache writes."""
+    needs_readback = False
+    last_error = None
+    # Three write opportunities; the fourth pass only reconciles the final
+    # failure. An unreadable outcome never permits another ambiguous CAS write.
+    for attempt in range(4):
+        try:
+            if needs_readback:
+                info = _checkpoint_commit(drive, path, content,
+                    immutable=kwargs.get('immutable', False),
+                    expected_sha=kwargs.get('expected_sha'))
+                if info is not None:
+                    LOG.info('LARGE_READ_CHECKPOINT_COMMIT_CONFIRMED path=%s', path)
+                    return info
+                needs_readback = False
+            if attempt == 3:
+                break
+            # Keep the original bytes, immutable flag and CAS hash on every
+            # attempt. Drive.put still performs its normal SHA/readback checks.
+            return drive.put(path, content, **kwargs)
+        except WorkBudgetExceeded:
+            raise
+        except RuntimeError as exc:
+            if str(exc) != _DRIVE_SERVICE_ERROR:
+                raise
+            last_error = exc
+            needs_readback = True
+        if attempt < 3:
+            LOG.warning('LARGE_READ_CHECKPOINT_RETRY path=%s round=%d', path, attempt + 1)
+            time.sleep(min(4, 2 ** attempt))
+    raise RuntimeError('LARGE_READ_TRANSPORT_RETRY_REQUIRED') from last_error
 
 
 def _decode(raw, spec):
@@ -76,11 +129,11 @@ def read_large(drive, path, info):
             desired = {**doc, 'file_sha256': result['file_sha256'], 'next_offset': offset + length,
                        'pieces': doc['pieces'] + [piece]}
             with saving():
-                drive.put(root + 'part-' + piece['compressed_sha256'] + '.gz', compressed,
-                          mime='application/octet-stream', immutable=True)
+                _put_checkpoint(drive, root + 'part-' + piece['compressed_sha256'] + '.gz',
+                                compressed, mime='application/octet-stream', immutable=True)
                 kwargs = {'expected_sha': digest(prior)} if prior is not None else {'immutable': True}
                 saved = compact(desired)
-                drive.put(pointer, saved, **kwargs)
+                _put_checkpoint(drive, pointer, saved, **kwargs)
             prior, doc = saved, desired
             chunks.append(data); offset += length
             LOG.info('LARGE_READ_CHECKPOINT path=%s bytes_saved=%d total=%d', path, offset, identity['size'])

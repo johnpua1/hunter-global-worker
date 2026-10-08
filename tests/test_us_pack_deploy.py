@@ -167,6 +167,21 @@ class ReadbackRecoveryTests(unittest.TestCase):
         self.assertIn('PACK_FIX_DIFFERENT_PATHS=', out.getvalue())
         self.assertNotIn('sensitive-new-version', out.getvalue())
 
+    def test_observed_execution_creator_metadata_does_not_change_workload(self):
+        self.docs['US']['spec']['template']['metadata'] = {
+            'annotations': {'run.googleapis.com/execution-environment': 'gen2'}}
+        self.reference['metadata']['annotations'] = {
+            'run.googleapis.com/execution-environment': 'gen2',
+            'run.googleapis.com/creator': 'execution-creator@example.invalid',
+            'run.googleapis.com/lastModifier': 'execution-modifier@example.invalid'}
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(mod.verify_deployed_us(self.r, SHA)['status'], 'VERIFIED')
+        self.assertNotIn('example.invalid', out.getvalue())
+        # Ignoring those exact audit fields must not bypass execution settings.
+        self.reference['metadata']['annotations']['run.googleapis.com/execution-environment'] = 'gen1'
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, 'REFERENCE_ANNOTATIONS_MISMATCH'):
+            mod.verify_deployed_us(self.r, SHA)
+
     def test_unexpected_runtime_annotation_is_blocked(self):
         self.docs['US']['spec']['template']['metadata'] = {
             'annotations': {'run.googleapis.com/vpc-access-connector': 'other'}}

@@ -107,8 +107,11 @@ def verify_deployed_us(r, sha):
             configuration(r, expected_doc), configuration(r, actual_doc))), flush=True)
         raise RuntimeError('PACK_FIX_REFERENCE_WORKLOAD_MISMATCH')
     def runtime_annotations(meta):
+        # Execution metadata records its creator/last modifier. Those audit
+        # identities are not settings inherited from the job's task template.
         ignored = {'run.googleapis.com/client-name', 'run.googleapis.com/client-version',
-                   'run.googleapis.com/operation-id'}
+                   'run.googleapis.com/operation-id', 'run.googleapis.com/creator',
+                   'run.googleapis.com/lastModifier'}
         return {k: v for k, v in meta.get('annotations', {}).items()
                 if k.startswith('run.googleapis.com/') and k not in ignored}
     old_annotations = runtime_annotations(reference.get('metadata', {}))

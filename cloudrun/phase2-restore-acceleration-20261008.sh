@@ -134,7 +134,7 @@ def recoverable_failure(name, market, doc=None):
         if (fatal.startswith("404 Client Error:") or
                 "Read timed out." in fatal):
             if immutable_batch_failure(name, market):
-                return "IMMUTABLE_BATCH_RESPONSE_RECOVERY"
+                return "SAVED_STATE_WRITE_RESPONSE_RECOVERY"
             return None
         observed = OBSERVED_FAILURES.get(name)
         if (observed and observed[:2] == (market, fatal)
@@ -180,9 +180,11 @@ def execution_source(name, market):
 
 
 def immutable_batch_failure(name, market):
-    # Only the previous continuation image's immutable batch-save transport
-    # failures are handed off. Mutable writes and integrity failures stay fatal.
-    if execution_source(name, market) != pack_deployment.EXISTING[market]:
+    # Hand off known immutable batch-save failures and cache-pack writes that
+    # failed before manifest publication. The committed cache slot stays valid;
+    # the new worker uses content-named packs. Manifest/output write failures
+    # and integrity failures are not eligible for this handoff.
+    if execution_source(name, market) not in pack_deployment.PREVIOUS_SOURCES:
         return False
     query = ('resource.type="cloud_run_job" AND labels."run.googleapis.com/execution_name"="'
              + name + '" AND "Traceback (most recent call last)"')
@@ -190,8 +192,12 @@ def immutable_batch_failure(name, market):
     if not rows:
         return False
     text = str(rows[0].get('textPayload') or rows[0].get('jsonPayload', {}).get('message', ''))
-    frames = (re.search(r'File "/app/derived_resume.py", line [0-9]+, in save', text)
-              and 'immutable=True' in text and 'in _continuation_write' in text)
+    batch_save = (re.search(r'File "/app/derived_resume.py", line [0-9]+, in save', text)
+                  and 'immutable=True' in text)
+    pack_save = re.search(
+        r'File "/app/incremental_inputs.py", line [0-9]+, in _flush\s*\n\s*'
+        r'writer\.put\(self\.pack_path\(key, slot\), data,', text)
+    frames = (batch_save or pack_save) and 'in _continuation_write' in text
     ending = text.strip().splitlines()[-1]
     transport = (ending.startswith('requests.exceptions.ReadTimeout:')
                  and "host='script.google.com'" in ending or
@@ -203,7 +209,7 @@ def immutable_batch_failure(name, market):
             if 'File "/app/' in line or line.startswith('requests.exceptions.'):
                 emit(safe(line.strip()))
         return False
-    emit(market + ' IMMUTABLE_BATCH_FAILURE_CONFIRMED=' + name)
+    emit(market + (' CACHE_PACK_FAILURE_CONFIRMED=' if pack_save else ' IMMUTABLE_BATCH_FAILURE_CONFIRMED=') + name)
     return True
 
 
@@ -385,7 +391,7 @@ def error_reason(exc):
     return type(exc).__name__ + ":UNCLASSIFIED_MONITOR_ERROR"
 
 def main():
-    emit("VERSION=20261008_RESTORE_ACCELERATION_4;GOAL=US:2026-10-07,HK:2026-10-08;两市统一新版本，只继续未完成阶段，写后不回读")
+    emit("VERSION=20261008_IMMUTABLE_PACK_ACCELERATION_4;GOAL=US:2026-10-07,HK:2026-10-08;两市统一新版本，只继续未完成阶段，写后不回读")
     deadline = time.monotonic() + 7 * 3600
     preflight_write_recovery()
     prepared = pack_deployment.deploy_both(r, WORKER_SHA)

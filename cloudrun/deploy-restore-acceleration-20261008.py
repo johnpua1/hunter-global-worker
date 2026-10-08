@@ -13,7 +13,7 @@ configuration = compare.configuration
 BASE_IMAGE = compare.BASE_IMAGE
 # Existing source IDs are accepted solely as update inputs, never as launch targets.
 EXISTING = dict.fromkeys(('US', 'HK'), '702bc750ed544efe7eea94ff2a96f343865b30e5')
-PREVIOUS_SOURCES = {'702bc750ed544efe7eea94ff2a96f343865b30e5', 'b747df7deb0f9257c8e74f5c94c027bc1a63f032'}
+PREVIOUS_SOURCES = {'702bc750ed544efe7eea94ff2a96f343865b30e5', 'b747df7deb0f9257c8e74f5c94c027bc1a63f032', '03ca7fde6d04a1eb02247dbf7441c2d6d08abc03'}
 
 
 def desired(doc, r, market, sha):

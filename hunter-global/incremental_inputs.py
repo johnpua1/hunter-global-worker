@@ -59,7 +59,11 @@ class InputCache:
                 if doc.get('schema') != 1 or doc.get('market') != market:
                     raise ValueError('identity')
                 for key, pack in doc['packs'].items():
-                    if not key.isdigit() or pack['slot'] not in (0, 1) or not re.fullmatch('[a-f0-9]{64}', pack['sha256']):
+                    slot = pack['slot']
+                    valid_slot = (slot in (0, 1) or
+                                  isinstance(slot, str) and re.fullmatch('[a-f0-9]{64}', slot)
+                                  and slot == pack['sha256'])
+                    if not key.isdigit() or not valid_slot or not re.fullmatch('[a-f0-9]{64}', pack['sha256']):
                         raise ValueError('pack')
                 for path, entry in doc['entries'].items():
                     if not self.source(path) or str(entry['pack']) not in doc['packs']:
@@ -105,6 +109,8 @@ class InputCache:
                 and int(info.get('size', -1)) == entry.get('size'))
 
     def pack_path(self, number, slot):
+        if isinstance(slot, str) and re.fullmatch('[a-f0-9]{64}', slot):
+            return self.prefix + 'pack-%05d-%s.zip' % (int(number), slot)
         return self.prefix + 'pack-%05d-%d.zip' % (int(number), slot)
 
     def pack_snapshot(self, number):
@@ -255,7 +261,8 @@ class InputCache:
             key = tail if index == 0 and tail is not None else str(number)
             if key != tail:
                 number += 1
-            slot = 1 - packs[key]['slot'] if key in packs else 0
+            old_slot = packs[key]['slot'] if key in packs else 1
+            slot = 1 - old_slot if isinstance(old_slot, int) else 0
             buffer = io.BytesIO()
             with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
                 for path, data in group.items():
@@ -265,7 +272,15 @@ class InputCache:
             data = buffer.getvalue()
             if len(data) > PACK_LIMIT:
                 raise RuntimeError('INPUT_CACHE_PACK_TOO_LARGE')
-            writer.put(self.pack_path(key, slot), data, mime='application/octet-stream')
+            from continuation import enabled as continue_only
+            if continue_only():
+                # A content-named pack never overwrites the committed pack.
+                # Lost ACK recovery can use the Bridge's locked immutable put.
+                slot = digest(data)
+                writer.put(self.pack_path(key, slot), data,
+                           mime='application/octet-stream', immutable=True)
+            else:
+                writer.put(self.pack_path(key, slot), data, mime='application/octet-stream')
             packs[key] = {'slot': slot, 'sha256': digest(data), 'size': len(data)}
             written_groups[key] = dict(group)
             for path, data in group.items():

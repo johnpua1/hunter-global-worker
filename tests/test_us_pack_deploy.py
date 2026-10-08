@@ -114,3 +114,66 @@ class UsPackDeployTests(unittest.TestCase):
                 self.on_update = change
                 with self.assertRaisesRegex(RuntimeError, 'CONFIGURATION_CHANGED_AFTER_UPDATE'):
                     self.run_deploy()
+
+    def test_random_deployment_nonce_changes_are_ignored_but_other_labels_are_not(self):
+        meta = self.docs['US']['spec']['template'].setdefault('metadata', {})
+        meta['labels'] = {'client.knative.dev/nonce': 'old', 'owner': 'hunter'}
+        def change():
+            meta['labels']['client.knative.dev/nonce'] = 'new'
+        self.on_update = change
+        self.assertEqual(self.run_deploy()['status'], 'VERIFIED')
+        before = copy.deepcopy(self.docs)
+        meta['labels']['owner'] = 'different'
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, 'CONFIGURATION_CHANGED'):
+            mod.unchanged(self.r, before, self.docs, 'TEST')
+
+
+class ReadbackRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        base = existing.mod.base
+        self.docs = {'US': document('US', SHA), 'HK': document('HK', mod.HK_FIXED)}
+        old = document('US', mod.US_PREVIOUS)
+        self.reference = {'metadata': {'name': 'hunter-us-daily-55g2b'},
+                          'spec': copy.deepcopy(old['spec']['template']['spec'])}
+        self.calls = []
+        def gc(*args):
+            self.calls.append(args)
+            if args == ('run', 'jobs', 'executions', 'describe', 'hunter-us-daily-55g2b'):
+                return copy.deepcopy(self.reference)
+            if args[:3] == ('run', 'jobs', 'describe'):
+                return copy.deepcopy(self.docs[args[3].split('-')[1].upper()])
+            raise AssertionError('Unexpected mutation: ' + repr(args))
+        self.r = types.SimpleNamespace(gc=gc, deployment=existing.mod.deployment,
+            verify=existing.mod.verify, base=types.SimpleNamespace(
+                configuration=base.configuration, recovery=base.recovery, deploy=base.deploy))
+
+    def test_already_updated_workload_matches_old_execution_without_writes(self):
+        self.docs['US']['spec']['template']['metadata'] = {
+            'labels': {'client.knative.dev/nonce': 'new'},
+            'annotations': {'run.googleapis.com/execution-environment': 'gen2'}}
+        self.reference['metadata']['annotations'] = {
+            'run.googleapis.com/execution-environment': 'gen2',
+            'run.googleapis.com/operation-id': 'generated'}
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mod.verify_deployed_us(self.r, SHA)['status'], 'VERIFIED')
+        self.assertEqual(len(self.calls), 5)
+
+    def test_actual_secret_drift_is_blocked_and_values_are_not_printed(self):
+        c = self.r.deployment.container(self.docs['US'], 'US')
+        c['env'][-1]['valueFrom']['secretKeyRef']['key'] = 'sensitive-new-version'
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaisesRegex(RuntimeError, 'REFERENCE_WORKLOAD_MISMATCH'):
+                mod.verify_deployed_us(self.r, SHA)
+        self.assertIn('PACK_FIX_DIFFERENT_PATHS=', out.getvalue())
+        self.assertNotIn('sensitive-new-version', out.getvalue())
+
+    def test_unexpected_runtime_annotation_is_blocked(self):
+        self.docs['US']['spec']['template']['metadata'] = {
+            'annotations': {'run.googleapis.com/vpc-access-connector': 'other'}}
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, 'REFERENCE_ANNOTATIONS_MISMATCH'):
+            mod.verify_deployed_us(self.r, SHA)
+
+    def test_old_image_requires_diagnosis_and_is_not_silently_redeployed(self):
+        self.docs['US'] = document('US', mod.US_PREVIOUS)
+        with self.assertRaisesRegex(RuntimeError, 'NEW_IMAGE_NOT_DEPLOYED'):
+            mod.verify_deployed_us(self.r, SHA)

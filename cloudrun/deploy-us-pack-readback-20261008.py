@@ -25,6 +25,11 @@ def configuration(r, doc):
                     ann.pop(key, None)
                 if not ann:
                     meta.pop('annotations', None)
+            labels = meta.get('labels')
+            if isinstance(labels, dict):
+                labels.pop('client.knative.dev/nonce', None)
+                if not labels:
+                    meta.pop('labels', None)
             if not meta:
                 node.pop('metadata', None)
         for value in list(node.values()):
@@ -48,7 +53,74 @@ def snapshot(r):
 def unchanged(r, before, after, stage):
     for market in ('US', 'HK'):
         if configuration(r, before[market]) != configuration(r, after[market]):
+            print('PACK_FIX_DIFFERENT_PATHS=' + ','.join(different_paths(
+                configuration(r, before[market]), configuration(r, after[market]))), flush=True)
             raise RuntimeError('PACK_FIX_CONFIGURATION_CHANGED_' + stage + ':' + market)
+
+
+def different_paths(left, right, path='template'):
+    """Report structure only; never print environment values or secrets."""
+    if type(left) is not type(right):
+        return [path]
+    if isinstance(left, dict):
+        return [p for k in sorted(set(left) | set(right))
+                for p in ([path + '.' + k] if k not in left or k not in right
+                          else different_paths(left[k], right[k], path + '.' + k))]
+    if isinstance(left, list):
+        if len(left) != len(right):
+            return [path + '.length']
+        return [p for i, (a, b) in enumerate(zip(left, right))
+                for p in different_paths(a, b, path + '[' + str(i) + ']')]
+    return [] if left == right else [path]
+
+
+def verify_deployed_us(r, sha):
+    """Read-only recovery after the known update; never rebuild or update.
+
+    Compare the current US workload to the immutable pre-update execution,
+    permitting only the requested image/source change. Then read both jobs
+    again before handing them to the monitor.
+    """
+    before = snapshot(r)
+    if identity(r, before['US'], 'US', sha) != sha:
+        raise RuntimeError('PACK_FIX_NEW_IMAGE_NOT_DEPLOYED')
+    identity(r, before['HK'], 'HK', sha)
+    reference = r.gc('run', 'jobs', 'executions', 'describe', 'hunter-us-daily-55g2b')
+    if reference.get('metadata', {}).get('name') != 'hunter-us-daily-55g2b':
+        raise RuntimeError('PACK_FIX_REFERENCE_EXECUTION_MISMATCH')
+    if 'spec' not in reference or 'spec' not in before['US']:
+        raise RuntimeError('PACK_FIX_REFERENCE_SCHEMA_UNSUPPORTED')
+    expected = copy.deepcopy(reference['spec'])
+    c = r.deployment.container(expected, 'US')
+    env = c.get('env', [])
+    source = [e.get('value') for e in env if e['name'] == 'HUNTER_SOURCE_SHA']
+    if source != [US_PREVIOUS]:
+        raise RuntimeError('PACK_FIX_REFERENCE_SOURCE_MISMATCH')
+    c['image'] = BASE_IMAGE + sha
+    for e in env:
+        if e['name'] == 'HUNTER_SOURCE_SHA':
+            e['value'] = sha
+    expected_doc = {'spec': {'template': {'spec': expected}}}
+    actual_doc = {'spec': {'template': {'spec': before['US']['spec']['template']['spec']}}}
+    if configuration(r, expected_doc) != configuration(r, actual_doc):
+        print('PACK_FIX_DIFFERENT_PATHS=' + ','.join(different_paths(
+            configuration(r, expected_doc), configuration(r, actual_doc))), flush=True)
+        raise RuntimeError('PACK_FIX_REFERENCE_WORKLOAD_MISMATCH')
+    def runtime_annotations(meta):
+        ignored = {'run.googleapis.com/client-name', 'run.googleapis.com/client-version',
+                   'run.googleapis.com/operation-id'}
+        return {k: v for k, v in meta.get('annotations', {}).items()
+                if k.startswith('run.googleapis.com/') and k not in ignored}
+    old_annotations = runtime_annotations(reference.get('metadata', {}))
+    new_annotations = runtime_annotations(before['US']['spec']['template'].get('metadata', {}))
+    if old_annotations != new_annotations:
+        print('PACK_FIX_DIFFERENT_PATHS=' + ','.join(different_paths(
+            old_annotations, new_annotations, 'runtime_annotations')), flush=True)
+        raise RuntimeError('PACK_FIX_REFERENCE_ANNOTATIONS_MISMATCH')
+    current = snapshot(r)
+    unchanged(r, before, current, 'DURING_VERIFY')
+    print('US_PACK_FIX_RECOVERY_VERIFIED=' + sha + ';REFERENCE=hunter-us-daily-55g2b;NO_BUILD_OR_UPDATE', flush=True)
+    return {'status': 'VERIFIED', 'docs': current}
 
 
 def identity(r, doc, market, sha):

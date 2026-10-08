@@ -29,6 +29,21 @@ def desired(doc, r, market, sha):
     return result
 
 
+def verify_current(r, sha):
+    """Attach to already deployed new workers; no build/update/cancellation."""
+    before = compare.snapshot(r)
+    for market, doc in before.items():
+        if configuration(r, doc) != configuration(r, desired(doc, r, market, sha)):
+            raise RuntimeError('CONTINUATION_NEW_TEMPLATE_REQUIRED:' + market)
+        r.verify(doc, doc, market, sha)
+        if r.base.deploy.daily_runtime(doc) != (7200, 0):
+            raise RuntimeError('CONTINUATION_UNEXPECTED_RUNTIME:' + market)
+    current = compare.snapshot(r)
+    compare.unchanged(r, before, current, 'DURING_ATTACH')
+    print('CONTINUATION_ATTACHED_SAME_WORKER=' + sha + ';NO_BUILD_UPDATE_OR_CANCEL', flush=True)
+    return {'status': 'VERIFIED', 'docs': current, 'cancelled': set()}
+
+
 def deploy_both(r, sha):
     head = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
     if not re.fullmatch('[a-f0-9]{40}', sha) or head != sha or pathlib.Path(r.base.ROOT).resolve() != ROOT:

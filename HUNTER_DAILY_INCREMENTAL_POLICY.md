@@ -1,5 +1,13 @@
 # Daily incremental update requirement
 
+## Superseding Phase 2 retirement — 2026-10-09 01:15:35 MYT
+
+Phase 2 is permanently retired by the user. See PHASE2_RETIRED.md.
+All earlier Phase 2 finish/resume/ranking/acceptance instructions below are
+superseded. Daily update requirements apply only to work outside retired
+Phase 2; they do not authorize invoking it. This is a policy record, not a
+claim that existing cloud jobs or schedules have been stopped.
+
 User instruction confirmed 2026-10-09 00:51 MYT, clarified 00:54 MYT. Applies
 to US and HK updates, including daily data, indicators and ranking. This records the required behavior; it
 does not claim that the current production worker already implements it.
@@ -23,8 +31,8 @@ does not claim that the current production worker already implements it.
   that already have committed data.
 - Historical corrections are not automatically authorized by an update job;
   they require a separate, explicitly scoped user instruction.
-- Keep existing US work scoped to 2026-10-07 and HK work to 2026-10-08 until
-  that closeout completes. Never silently extend those recovery goals.
+- The former US 2026-10-07 and HK 2026-10-08 Phase 2 closeout tasks are
+  cancelled by the retirement decision; do not resume them.
 - Continue daily scheduling without requiring routine Cloud Shell commands.
 
 ## No silent fallback
@@ -57,5 +65,5 @@ Before calling the runtime compliant, demonstrate with isolated test fixtures:
 4. Missing state reports an explicit gap rather than invoking a full rebuild.
 5. Active executions and saved progress are preserved during deployment.
 
-The previously proposed daily-only HK acceptance/deletion was withdrawn by
-the user's later instruction to finish ranking. It is not an active waiver.
+The earlier instruction to finish ranking is now superseded by permanent
+Phase 2 retirement. Retirement is neither acceptance nor deletion.

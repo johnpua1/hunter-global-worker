@@ -239,3 +239,29 @@ invContext.UrlFetchApp.fetch = () => ({getResponseCode:()=>200,
   getContentText:()=>JSON.stringify({files:[invRows[0],invRows[0]]})});
 assert.throws(() => invContext.bridgeSourceInventory_({}, 'US'), /INVENTORY_DUPLICATE_PATH/);
 console.log('Incremental source inventory pagination, batch traversal and isolation PASS');
+
+// Lost ACK recovery executes the actual Bridge create-once branch. No second
+// create, rename, trash, or client data read is needed for identical content.
+{
+  const path = 'HK/CONTROL/PHASE2_RESUME/DERIVED_BATCHES/2026-10-08/batch-0001/result.json';
+  const data = Buffer.from('{"rows":[1,2,3]}');
+  const request = {sha256: crypto.createHash('sha256').update(data).digest('hex'),
+    data_base64: data.toString('base64'), mime:'application/json', immutable:true};
+  const parent = context.bridgeFolder_(root, path.slice(0,path.lastIndexOf('/')), true);
+  let creates = 0;
+  const create = parent.createFile;
+  parent.createFile = function(value) { creates++; return create.call(this,value); };
+  const firstAck = JSON.parse(context.bridgePut_(root,path,request,'put','HK').value);
+  const stored = context.bridgeFile_(root,path);
+  stored.setName = () => { throw new Error('repeated rename'); };
+  stored.setTrashed = () => { throw new Error('repeated trash'); };
+  const recoveredAck = JSON.parse(context.bridgePut_(root,path,request,'put','HK').value);
+  assert.deepEqual(recoveredAck,firstAck);
+  assert.equal(creates,1);
+  const other = Buffer.from('{"rows":[9]}');
+  assert.throws(() => context.bridgePut_(root,path,{...request,
+    sha256:crypto.createHash('sha256').update(other).digest('hex'),data_base64:other.toString('base64')},'put','HK'),/IMMUTABLE_CONFLICT/);
+  assert.equal(creates,1);
+  assert.equal(held,false);
+}
+console.log('Immutable ACK loss recovery: one file creation, no overwrite, conflict rejected.');

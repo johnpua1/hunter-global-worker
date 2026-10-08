@@ -205,7 +205,12 @@ class Drive:
                         break
                     # Every response hop is GET-only; do not replay a write or
                     # forward the shared key when ContentService redirects again.
-                    response = self.http.get(location, timeout=budget_timeout(timeout), allow_redirects=False)
+                    from continuation import enabled as continue_only
+                    if not reading and op in {'put', 'append'} and continue_only():
+                        from write_recovery import response_get
+                        response = response_get(self.http, location, timeout)
+                    else:
+                        response = self.http.get(location, timeout=budget_timeout(timeout), allow_redirects=False)
                     response_hop = True
                 try:
                     # A 404 on ContentService's disposable response URL is not
@@ -427,8 +432,8 @@ class Drive:
             fields["expected_sha256"] = expected_sha
         from continuation import enabled as continue_only
         if continue_only():
-            # A lost response is ambiguous. Do not replay writes or fetch the
-            # stored content to reconcile it under continuation-only policy.
+            # Mutable/append outcomes remain fail-closed. Immutable requests
+            # may recover via the Bridge's locked create-once operation.
             result = self._continuation_write('put', **fields)
             if result['sha256'] != digest(content):
                 raise RuntimeError('BRIDGE_WRITE_SHA_MISMATCH:' + path)
@@ -517,14 +522,33 @@ class Drive:
 
 
     def _continuation_write(self, op, **fields):
+        from write_recovery import immutable_put, transient
         state = getattr(self, '_continuation_state', None)
         if state is not None and state.get('write_uncertain'):
             raise RuntimeError('CONTINUATION_WRITE_OUTCOME_UNKNOWN')
+        recoverable = immutable_put(op, fields)
         try:
-            result = self._call(op, _attempts=1, **fields)
-            if result['sha256'] != fields['sha256']:
-                raise RuntimeError('BRIDGE_WRITE_SHA_MISMATCH')
-            return result
+            for attempt in range(3 if recoverable else 1):
+                LOG.info('BRIDGE_WRITE_START op=%s path=%s immutable=%s attempt=%d',
+                         op, fields.get('path', ''), recoverable, attempt + 1)
+                try:
+                    result = self._call(op, _attempts=1, **fields)
+                except (requests.RequestException, ValueError) as exc:
+                    if not recoverable or not transient(exc):
+                        raise
+                    if attempt == 2:
+                        raise RuntimeError('IMMUTABLE_WRITE_TRANSPORT_RETRY_REQUIRED') from exc
+                    LOG.warning('IMMUTABLE_WRITE_ACK_RECOVERY path=%s attempt=%d type=%s',
+                                fields.get('path', ''), attempt + 1, type(exc).__name__)
+                    self.http.close()
+                    self.http = requests.Session()
+                    time.sleep(attempt + 1)
+                    continue
+                if result['sha256'] != fields['sha256']:
+                    raise RuntimeError('BRIDGE_WRITE_SHA_MISMATCH')
+                LOG.info('BRIDGE_WRITE_ACK op=%s path=%s attempt=%d',
+                         op, fields.get('path', ''), attempt + 1)
+                return result
         except BaseException:
             if state is not None:
                 state['write_uncertain'] = True

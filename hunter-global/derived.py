@@ -64,6 +64,11 @@ def build(drive: Drive, market: str, date: str, daily_rows=None, patch_snapshot=
     # Each pending date replaces the snapshot after its daily writes finish.
     if patch_snapshot is not None:
         patch_snapshot.clear()
+    from continuation import enabled as continue_only, OutputProgress
+    progress = OutputProgress(drive, market, date, 'DERIVED_OUTPUTS') if continue_only() else None
+    if progress and progress.doc.get('status') == 'COMPLETE':
+        LOG.info('DERIVED_ALREADY_COMMITTED market=%s date=%s', market, date)
+        return progress.doc['rows']
     LOG.info("DERIVED_STAGE market=%s date=%s stage=load_inputs", market, date)
     state = load_market(drive, market)
     universe = current_universe(drive, market)
@@ -119,11 +124,21 @@ def build(drive: Drive, market: str, date: str, daily_rows=None, patch_snapshot=
     anchors = defaultdict(list)
     for anchor in anchor_rows:
         anchors[anchor["security_id"]].append(anchor)
+    from derived_resume import BatchResults, context_hash, source_identity, verify_source
+    results = BatchResults(drive, market, date, context_hash(
+        market, date, universe, len(state.securities), daily, patches, events, anchors))
     derived = []
-    def process_base_batch(reader, batch: int) -> list[dict]:
+    def process_base_batch(reader, batch: int):
         # Each worker owns an independent HTTP session; Drive access is read-only
         # here. Result writes remain single-threaded below.
-        base = parse_lines_gz(reader.read(f"{market}/BASE/batch-{batch:04d}.ndjson.gz"))
+        path = f"{market}/BASE/batch-{batch:04d}.ndjson.gz"
+        source = source_identity(reader.file(path))
+        restored = results.restore(reader, batch, source)
+        if restored is not None:
+            return batch, source, restored, True
+        raw = reader.read(path)
+        verify_source(raw, source)
+        base = parse_lines_gz(raw)
         by_id = defaultdict(list)
         for row in base:
             by_id[row["security_id"]].append(row)
@@ -139,12 +154,18 @@ def build(drive: Drive, market: str, date: str, daily_rows=None, patch_snapshot=
                 indicator = indicators(adjusted)
                 indicator["mae_mfe"] = calculate_anchors(adjusted, anchors[sid])
                 out.append(indicator)
-        return out
+        return batch, source, out, False
 
     batches = range(1, state.checkpoint["total_batches"] + 1)
     LOG.info("DERIVED_STAGE market=%s date=%s stage=base_reads batches=%d",
              market, date, state.checkpoint["total_batches"])
-    for number, part in enumerate(map_drive_reads(drive, process_base_batch, batches, workers), 1):
+    for number, (batch, source, part, reused) in enumerate(
+            map_drive_reads(drive, process_base_batch, batches, workers), 1):
+        if reused:
+            LOG.info('DERIVED_BATCH_REUSED market=%s date=%s batch=%d rows=%d',
+                     market, date, batch, len(part))
+        else:
+            results.save(batch, source, part)
         derived.extend(part)
         LOG.info("DERIVED_BATCH market=%s date=%s completed=%d total=%d",
                  market, date, number, state.checkpoint["total_batches"])
@@ -186,7 +207,9 @@ def build(drive: Drive, market: str, date: str, daily_rows=None, patch_snapshot=
         path = f"{folder}/batch-{offset // 250 + 1:04d}.json"
         payload = compact({"market": market, "as_of": date,
                            "rows": derived[offset:offset + 250]})
-        if not drive.file(path) or digest(drive.read(path)) != digest(payload):
+        if progress:
+            progress.put(path, payload)
+        elif not drive.file(path) or digest(drive.read(path)) != digest(payload):
             drive.put(path, payload)
     path = f"{folder}/RANK.json"
     payload = compact({"market": market, "as_of": date,
@@ -195,7 +218,10 @@ def build(drive: Drive, market: str, date: str, daily_rows=None, patch_snapshot=
                        "detail_parts": (len(derived) + 249) // 250,
                        "filters": {"minimum_history_20d": True, "current_date": date},
                        "benchmark": None, "mae_mfe_anchor": None})
-    if not drive.file(path) or digest(drive.read(path)) != digest(payload):
+    if progress:
+        progress.put(path, payload)
+        progress.complete(len(derived))
+    elif not drive.file(path) or digest(drive.read(path)) != digest(payload):
         drive.put(path, payload)
     if patch_snapshot is not None:
         patch_snapshot.update(market=market, as_of=date, files=len(patch_paths),

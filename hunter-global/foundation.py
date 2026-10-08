@@ -345,8 +345,16 @@ def run_daily(drive: Drive, market: str, workers: int, daily_rows=None, patch_sn
     if not dates and active_needs_backfill:
         dates = [previous["last_completed_date"]]
     for date in dates:
-        result = append_daily_date(drive, market, date, securities, last, keys, workers,
-                                   base.calendar, daily_rows)
+        from continuation import enabled as continue_only
+        run_path = f'{market}/CONTROL/DAILY_RUN_{date}.json'
+        prior_run = drive.json(run_path) if continue_only() and drive.file(run_path) else {}
+        if (prior_run.get('market') == market and prior_run.get('trade_date') == date
+                and prior_run.get('status') == 'COMPLETE'):
+            result = prior_run
+            LOG.info('SYNC_DAILY_REUSED market=%s date=%s; continuing unfinished ranking', market, date)
+        else:
+            result = append_daily_date(drive, market, date, securities, last, keys, workers,
+                                       base.calendar, daily_rows)
         results.append(result)
         if result["status"] != "COMPLETE":
             break

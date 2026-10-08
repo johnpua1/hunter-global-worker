@@ -34,6 +34,9 @@ def _checkpoint_commit(drive, path, content, *, immutable=False, expected_sha=No
 
 def _put_checkpoint(drive, path, content, **kwargs):
     """Recover only the observed Drive service failure on read-cache writes."""
+    from continuation import enabled as continue_only
+    if continue_only():
+        return drive.put(path, content, **kwargs)
     needs_readback = False
     last_error = None
     # Three write opportunities; the fourth pass only reconciles the final

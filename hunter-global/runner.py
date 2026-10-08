@@ -134,6 +134,7 @@ class Drive:
         self.http = requests.Session()
         self.folders: dict[str, str] = {"": ""}
         self._read_state = {"guard": threading.Lock(), "locks": {}, "memory": {}}
+        self._continuation_state = {'guard': threading.Lock(), 'locks': {}, 'memory': {}}
 
     def fork_reader(self):
         """Keep this connection's configuration with an independent HTTP session."""
@@ -143,6 +144,8 @@ class Drive:
         reader.folders = dict(self.folders)
         if hasattr(self, '_read_state'):
             reader._read_state = self._read_state
+        if hasattr(self, '_continuation_state'):
+            reader._continuation_state = self._continuation_state
         return reader
 
     def health(self):
@@ -299,6 +302,19 @@ class Drive:
         return self.read(path, _info=info)
 
     def read(self, path: str, *, _info=None) -> bytes:
+        from continuation import enabled as continue_only
+        if not continue_only() or not hasattr(self, '_continuation_state'):
+            return self._read(path, _info=_info)
+        state = self._continuation_state
+        path = path.strip('/')
+        with state['guard']:
+            lock = state['locks'].setdefault(path, threading.RLock())
+        with lock:
+            if path not in state['memory']:
+                state['memory'][path] = self._read(path, _info=_info)
+            return state['memory'][path]
+
+    def _read(self, path: str, *, _info=None) -> bytes:
         import base64
         clean = path.strip("/")
         info = self.file(clean) if _info is None else _info
@@ -409,6 +425,16 @@ class Drive:
                   "sha256": digest(content), "mime": mime, "immutable": immutable}
         if expected_sha is not None:
             fields["expected_sha256"] = expected_sha
+        from continuation import enabled as continue_only
+        if continue_only():
+            # A lost response is ambiguous. Do not replay writes or fetch the
+            # stored content to reconcile it under continuation-only policy.
+            result = self._continuation_write('put', **fields)
+            if result['sha256'] != digest(content):
+                raise RuntimeError('BRIDGE_WRITE_SHA_MISMATCH:' + path)
+            if hasattr(self, '_continuation_state'):
+                self._continuation_state['memory'][path.strip('/')] = content
+            return result['file']
         try:
             result = self._call("put", **fields)
         except (requests.Timeout, requests.ConnectionError, ValueError, RuntimeError) as exc:
@@ -442,6 +468,9 @@ class Drive:
     def put_fast(self, path: str, content: bytes, mime: str = "application/json", expected_sha=None):
         """CAS write with Bridge SHA confirmation, without an immediate full-file readback."""
         import base64
+        from continuation import enabled as continue_only
+        if continue_only():
+            return self.put(path, content, mime=mime, expected_sha=expected_sha)
         fields = {"path": path.strip("/"), "data_base64": base64.b64encode(content).decode("ascii"),
                   "sha256": digest(content), "mime": mime, "immutable": False}
         if expected_sha is not None:
@@ -454,6 +483,16 @@ class Drive:
     def append(self, path: str, content: bytes, mime: str = "application/json"):
         """Create once; reconcile an ambiguous response by exact-byte readback."""
         import base64
+        from continuation import enabled as continue_only
+        if continue_only():
+            result = self._continuation_write('append', path=path.strip('/'),
+                                data_base64=base64.b64encode(content).decode('ascii'),
+                                sha256=digest(content), mime=mime)
+            if result['sha256'] != digest(content):
+                raise RuntimeError('BRIDGE_WRITE_SHA_MISMATCH:' + path)
+            if hasattr(self, '_continuation_state'):
+                self._continuation_state['memory'][path.strip('/')] = content
+            return result['file']
         try:
             result = self._call("append", path=path.strip("/"),
                                 data_base64=base64.b64encode(content).decode("ascii"),
@@ -475,6 +514,21 @@ class Drive:
         if result["sha256"] != digest(content) or digest(self.read(path)) != digest(content):
             raise RuntimeError("APPEND_READBACK_MISMATCH:" + path)
         return result["file"]
+
+
+    def _continuation_write(self, op, **fields):
+        state = getattr(self, '_continuation_state', None)
+        if state is not None and state.get('write_uncertain'):
+            raise RuntimeError('CONTINUATION_WRITE_OUTCOME_UNKNOWN')
+        try:
+            result = self._call(op, _attempts=1, **fields)
+            if result['sha256'] != fields['sha256']:
+                raise RuntimeError('BRIDGE_WRITE_SHA_MISMATCH')
+            return result
+        except BaseException:
+            if state is not None:
+                state['write_uncertain'] = True
+            raise
 
 
     def append_repairs(self, market: str, batch: int, statuses: list[dict], reasons: dict):
@@ -986,6 +1040,11 @@ def validate_phase2_resume(drive, market, date):
     checkpoint = drive.json(f"{market}/CONTROL/DAILY_CHECKPOINT.json")
     if checkpoint.get("market") != market or checkpoint.get("last_completed_date") != date:
         raise RuntimeError("PHASE2_RESUME_CHECKPOINT_MISMATCH")
+    from continuation import enabled as continue_only
+    if continue_only():
+        # Foundation advances this receipt only after all ranking writes have
+        # succeeded. Trust the existing committed stage; do not rescan RANK.
+        return checkpoint
     rank = drive.json(f"{market}/DERIVED/{date}/RANK.json")
     rows = rank.get("rows", [])
     parts = rank.get("detail_parts")
@@ -1116,6 +1175,15 @@ def main():
         return
     from foundation import run_daily as run_foundation_daily, seed_corporate_actions
     for market in markets:
+        from continuation import enabled as continue_only
+        if continue_only():
+            cp_path = f'{market}/CONTROL/DAILY_CHECKPOINT.json'
+            cp = drive.json(cp_path) if drive.file(cp_path) else {}
+            if (cp.get('market') == market and cp.get('last_completed_date')
+                    and cp.get('phase2_completed_date') == cp['last_completed_date']
+                    and not closed_dates_since(market, cp['last_completed_date'])):
+                LOG.info('DAILY_ALREADY_COMMITTED market=%s date=%s', market, cp['last_completed_date'])
+                continue
         with incremental_inputs(drive, market) as inputs:
             seed_corporate_actions(inputs, market)
             daily_rows = {}

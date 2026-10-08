@@ -352,6 +352,10 @@ def incremental_inputs(raw, market):
     finally:
         # A performance cache never fabricates or erases completion. On a cache
         # failure the next run can still reconstruct verified source inputs.
-        save_inputs(CachedDrive(raw, cache), strict=not failed)
+        from continuation import enabled as continue_only
+        if continue_only() and getattr(raw, '_continuation_state', {}).get('write_uncertain'):
+            LOG.error('INPUT_CACHE_SAVE_SKIPPED_UNCERTAIN_WRITE market=%s', market)
+        else:
+            save_inputs(CachedDrive(raw, cache), strict=not failed)
         LOG.info('INPUT_CACHE_SUMMARY market=%s source_reads=%d cache_hits=%d',
                  market, cache.misses, cache.hits)

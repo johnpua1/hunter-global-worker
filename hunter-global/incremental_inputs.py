@@ -69,6 +69,7 @@ class InputCache:
             except (ValueError, KeyError, TypeError, AttributeError):
                 LOG.warning('INPUT_CACHE_REBUILD market=%s reason=MANIFEST_INVALID', market)
         self.memory, self.loaded_packs, self.dirty = {}, {}, set()
+        self.loaded_pack_versions = {}
         self.guard = threading.RLock()
         self.checkpoint_at = time.monotonic()
         self.locks = {}
@@ -96,20 +97,30 @@ class InputCache:
     def pack_path(self, number, slot):
         return self.prefix + 'pack-%05d-%d.zip' % (int(number), slot)
 
-    def load_pack(self, reader, number):
+    def pack_snapshot(self, number):
         key = str(number)
-        with self.lock('pack:' + key):
-            if key not in self.loaded_packs:
+        # Snapshot metadata before taking the pack lock. Never acquire the
+        # global guard while holding a pack lock: flush takes guard -> pack.
+        with self.guard:
+            spec = dict(self.manifest['packs'][key])
+            paths = tuple(p for p, e in self.manifest['entries'].items()
+                          if str(e['pack']) == key)
+            pack_lock = self.lock('pack:' + key)
+        return spec, paths, pack_lock
+
+    def load_pack(self, reader, number, snapshot=None):
+        key = str(number)
+        spec, paths, pack_lock = snapshot if snapshot is not None else self.pack_snapshot(key)
+        with pack_lock:
+            if self.loaded_pack_versions.get(key) != spec['sha256']:
                 try:
-                    spec = self.manifest['packs'][key]
                     data = reader.read(self.pack_path(key, spec['slot']))
                     if digest(data) != spec['sha256']:
                         raise ValueError('hash')
                     with zipfile.ZipFile(io.BytesIO(data)) as archive:
                         if sum(e.file_size for e in archive.infolist()) > 30_000_000:
                             raise ValueError('expanded size')
-                        self.loaded_packs[key] = {p: archive.read(p) for p, e in self.manifest['entries'].items()
-                                                 if str(e['pack']) == key}
+                        self.loaded_packs[key] = {p: archive.read(p) for p in paths}
                     LOG.info('INPUT_PACK_RESTORED market=%s pack=%s files=%d',
                              self.market, key, len(self.loaded_packs[key]))
                 except WorkBudgetExceeded:
@@ -120,6 +131,7 @@ class InputCache:
                     # Corruption is a cache miss, never an accepted source.
                     self.loaded_packs[key] = {}
                     LOG.warning('INPUT_CACHE_PACK_REBUILD market=%s pack=%s', self.market, key)
+                self.loaded_pack_versions[key] = spec['sha256']
             return self.loaded_packs[key]
 
     def read(self, reader, path):
@@ -128,21 +140,35 @@ class InputCache:
                 if path in self.memory:
                     self.hits += 1
                     return self.memory[path]
-                entry = self.manifest['entries'].get(path)
-                if entry and self.matches(path, entry):
-                    data = self.load_pack(reader, entry['pack']).get(path)
-                    if data is not None and digest(data) == entry['sha256'] and fingerprint(data) == {
-                            'md5': entry['md5'], 'size': entry['size']}:
+                found = self.manifest['entries'].get(path)
+                entry = dict(found) if found and self.matches(path, found) else None
+                snapshot = self.pack_snapshot(entry['pack']) if entry is not None else None
+            if entry is not None:
+                # Network reads hold only the per-pack lock, so independent
+                # packs can use the existing bounded reader worker pool.
+                data = self.load_pack(reader, entry['pack'], snapshot).get(path)
+                with self.guard:
+                    # A concurrent append/put may have published newer bytes.
+                    if path in self.memory:
+                        self.hits += 1
+                        return self.memory[path]
+                    if (self.matches(path, entry) and data is not None
+                            and digest(data) == entry['sha256']
+                            and fingerprint(data) == {'md5': entry['md5'], 'size': entry['size']}):
                         self.memory[path] = data
                         self.hits += 1
                         return data
             LOG.info('INPUT_SOURCE_READ market=%s path=%s', self.market, path)
-            info = self.records.get(path)
+            with self.guard:
+                found = self.records.get(path)
+                info = dict(found) if found is not None else None
             data = (reader.read_known(path, info) if info is not None and hasattr(reader, 'read_known')
                     else reader.read(path))
-            if not info or fingerprint(data) != {'md5': info.get('md5'), 'size': int(info.get('size', -1))}:
-                raise RuntimeError('INPUT_SOURCE_CHANGED_DURING_READ:' + path)
             with self.guard:
+                current = self.records.get(path)
+                if (not info or fingerprint(data) != {'md5': info.get('md5'), 'size': int(info.get('size', -1))}
+                        or current != info):
+                    raise RuntimeError('INPUT_SOURCE_CHANGED_DURING_READ:' + path)
                 self.memory[path] = data
                 self.dirty.add(path)
                 self.misses += 1
@@ -241,6 +267,8 @@ class InputCache:
         self.original, self.manifest = data, doc
         self.loaded_packs = {k: v for k, v in self.loaded_packs.items() if k in used}
         self.loaded_packs.update(written_groups)
+        self.loaded_pack_versions = {k: v for k, v in self.loaded_pack_versions.items() if k in used}
+        self.loaded_pack_versions.update({k: packs[k]['sha256'] for k in written_groups})
         self.dirty.clear()
         LOG.info('INPUT_CACHE_COMMITTED market=%s files=%d packs=%d source_reads=%d cache_hits=%d',
                  self.market, len(entries), len(doc['packs']), self.misses, self.hits)

@@ -5,7 +5,7 @@ import re
 import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-US_PREVIOUS = '2e8dd74363e2f13ea15f7a1ad1d6b24624e88086'
+US_PREVIOUS = '364b5826e04a3e0bfa74dbad078f7376c67b8fe2'
 HK_FIXED = 'f6df22e438c8da201bc1759826bd84b72dda299c'
 BASE_IMAGE = 'us-central1-docker.pkg.dev/rgs-hunter-global/hunter-worker/runner:'
 

@@ -317,6 +317,15 @@ def run_daily(drive: Drive, market: str, workers: int, daily_rows=None, patch_sn
         raise RuntimeError("BASE_NOT_VERIFIED:" + market)
     LOG.info("SYNC_STAGE market=%s stage=current_universe", market)
     securities = current_universe(drive, market)
+
+    # Close any already-COMPLETE receipt before the expensive history inventory
+    # and market-fetch path. This is the normal recovery path after an execution
+    # was interrupted between DAILY_RUN commit and DERIVED/checkpoint commit.
+    from daily_closeout import closeout_committed_receipts
+    recovered = closeout_committed_receipts(drive, market)
+    if recovered:
+        LOG.info("SYNC_CLOSEOUT_RECOVERED market=%s dates=%s", market, ",".join(recovered))
+
     LOG.info("SYNC_STAGE market=%s stage=read_existing securities=%d", market, len(securities))
     if daily_rows is None:
         daily_rows = {}

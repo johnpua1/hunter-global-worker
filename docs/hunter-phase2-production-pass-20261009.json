@@ -1,0 +1,41 @@
+{
+  "schema": "HUNTER_PHASE2_ACCEPTANCE_RECORD_V1",
+  "project": "HUNTER_GLOBAL",
+  "module": "PHASE2",
+  "accepted_at_date_myt": "2026-10-09",
+  "acceptance": "PASS",
+  "decision_authority": "USER_EXPLICIT_APPROVAL",
+  "status_scope": "Previous Phase2 baseline accepted; production auto daily entrypoints activated for US and HK",
+  "baseline_initialization": {
+    "status": "PASS",
+    "receipt": "HUNTER_GLOBAL/PHASE2_CHECKPOINT.json",
+    "us": "US/CONTROL/PHASE2_READY.json",
+    "hk": "HK/CONTROL/PHASE2_READY.json"
+  },
+  "latest_daily_rank_closeout": {
+    "trade_date": "2026-10-08",
+    "us": "PASS",
+    "hk": "PASS",
+    "evidence": "https://github.com/johnpua1/hunter-global-worker/actions/runs/37868211907"
+  },
+  "production_schedule": {
+    "status": "PASS",
+    "us_mode": "auto",
+    "hk_mode": "auto",
+    "daily_triggers": "US=1,HK=1",
+    "watchdog": "1",
+    "evidence": [
+      "https://github.com/johnpua1/hunter-global-worker/actions/runs/37879175377",
+      "https://github.com/johnpua1/hunter-global-worker/actions/runs/37879254720"
+    ]
+  },
+  "operating_policy": {
+    "historical_baseline_recertification": "NOT_REQUIRED_FOR_NORMAL_DAILY",
+    "historical_bulk_redownload": "PROHIBITED_FOR_NORMAL_DAILY",
+    "phase2_historical_full_rerun": "PROHIBITED_FOR_NORMAL_DAILY",
+    "daily_operations": "UPDATE_NEW_TRADING_DAY_ONLY",
+    "stock_base": "SEALED",
+    "historical_data_mutation": "NOT_AUTHORIZED_BY_THIS_RECORD"
+  },
+  "boundary": "This records user production acceptance. It does not fabricate a successful execution or completed-date receipt for a future trading session; daily run outcomes remain governed by their actual receipts."
+}

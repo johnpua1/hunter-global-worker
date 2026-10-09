@@ -1,0 +1,53 @@
+name: Hunter Phase2 production mode check 20261009
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/hunter-phase2-production-mode-check-20261009.yml']
+permissions:
+  contents: read
+jobs:
+  check-existing-production-jobs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Confirm deployed Phase2 auto mode and existing daily triggers without market data access
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import importlib.util, os, pathlib
+          p = pathlib.Path("cloudrun/apps-script-post.py")
+          spec = importlib.util.spec_from_file_location("apps_script_post", p)
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          def call(op):
+              ans = module.post_json(os.environ["APPS_SCRIPT_WEBAPP_URL"], {
+                  "op":op, "key":os.environ["APPS_SCRIPT_SHARED_KEY"]
+              })
+              if not ans.get("ok"):
+                  raise SystemExit(op + "_FAILED:" + str(ans.get("error", "unknown")))
+              return ans
+          doc=call("topology_status")
+          jobs=doc.get("jobs") or {}
+          for market, code, job in (("US","US","hunter-us-daily"),("HK","HK","hunter-hk-daily")):
+              d=jobs.get(code) or {}
+              actual=d.get("args")
+              wanted=["--mode","auto","--market",market]
+              if d.get("job") != job or actual != wanted:
+                  raise SystemExit("PHASE2_AUTO_MODE_MISMATCH:" + market
+                                   + ":job=" + str(d.get("job"))
+                                   + ":args=" + str(actual))
+              print(f"PHASE2_AUTO_MODE_{market}=PASS generation={d.get('generation')}")
+          state=call("daily_trigger_status")
+          counts=((state.get("daily") or {}).get("counts") or {})
+          if (counts.get("dailyUS") != 1 or counts.get("dailyHK") != 1
+                  or counts.get("hunterDailyWatchdog") != 1):
+              raise SystemExit("DAILY_CONTROL_COUNTS_MISMATCH:" + str(counts))
+          print("DAILY_TRIGGERS=PASS US=1 HK=1 WATCHDOG=1")
+          print("HISTORY_ACTIONS=NONE BASE_DOWNLOAD=NONE PHASE2_BACKFILL=NONE")
+          PY

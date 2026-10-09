@@ -1,33 +1,54 @@
 {
-  "schema": "HUNTER_PHASE2_ACCEPTANCE_RECORD_V1",
+  "schema": "HUNTER_PHASE2_STATUS_AUTHORITY_V2",
   "project": "HUNTER_GLOBAL",
   "module": "PHASE2",
+  "reason_for_revision": "Prevent cross-window conflation of historical acceptance, production activation, daily ranking, and Phase2 daily freshness.",
   "accepted_at_date_myt": "2026-10-09",
-  "acceptance": "PASS",
-  "decision_authority": "USER_EXPLICIT_APPROVAL",
-  "status_scope": "Previous Phase2 baseline accepted; production auto daily entrypoints activated for US and HK",
-  "baseline_initialization": {
+  "acceptance_authority": "USER_EXPLICIT_APPROVAL",
+  "historical_acceptance": {
     "status": "PASS",
-    "receipt": "HUNTER_GLOBAL/PHASE2_CHECKPOINT.json",
-    "us": "US/CONTROL/PHASE2_READY.json",
-    "hk": "HK/CONTROL/PHASE2_READY.json"
+    "scope": "PHASE2_INITIAL_BASELINE",
+    "remains_valid": true,
+    "evidence": {
+      "status": "PASS",
+      "receipt": "HUNTER_GLOBAL/PHASE2_CHECKPOINT.json",
+      "us": "US/CONTROL/PHASE2_READY.json",
+      "hk": "HK/CONTROL/PHASE2_READY.json"
+    }
   },
-  "latest_daily_rank_closeout": {
-    "trade_date": "2026-10-08",
-    "us": "PASS",
-    "hk": "PASS",
-    "evidence": "https://github.com/johnpua1/hunter-global-worker/actions/runs/37868211907"
-  },
-  "production_schedule": {
-    "status": "PASS",
-    "us_mode": "auto",
-    "hk_mode": "auto",
-    "daily_triggers": "US=1,HK=1",
-    "watchdog": "1",
+  "production_activation": {
+    "status": "ACTIVE",
+    "scope": "US_HK_DAILY_AUTO_ENTRYPOINTS",
+    "last_verified_at_myt": "2026-10-09",
     "evidence": [
       "https://github.com/johnpua1/hunter-global-worker/actions/runs/37879175377",
       "https://github.com/johnpua1/hunter-global-worker/actions/runs/37879254720"
-    ]
+    ],
+    "configuration": {
+      "us_mode": "auto",
+      "hk_mode": "auto",
+      "trigger_counts": "US=1,HK=1,WATCHDOG=1"
+    }
+  },
+  "daily_rank_closeout": {
+    "status": "PASS",
+    "scope": "US_HK_RANK_ONLY",
+    "trade_date": "2026-10-08",
+    "evidence": "https://github.com/johnpua1/hunter-global-worker/actions/runs/37868211907"
+  },
+  "phase2_daily_freshness": {
+    "status": "LIVE_FROM_CHECKPOINT_ONLY",
+    "authority_by_market": {
+      "US": "US/CONTROL/DAILY_CHECKPOINT.json",
+      "HK": "HK/CONTROL/DAILY_CHECKPOINT.json"
+    },
+    "date_field": "phase2_completed_date",
+    "daily_close_field": "last_completed_date",
+    "absent_field_means": "NOT_RECORDED_NOT_FAIL",
+    "older_than_daily_means": "BEHIND_NOT_BASELINE_FAIL",
+    "equal_to_daily_means": "CURRENT_AT_THAT_TRADE_DATE",
+    "prohibited_inference": "Do not infer Phase2 daily completion from daily ranking PASS or production ACTIVE.",
+    "read_scope": "CURRENT_CHECKPOINT_ONLY_NO_HISTORY"
   },
   "operating_policy": {
     "historical_baseline_recertification": "NOT_REQUIRED_FOR_NORMAL_DAILY",
@@ -37,5 +58,14 @@
     "stock_base": "SEALED",
     "historical_data_mutation": "NOT_AUTHORIZED_BY_THIS_RECORD"
   },
-  "boundary": "This records user production acceptance. It does not fabricate a successful execution or completed-date receipt for a future trading session; daily run outcomes remain governed by their actual receipts."
+  "invariants": [
+    "Historical PASS is a fixed acceptance fact and cannot be automatically downgraded by missing/older Phase2 daily-completion fields.",
+    "Production ACTIVE means automation configuration verified, not that the next or every daily run succeeded.",
+    "Daily rank PASS is not Phase2 daily-completion PASS.",
+    "Phase2 daily freshness must be stated with the exact market and dated receipt, or NOT_RECORDED; never use a generic unscoped PASS/FAIL.",
+    "Do not demand repeated historical validation, historical downloads, BASE mutation, or full Phase2 replay solely due to daily freshness lag.",
+    "Do not fabricate or backdate Phase2 completion fields to make them match daily ranking."
+  ],
+  "status_reader": "hunter-global/phase2_status.py",
+  "note": "The historical PASS and production activation remain accepted; any latest-day Phase2 completion is a separate live datum."
 }

@@ -26,6 +26,37 @@ class StatusTests(unittest.TestCase):
         out = mod.interpret_checkpoint("HK", sample)
         self.assertEqual(out["phase2_daily_freshness"], "CURRENT")
 
+    def test_live_projection_does_not_access_history(self):
+        checkpoints = {
+            "US/CONTROL/DAILY_CHECKPOINT.json":
+                {"market": "US", "last_completed_date": "2026-10-08"},
+            "HK/CONTROL/DAILY_CHECKPOINT.json":
+                {"market": "HK", "last_completed_date": "2026-10-08",
+                 "phase2_completed_date": "2026-10-06"},
+        }
+        class ReadOnly:
+            def __init__(self):
+                self.paths = []
+            def json(self, path):
+                self.paths.append(path)
+                return checkpoints[path]
+        read_only = ReadOnly()
+        state = mod.project(read_only)
+        self.assertEqual(state["historical_acceptance"]["status"], "PASS")
+        self.assertEqual(state["production_activation"]["status"], "ACTIVE")
+        self.assertEqual(read_only.paths, list(checkpoints))
+
+    def test_registry_has_no_unscoped_pass(self):
+        import json
+        record = json.loads((ROOT / "docs/hunter-phase2-production-pass-20261009.json")
+                            .read_text(encoding="utf-8"))
+        self.assertNotIn("acceptance", record)
+        self.assertNotIn("status", record)
+        self.assertEqual(record["historical_acceptance"]["status"], "PASS")
+        self.assertEqual(record["phase2_daily_freshness"]["status"],
+                         "LIVE_FROM_CHECKPOINT_ONLY")
+
+
 
 if __name__ == "__main__":
     unittest.main()

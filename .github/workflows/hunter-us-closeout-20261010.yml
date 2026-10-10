@@ -1,0 +1,66 @@
+name: Hunter US committed-receipt closeout 20261010
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/hunter-us-closeout-20261010.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hunter-us-closeout-20261010
+  cancel-in-progress: false
+
+jobs:
+  closeout:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install existing Hunter requirements
+        run: python -m pip install -r hunter-global/requirements.txt
+      - name: Close only already-COMPLETE US receipt
+        working-directory: hunter-global
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+          HUNTER_ACTIONS_CUTOVER: ${{ vars.HUNTER_ACTIONS_CUTOVER }}
+        run: |
+          python - <<'PY'
+          import json
+          from runner import Drive
+          from daily_closeout import closeout_committed_receipts
+
+          drive = Drive()
+          drive.health()
+
+          before = drive.json("US/CONTROL/DAILY_CHECKPOINT.json")
+          if before.get("market") != "US":
+              raise RuntimeError("US_CHECKPOINT_IDENTITY_INVALID")
+          if before.get("last_completed_date") not in ("2026-10-08", "2026-10-09"):
+              raise RuntimeError("US_CHECKPOINT_OUTSIDE_AUTHORIZED_BOUNDARY")
+
+          receipt = drive.json("US/CONTROL/DAILY_RUN_2026-10-09.json")
+          if receipt.get("market") != "US" or receipt.get("trade_date") != "2026-10-09" or receipt.get("status") != "COMPLETE":
+              raise RuntimeError("US_2026_10_09_COMPLETE_RECEIPT_REQUIRED")
+
+          closed = closeout_committed_receipts(drive, "US")
+          after = drive.json("US/CONTROL/DAILY_CHECKPOINT.json")
+          if after.get("last_completed_date") != "2026-10-09":
+              raise RuntimeError("US_CLOSEOUT_NOT_COMMITTED")
+
+          rank = drive.json("US/DERIVED/2026-10-09/RANK.json")
+          if rank.get("market") != "US" or rank.get("as_of") != "2026-10-09":
+              raise RuntimeError("US_RANK_READBACK_INVALID")
+
+          print("US_CLOSEOUT_BEFORE=" + json.dumps(before, sort_keys=True))
+          print("US_CLOSEOUT_RECOVERED=" + json.dumps(closed))
+          print("US_CLOSEOUT_AFTER=" + json.dumps(after, sort_keys=True))
+          print("US_CLOSEOUT_RANK_DETAIL_PARTS=" + str(rank.get("detail_parts")))
+          print("SCOPE=US_2026_10_09_COMPLETE_RECEIPT_ONLY NO_BASE NO_VERIFIED NO_SCHEDULER NO_DAILY_FETCH")
+          PY

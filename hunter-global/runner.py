@@ -1090,8 +1090,23 @@ def main():
                 continue
             if not result:
                 LOG.info("NO_NEW_SESSION market=%s", market)
+                # Empty daily result means there is no newly completed market
+                # session in this invocation. Never rely on all([]) here:
+                # all([]) is True and previously caused weekend/idle runs to
+                # enter Phase 2 again even though no new daily close existed.
+                #
+                # A previously interrupted Phase 2 is resumed only when its
+                # durable RESULTS pointer matches the current checkpoint.
+                from phase2_resume import resume as resume_phase2_result
+                recovered = resume_phase2_result(inputs, market)
+                if recovered is None:
+                    LOG.info("PHASE2_IDLE_NO_NEW_SESSION market=%s", market)
+                    continue
+                finish_phase2_daily(inputs, market, daily_rows=daily_rows,
+                                    patch_snapshot=patch_snapshot)
+                continue
             if all(item.get("status") == "COMPLETE" for item in result):
-                finish_phase2_daily(inputs, market, daily_rows=daily_rows, force=bool(result),
+                finish_phase2_daily(inputs, market, daily_rows=daily_rows, force=True,
                                     patch_snapshot=patch_snapshot)
             else:
                 LOG.warning("phase2 daily deferred until foundation completes market=%s", market)

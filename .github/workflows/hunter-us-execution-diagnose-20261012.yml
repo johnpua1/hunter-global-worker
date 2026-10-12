@@ -1,0 +1,40 @@
+name: Hunter US execution diagnose 20261012
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/hunter-us-execution-diagnose-20261012.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Read Cloud Run execution status through existing Bridge
+        env:
+          APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import importlib.util, json, os, pathlib
+          path=pathlib.Path("cloudrun/apps-script-post.py")
+          spec=importlib.util.spec_from_file_location("bridgepost",path)
+          mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+          result=mod.post_json(os.environ["APPS_SCRIPT_WEBAPP_URL"],
+              {"op":"topology_status","key":os.environ["APPS_SCRIPT_SHARED_KEY"]})
+          if not result.get("ok"):
+              raise SystemExit("TOPOLOGY_STATUS_FAILED:"+json.dumps(result,sort_keys=True))
+          jobs=result.get("jobs") or {}
+          print("US_JOB_STATUS="+json.dumps(jobs.get("hunter-us-daily") or jobs.get("US") or jobs,
+                                             ensure_ascii=False,sort_keys=True))
+          print("DAILY_STATUS="+json.dumps(result.get("daily") or {},
+                                            ensure_ascii=False,sort_keys=True))
+          PY

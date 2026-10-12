@@ -57,6 +57,12 @@ class StatusTests(unittest.TestCase):
                          "LIVE_FROM_CHECKPOINT_ONLY")
 
 
+    def test_runner_does_not_use_all_empty_result_for_phase2(self):
+        runner = (ROOT / "hunter-global" / "runner.py").read_text(encoding="utf-8")
+        self.assertIn('if not result:', runner)
+        self.assertIn('PHASE2_IDLE_NO_NEW_SESSION', runner)
+        self.assertNotIn('if all(item.get("status") == "COMPLETE" for item in result):\n                finish_phase2_daily', runner)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1090,22 +1090,22 @@ def main():
                 continue
             if not result:
                 LOG.info("NO_NEW_SESSION market=%s", market)
-                # Empty daily result means there is no newly completed market
-                # session in this invocation. Never rely on all([]) here:
-                # all([]) is True and previously caused weekend/idle runs to
-                # enter Phase 2 again even though no new daily close existed.
-                #
-                # A previously interrupted Phase 2 is resumed only when its
-                # durable RESULTS pointer matches the current checkpoint.
-                from phase2_resume import resume as resume_phase2_result
-                recovered = resume_phase2_result(inputs, market)
-                if recovered is None:
+                # No new trading session is not proof that Phase 2 completed.
+                # An interrupted reaction read can leave no RESULTS journal.
+                # Resume only the current already-committed session, never
+                # re-run DAILY or RANK and never process a completed receipt.
+                current = inputs.json(f"{market}/CONTROL/DAILY_CHECKPOINT.json")
+                date = current["last_completed_date"]
+                if current.get("market") != market:
+                    raise RuntimeError("PHASE2_RESUME_CHECKPOINT_MARKET_MISMATCH")
+                if (current.get("phase2_completed_date") == date
+                        and current.get("phase2_completed_at_myt")):
                     LOG.info("PHASE2_IDLE_NO_NEW_SESSION market=%s", market)
                     continue
-                finish_phase2_daily(inputs, market, daily_rows=daily_rows,
-                                    patch_snapshot=patch_snapshot)
+                validate_phase2_resume(inputs, market, date)
+                finish_phase2_daily(inputs, market, expected_date=date)
                 continue
-            if all(item.get("status") == "COMPLETE" for item in result):
+            if result and all(item.get("status") == "COMPLETE" for item in result):
                 finish_phase2_daily(inputs, market, daily_rows=daily_rows, force=True,
                                     patch_snapshot=patch_snapshot)
             else:

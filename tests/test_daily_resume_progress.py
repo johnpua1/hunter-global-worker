@@ -123,14 +123,37 @@ class DailyResumeProgressTests(unittest.TestCase):
         self.assertEqual(drive.json(path)['phase2_completed_date'], '2026-10-06')
 
     def test_no_new_session_still_resumes_phase2(self):
+        drive = MemoryDrive()
+        date = '2026-10-06'
+        drive.data['US/CONTROL/DAILY_CHECKPOINT.json'] = runner.compact({
+            'market': 'US', 'last_completed_date': date})
+        drive.data[f'US/DERIVED/{date}/RANK.json'] = runner.compact({
+            'market': 'US', 'as_of': date, 'detail_parts': 1,
+            'rows': [{'security_id': 'US-000001'}]})
+        drive.data[f'US/DERIVED/{date}/batch-0001.json'] = b'{}'
         with patch.dict(os.environ, {'APPS_SCRIPT_WEBAPP_URL': 'test', 'APPS_SCRIPT_SHARED_KEY': 'test',
-                                    'HUNTER_ACTIONS_CUTOVER': 'CONFIRMED'}), \
+                                    'HUNTER_ACTIONS_CUTOVER': 'CONFIRMED', 'HUNTER_INCREMENTAL_INPUTS': '0'}), \
              patch.object(sys, 'argv', ['runner', '--mode', 'auto', '--market', 'US']), \
              patch('runner._enforce_cloud_run_topology'), patch('production_guard.check_at_start'), \
-             patch('runner.Drive'), patch('foundation.seed_corporate_actions'), \
+             patch('runner.Drive', return_value=drive), patch('foundation.seed_corporate_actions'), \
              patch('foundation.run_daily', return_value=[]), patch('runner.finish_phase2_daily') as finish:
             runner.main()
-            self.assertEqual(finish.call_args.args[1], 'US')
+            finish.assert_called_once_with(drive, 'US', expected_date=date)
+
+    def test_no_new_session_does_not_recompute_already_completed_phase2(self):
+        drive = MemoryDrive()
+        date = '2026-10-06'
+        drive.data['US/CONTROL/DAILY_CHECKPOINT.json'] = runner.compact({
+            'market': 'US', 'last_completed_date': date,
+            'phase2_completed_date': date, 'phase2_completed_at_myt': '2026-10-07T08:00:00+08:00'})
+        with patch.dict(os.environ, {'APPS_SCRIPT_WEBAPP_URL': 'test', 'APPS_SCRIPT_SHARED_KEY': 'test',
+                                    'HUNTER_ACTIONS_CUTOVER': 'CONFIRMED', 'HUNTER_INCREMENTAL_INPUTS': '0'}), \
+             patch.object(sys, 'argv', ['runner', '--mode', 'auto', '--market', 'US']), \
+             patch('runner._enforce_cloud_run_topology'), patch('production_guard.check_at_start'), \
+             patch('runner.Drive', return_value=drive), patch('foundation.seed_corporate_actions'), \
+             patch('foundation.run_daily', return_value=[]), patch('runner.finish_phase2_daily') as finish:
+            runner.main()
+            finish.assert_not_called()
 
 
 if __name__ == '__main__':

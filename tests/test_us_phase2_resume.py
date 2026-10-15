@@ -124,6 +124,30 @@ class USPhase2ResumeTests(unittest.TestCase):
         self.assertEqual(drive.data[RANK],original_rank)
         self.assertTrue(all('/PHASE2/' in p or p == CP for p in drive.writes))
 
+    def test_selective_base_reads_skip_unrelated_immutable_batches(self):
+        drive = MemoryDrive()
+        wanted = 'US-000101'
+        first = 'US-000001'
+        later = 'US-000201'
+        drive.data['US/BASE/batch-0001.ndjson.gz'] = runner.lines_gz([row('2026-10-02', 100, first)])
+        drive.data['US/BASE/batch-0002.ndjson.gz'] = runner.lines_gz([row('2026-10-02', 110, wanted)])
+        drive.data['US/BASE/batch-0003.ndjson.gz'] = runner.lines_gz([row('2026-10-02', 120, later)])
+        securities = ([{'security_id': first}] + [{'security_id': 'US-%06d' % i} for i in range(2,101)]
+                      + [{'security_id': wanted}] + [{'security_id': 'US-%06d' % i} for i in range(102,201)]
+                      + [{'security_id': later}])
+        state = SimpleNamespace(checkpoint={'total_batches': 3},
+                                calendar=['2026-10-02'], securities=securities)
+        with patch('runner.load_market', return_value=state), \
+             patch('phase2_runtime.daily_segments', return_value=[]), \
+             patch.object(drive, 'read', wraps=drive.read) as read:
+            price, sessions = phase2.compose_prices(drive, 'US', {wanted, 'US-999999'})
+        self.assertEqual(price[wanted]['2026-10-02']['close'], 110)
+        self.assertEqual(price['US-999999'], {})
+        self.assertEqual(sessions, ['2026-10-02'])
+        paths = [args.args[0] for args in read.call_args_list]
+        self.assertEqual([p for p in paths if '/BASE/batch-' in p],
+                         ['US/BASE/batch-0002.ndjson.gz'])
+
     def test_bounded_us_reads_match_serial_prices_with_patch_and_empty_session(self):
         drive = MemoryDrive()
         sid = 'US-000001'

@@ -128,7 +128,8 @@ class DailyResumeProgressTests(unittest.TestCase):
         drive.data['US/CONTROL/DAILY_CHECKPOINT.json'] = runner.compact({
             'market': 'US', 'last_completed_date': date})
         drive.data[f'US/DERIVED/{date}/RANK.json'] = runner.compact({
-            'market': 'US', 'as_of': date, 'detail_parts': 1})
+            'market': 'US', 'as_of': date, 'detail_parts': 1,
+            'rows': [{'security_id': 'US-000001'}]})
         drive.data[f'US/DERIVED/{date}/batch-0001.json'] = b'{}'
         with patch.dict(os.environ, {'APPS_SCRIPT_WEBAPP_URL': 'test', 'APPS_SCRIPT_SHARED_KEY': 'test',
                                     'HUNTER_ACTIONS_CUTOVER': 'CONFIRMED', 'HUNTER_INCREMENTAL_INPUTS': '0'}), \

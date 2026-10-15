@@ -332,8 +332,19 @@ def compose_prices(drive,market,wanted,daily_rows=None,patch_snapshot=None):
         return parse_lines_gz(reader.read(path))
     def read_json(reader,path):
         return reader.json(path)
+    # BASE batches were built from contiguous 100-security slices of the
+    # immutable foundation universe. Read only batches that contain reaction
+    # targets; decoding unrelated batches adds avoidable minutes to every run.
+    target_batches = {i // 100 + 1 for i, security in enumerate(state.securities)
+                      if security['security_id'] in wanted}
+    found = {security['security_id'] for security in state.securities
+             if security['security_id'] in wanted}
+    if found != set(wanted):
+        raise RuntimeError('PHASE2_BASE_TARGET_IDENTITY_MISMATCH')
+    if any(batch > state.checkpoint['total_batches'] for batch in target_batches):
+        raise RuntimeError('PHASE2_BASE_BATCH_OUT_OF_RANGE')
     paths=[f'{market}/BASE/batch-{batch:04d}.ndjson.gz'
-           for batch in range(1,state.checkpoint['total_batches']+1)]
+           for batch in sorted(target_batches)]
     LOG.info('PHASE2_STAGE market=%s stage=base_reads total=%d',market,len(paths))
     for number,rows in enumerate(map_drive_reads(drive,read_gzip,paths,workers),1):
         for row in rows:

@@ -50,6 +50,12 @@ function doPost(e) {
       if (scope !== 'LEGACY') throw new Error('DAILY_TRIGGER_STATUS_LEGACY_ONLY');
       return bridgeJson_({ok:true, daily:listHunterDailyTriggers()});
     }
+    if (op === 'daily_recovery_version') {
+      if (scope !== 'LEGACY') throw new Error('DAILY_RECOVERY_VERSION_LEGACY_ONLY');
+      return bridgeJson_({ok:true, version:'HUNTER_DAILY_CLOSED_LOOP_20261016',
+                          completionGate:'RANK_PHASE2_AND_NEWER_RECEIPT'});
+    }
+
     if (op === 'enforce_daily_triggers') {
       if (scope !== 'LEGACY') throw new Error('DAILY_TRIGGER_ENFORCE_LEGACY_ONLY');
       return bridgeJson_({ok:true, daily:installHunterDailyTriggers()});

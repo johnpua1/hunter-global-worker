@@ -236,6 +236,7 @@ context.hunterDailyLoadState_ = () => ({
   market:'US',myt_date:'2026-10-16',watchdog_attempts:0
 });
 context.hunterDailySaveState_ = () => {};
+context.status = () => ({job:'hunter-us-daily',running:false,executions:[]});
 context.hunterRecoverStaleExecutions_ = (_market, cloud) => ({
   ready:true,status:cloud
 });

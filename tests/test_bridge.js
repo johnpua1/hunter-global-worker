@@ -148,6 +148,28 @@ function folder(name) {
     },
   };
 }
+// Transient Drive fresh-blob readback must be retried, but a persistent
+// wrong SHA must still fail the existing staged-write gate.
+const goodSha = crypto.createHash('sha256').update('correct').digest('hex');
+let stageReads = 0, stageWaits = 0;
+context.Utilities.sleep = millis => {
+  assert([250, 500].includes(millis));
+  stageWaits++;
+};
+const staged = {getBlob() {
+  stageReads++;
+  return blob(stageReads === 1 ? 'stale' : 'correct');
+}};
+assert.equal(context.bridgeFreshShaMatch_(staged, goodSha), true);
+assert.equal(stageReads, 2);
+assert.equal(stageWaits, 1);
+stageReads = 0;
+assert.equal(context.bridgeFreshShaMatch_({getBlob() {
+  stageReads++;
+  return blob('persistently-wrong');
+}}, goodSha), false);
+assert.equal(stageReads, 3);
+
 const root = folder('HUNTER_GLOBAL');
 const row = {security_id: 'US-000001', date: '2026-09-25', trade_date: '2026-09-25', close: 10};
 const payload = zlib.gzipSync(JSON.stringify(row) + '\n');

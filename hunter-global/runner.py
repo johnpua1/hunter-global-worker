@@ -400,11 +400,11 @@ class Drive:
             raise RuntimeError("DRIVE_READBACK_MISMATCH:" + path)
         return result["file"]
 
-    def put_fast(self, path: str, content: bytes, mime: str = "application/json", expected_sha=None):
+    def put_fast(self, path: str, content: bytes, mime: str = "application/json", expected_sha=None, immutable=False):
         """CAS write with Bridge SHA confirmation, without an immediate full-file readback."""
         import base64
         fields = {"path": path.strip("/"), "data_base64": base64.b64encode(content).decode("ascii"),
-                  "sha256": digest(content), "mime": mime, "immutable": False}
+                  "sha256": digest(content), "mime": mime, "immutable": immutable}
         if expected_sha is not None:
             fields["expected_sha256"] = expected_sha
         result = self._call("put", **fields)

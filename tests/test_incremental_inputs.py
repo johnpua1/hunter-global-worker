@@ -58,6 +58,28 @@ def open_cache(store, market='US'):
 
 
 class IncrementalInputsTests(unittest.TestCase):
+    def test_cache_flush_uses_bridge_sha_ack_without_recursive_readback(self):
+        store = Store()
+        source = 'US/BASE/batch-0001.ndjson.gz'
+        store.data[source] = b'immutable-original'
+        store.put_fast = Mock(wraps=store.put)
+        cache, drive = open_cache(store)
+        self.assertEqual(drive.read(source), b'immutable-original')
+        store.reads.clear()
+        cache.flush()
+        self.assertGreaterEqual(store.put_fast.call_count, 2)
+        self.assertEqual(sum(store.reads.values()), 0,
+                         'Cache pack/manifest writes must not re-read through durable_reads')
+        pack_calls = [call for call in store.put_fast.call_args_list
+                      if call.args[0].endswith('.zip')]
+        pointer_calls = [call for call in store.put_fast.call_args_list
+                         if call.args[0] == cache.pointer]
+        self.assertEqual(len(pack_calls), 1)
+        self.assertEqual(len(pointer_calls), 1)
+        self.assertTrue(pointer_calls[0].kwargs.get('immutable'))
+        self.assertIn(source, cache.manifest['entries'])
+        self.assertEqual(store.data[source], b'immutable-original')
+
     def test_next_day_and_late_append_read_only_new_originals(self):
         import datetime as dt
         for market in ('US', 'HK'):

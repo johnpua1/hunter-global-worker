@@ -904,7 +904,9 @@ function hunterDailyWatchdogMarket_(market) {
       committed = {complete:false, reason:'DATA_STATUS_UNVERIFIED'};
       state.watchdog_data_error = String(err3.message || err3).slice(0, 160);
     }
-    if (committed.complete) {
+    // A completed *old* checkpoint cannot excuse a failed or missing
+    // execution for the current MYT day when no new receipt was produced.
+    if (committed.complete && latestToday && latestToday.status === 'SUCCEEDED') {
       state.watchdog_last_result = 'DAILY_AND_PHASE2_COMMITTED';
       state.last_success_execution = latestToday && latestToday.status === 'SUCCEEDED' ?
           latestToday.name || null : null;

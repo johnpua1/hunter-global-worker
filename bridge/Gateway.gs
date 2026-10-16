@@ -417,6 +417,16 @@ function bridgeDailyKeys_(path, bytes) {
   });
   return keys;
 }
+function bridgeFreshShaMatch_(file, expected) {
+  // Newly-created Drive blobs may be briefly unreadable or stale. Recheck
+  // boundedly; never accept an unequal SHA or weaken the rollback gate.
+  for (var attempt = 0; attempt < 3; attempt++) {
+    if (bridgeSha_(file.getBlob().getBytes()) === expected) return true;
+    if (attempt < 2) Utilities.sleep(250 * (attempt + 1));
+  }
+  return false;
+}
+
 function bridgePut_(root, path, body, op, scope) {
   scope = scope || 'LEGACY';
   bridgeWritePolicy_(path, op, scope);
@@ -467,14 +477,14 @@ function bridgePut_(root, path, body, op, scope) {
     if (old && body.immutable === true) throw new Error('IMMUTABLE_CONFLICT');
     staged = parent.createFile(Utilities.newBlob(bytes, mime,
         '._bridge_' + Utilities.getUuid()));
-    if (bridgeSha_(staged.getBlob().getBytes()) !== body.sha256)
+    if (!bridgeFreshShaMatch_(staged, body.sha256))
       throw new Error('STAGE_READBACK_MISMATCH');
     if (old) {
       oldName = '._backup_' + Utilities.getUuid();
       old.setName(oldName);
     }
     staged.setName(name);
-    if (bridgeSha_(staged.getBlob().getBytes()) !== body.sha256)
+    if (!bridgeFreshShaMatch_(staged, body.sha256))
       throw new Error('WRITE_READBACK_MISMATCH');
     if (old) old.setTrashed(true);
     return bridgeJson_({ok: true, file: bridgeInfo_(staged, path), sha256: body.sha256});

@@ -211,6 +211,8 @@ const checkpointFile = createJson(controlFolder, 'DAILY_CHECKPOINT.json',
 const rankFolder = context.bridgeFolder_(root, 'US/DERIVED/' + committedDate, true);
 createJson(rankFolder, 'RANK.json',
   {market:'US',as_of:committedDate,rows:[{security_id:'US-000001'}],detail_parts:1});
+createJson(rankFolder, 'batch-0001.json',
+  {market:'US',as_of:committedDate,rows:[{security_id:'US-000001'}]});
 assert.equal(context.hunterDailyCommitState_('US').complete, true);
 const pending = createJson(controlFolder, 'DAILY_RUN_2026-10-15.json',
   {market:'US',trade_date:'2026-10-15',status:'COMPLETE'});

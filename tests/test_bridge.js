@@ -208,12 +208,20 @@ const checkpointFile = createJson(controlFolder, 'DAILY_CHECKPOINT.json',
   {market:'US',last_completed_date:committedDate,
    phase2_completed_date:committedDate,
    phase2_completed_at_myt:'2026-10-15T08:00:00+08:00'});
+const dailyReceipt = createJson(controlFolder, 'DAILY_RUN_' + committedDate + '.json',
+  {market:'US',trade_date:committedDate,status:'COMPLETE',active:1,available:1});
 const rankFolder = context.bridgeFolder_(root, 'US/DERIVED/' + committedDate, true);
 createJson(rankFolder, 'RANK.json',
   {market:'US',as_of:committedDate,rows:[{security_id:'US-000001'}],detail_parts:1});
 createJson(rankFolder, 'batch-0001.json',
   {market:'US',as_of:committedDate,rows:[{security_id:'US-000001'}]});
 assert.equal(context.hunterDailyCommitState_('US').complete, true);
+dailyReceipt.setTrashed(true);
+assert.equal(context.hunterDailyCommitState_('US').reason, 'DAILY_RECEIPT_MISSING');
+createJson(controlFolder, 'DAILY_RUN_' + committedDate + '.json',
+  {market:'US',trade_date:committedDate,status:'COMPLETE',active:1,available:1});
+assert.equal(context.hunterDailyCommitState_('US').complete, true);
+assert.equal(source.includes("op === 'daily_commit_status'"), true);
 const pending = createJson(controlFolder, 'DAILY_RUN_2026-10-15.json',
   {market:'US',trade_date:'2026-10-15',status:'COMPLETE'});
 let state = context.hunterDailyCommitState_('US');

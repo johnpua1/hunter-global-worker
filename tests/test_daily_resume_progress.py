@@ -156,6 +156,10 @@ class DailyResumeProgressTests(unittest.TestCase):
             'market': 'US', 'last_completed_date': date,
             'phase2_completed_date': date,
             'phase2_completed_at_myt': '2026-10-16T07:00:00+08:00'})
+        drive.data[f'US/DERIVED/{date}/RANK.json'] = runner.compact({
+            'market': 'US', 'as_of': date, 'detail_parts': 1,
+            'rows': [{'security_id': 'US-000001'}]})
+        drive.data[f'US/DERIVED/{date}/batch-0001.json'] = b'{}'
         with patch.dict(os.environ, {'APPS_SCRIPT_WEBAPP_URL': 'test',
                                      'APPS_SCRIPT_SHARED_KEY': 'test',
                                      'HUNTER_ACTIONS_CUTOVER': 'CONFIRMED',

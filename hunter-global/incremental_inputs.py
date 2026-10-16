@@ -183,6 +183,10 @@ class InputCache:
                     writer.http.close()
 
     def _flush(self, writer):
+        # Bridge verifies staged and published SHA itself. Avoid re-reading
+        # internal cache blobs through durable_reads (which recursively writes
+        # READ_CACHE checkpoints and competes for the global Apps Script lock).
+        write_cache = getattr(writer, 'put_fast', writer.put)
         entries = {p: dict(e) for p, e in self.manifest['entries'].items() if self.matches(p, e)}
         pending = {p: self.memory[p] for p in self.dirty}
         if not pending and entries == self.manifest['entries']:
@@ -227,7 +231,7 @@ class InputCache:
             data = buffer.getvalue()
             if len(data) > PACK_LIMIT:
                 raise RuntimeError('INPUT_CACHE_PACK_TOO_LARGE')
-            writer.put(self.pack_path(key, slot), data, mime='application/octet-stream')
+            write_cache(self.pack_path(key, slot), data, mime='application/octet-stream')
             packs[key] = {'slot': slot, 'sha256': digest(data), 'size': len(data)}
             written_groups[key] = dict(group)
             for path, data in group.items():
@@ -237,7 +241,7 @@ class InputCache:
                'packs': {k: v for k, v in packs.items() if k in used}}
         data = compact(doc)
         kwargs = {'expected_sha': digest(self.original)} if self.original is not None else {'immutable': True}
-        writer.put(self.pointer, data, **kwargs)
+        write_cache(self.pointer, data, **kwargs)
         self.original, self.manifest = data, doc
         self.loaded_packs = {k: v for k, v in self.loaded_packs.items() if k in used}
         self.loaded_packs.update(written_groups)

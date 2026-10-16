@@ -1,15 +1,12 @@
 name: Hunter DAILY automatic rank closeout
 
+# The Apps Script/Cloud Run runtime is the sole DAILY writer.
+# This legacy runner stays as a source/test reference, not a second scheduler.
 on:
   push:
     branches: [main]
     paths:
       - '.github/workflows/hunter-daily-auto-rank.yml'
-  schedule:
-    # GitHub cron UTC. US: 08:20/09:20/10:20 MYT, Tue-Sat.
-    - cron: '20 0,1,2 * * 2-6'
-    # HK: 20:20/21:20/22:20 MYT, Mon-Fri.
-    - cron: '20 12,13,14 * * 1-5'
 
 permissions:
   contents: read
@@ -25,6 +22,7 @@ jobs:
       cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 80
+    if: ${{ false }} # Deprecated production writer; never run from GitHub
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

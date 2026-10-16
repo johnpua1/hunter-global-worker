@@ -228,6 +228,47 @@ state = context.hunterDailyCommitState_('US');
 assert.equal(state.complete, false);
 assert.equal(state.reason, 'PHASE2_NOT_COMMITTED');
 assert.equal(source.includes("if (committed.complete && latestToday && latestToday.status === 'SUCCEEDED')"), true);
+// Exercise the actual watchdog decision: a successful Cloud Run status with
+// missing Phase 2 receipt must dispatch bounded recovery, never declare done.
+context.hunterDailyWindowClosed_ = () => true;
+context.hunterDailyMytDate_ = () => '2026-10-16';
+context.hunterDailyLoadState_ = () => ({
+  market:'US',myt_date:'2026-10-16',watchdog_attempts:0
+});
+context.hunterDailySaveState_ = () => {};
+context.hunterRecoverStaleExecutions_ = (_market, cloud) => ({
+  ready:true,status:cloud
+});
+context.hunterDailyLatestToday_ = () => ({
+  status:'SUCCEEDED',name:'hunter-us-daily-test'
+});
+let dispatched = 0;
+context.runHunterJob_ = () => {
+  dispatched++;
+  return {skipped:false,operation:'test-op'};
+};
+context.Utilities.formatDate = () => '2026-10-16T08:00:00+08:00';
+let decision = context.hunterDailyWatchdogMarket_('US');
+assert.equal(decision.action, 'DISPATCHED');
+assert.equal(dispatched, 1);
+// A fully committed receipt may suppress dispatch, but only with a matching
+// successful current execution, not a prior day's checkpoint alone.
+const incomplete = context.bridgeFile_(root,'US/CONTROL/DAILY_CHECKPOINT.json');
+incomplete.setTrashed(true);
+createJson(controlFolder, 'DAILY_CHECKPOINT.json',
+  {market:'US',last_completed_date:committedDate,
+   phase2_completed_date:committedDate,
+   phase2_completed_at_myt:'2026-10-15T08:00:00+08:00'});
+decision = context.hunterDailyWatchdogMarket_('US');
+assert.equal(decision.action, 'DAILY_AND_PHASE2_COMMITTED');
+assert.equal(dispatched, 1);
+context.hunterDailyLatestToday_ = () => ({
+  status:'FAILED',name:'hunter-us-daily-failed'
+});
+decision = context.hunterDailyWatchdogMarket_('US');
+assert.equal(decision.action, 'DISPATCHED');
+assert.equal(dispatched, 2);
+
 console.log('Hunter watchdog committed-data gate and newer-receipt detection PASS');
 
 console.log('bridge sealed path, scoped auth, queue isolation and row dedup PASS');

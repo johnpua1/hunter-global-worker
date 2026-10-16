@@ -191,6 +191,43 @@ assert.throws(
   () => context.bridgePut_(root, queuePath, jsonFields(qUsForbidden), 'put', 'US'),
   /SCOPE_FOREIGN_QUEUE_MUTATION/
 );
+// The existing watchdog must not stop on Cloud Run success while dated
+// DAILY/Phase 2 evidence is still incomplete.
+context.PropertiesService = {getScriptProperties: () => ({
+  getProperty: key => key === 'HUNTER_GLOBAL_FOLDER_ID' ? 'test-root' : null
+})};
+context.DriveApp = {getFolderById: id => {
+  assert.equal(id, 'test-root');
+  return root;
+}};
+const controlFolder = context.bridgeFolder_(root, 'US/CONTROL', true);
+const committedDate = '2026-10-14';
+const createJson = (where, name, doc) => where.createFile(blob(
+  JSON.stringify(doc), 'application/json', name));
+const checkpointFile = createJson(controlFolder, 'DAILY_CHECKPOINT.json',
+  {market:'US',last_completed_date:committedDate,
+   phase2_completed_date:committedDate,
+   phase2_completed_at_myt:'2026-10-15T08:00:00+08:00'});
+const rankFolder = context.bridgeFolder_(root, 'US/DERIVED/' + committedDate, true);
+createJson(rankFolder, 'RANK.json',
+  {market:'US',as_of:committedDate,rows:[{security_id:'US-000001'}],detail_parts:1});
+assert.equal(context.hunterDailyCommitState_('US').complete, true);
+const pending = createJson(controlFolder, 'DAILY_RUN_2026-10-15.json',
+  {market:'US',trade_date:'2026-10-15',status:'COMPLETE'});
+let state = context.hunterDailyCommitState_('US');
+assert.equal(state.complete, false);
+assert.equal(state.reason, 'NEWER_DAILY_RECEIPT');
+assert.equal(state.pending, '2026-10-15');
+pending.setTrashed(true);
+checkpointFile.setTrashed(true);
+createJson(controlFolder, 'DAILY_CHECKPOINT.json',
+  {market:'US',last_completed_date:committedDate});
+state = context.hunterDailyCommitState_('US');
+assert.equal(state.complete, false);
+assert.equal(state.reason, 'PHASE2_NOT_COMMITTED');
+assert.equal(source.includes("if (committed.complete)"), true);
+console.log('Hunter watchdog committed-data gate and newer-receipt detection PASS');
+
 console.log('bridge sealed path, scoped auth, queue isolation and row dedup PASS');
 
 require("./test_monthly_schedule.js");

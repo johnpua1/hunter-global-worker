@@ -987,6 +987,64 @@ def finish_phase2_daily(drive, market, daily_rows=None, force=False, expected_da
     LOG.info("PHASE2_COMMITTED market=%s date=%s result=%s", market, date, result)
 
 
+def recover_auto_committed(drive, market):
+    """Finish durable DAILY/RANK/Phase 2 work before reading full market history.
+
+    Return True only after the current committed close has all completion
+    receipts, or when nothing has changed and that close is already complete.
+    A missing COMPLETE daily receipt requires the normal foundation writer.
+    """
+    cp_path = f"{market}/CONTROL/DAILY_CHECKPOINT.json"
+    if not drive.file(cp_path):
+        return False
+    for _ in range(10):
+        cp = drive.json(cp_path)
+        date = cp.get("last_completed_date")
+        if cp.get("market") != market or not isinstance(date, str):
+            raise RuntimeError("AUTO_RECOVERY_CHECKPOINT_IDENTITY_MISMATCH")
+        pending = closed_dates_since(market, date)
+        if pending:
+            next_date = pending[0]
+            receipt_path = f"{market}/CONTROL/DAILY_RUN_{next_date}.json"
+            if not drive.file(receipt_path):
+                return False
+            receipt = drive.json(receipt_path)
+            if (receipt.get("market") != market or
+                    receipt.get("trade_date") != next_date or
+                    receipt.get("status") != "COMPLETE"):
+                return False
+            from daily_rank_autoclose import close_one, NotReady
+            try:
+                outcome = close_one(drive, market)
+            except NotReady as exc:
+                LOG.info("AUTO_RANK_CURRENT_SHARDS_NOT_READY market=%s date=%s reason=%s",
+                         market, next_date, str(exc))
+                return False
+            if not outcome.startswith("CLOSED "):
+                raise RuntimeError("AUTO_RECOVERY_RANK_CLOSEOUT_NOT_COMMITTED")
+            LOG.info("AUTO_RECOVERY_RANK_CLOSED market=%s date=%s", market, next_date)
+            continue
+        if (cp.get("phase2_completed_date") == date and
+                cp.get("phase2_completed_at_myt")):
+            LOG.info("AUTO_COMMITTED_COMPLETE market=%s date=%s", market, date)
+            return True
+        if not drive.file(f"{market}/DERIVED/{date}/RANK.json"):
+            return False
+        validate_phase2_resume(drive, market, date)
+        from incremental_inputs import incremental_inputs
+        with incremental_inputs(drive, market) as inputs:
+            finish_phase2_daily(inputs, market, expected_date=date)
+        final = drive.json(cp_path)
+        if (final.get("market") != market or
+                final.get("last_completed_date") != date or
+                final.get("phase2_completed_date") != date or
+                not final.get("phase2_completed_at_myt")):
+            raise RuntimeError("AUTO_PHASE2_COMPLETION_READBACK_MISMATCH")
+        return True
+    LOG.info("AUTO_RECOVERY_BATCH_LIMIT market=%s", market)
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("probe", "mini", "base", "daily", "daily-core", "auto",
@@ -1077,6 +1135,8 @@ def main():
         return
     from foundation import run_daily as run_foundation_daily, seed_corporate_actions
     for market in markets:
+        if args.mode == "auto" and recover_auto_committed(drive, market):
+            continue
         with incremental_inputs(drive, market) as inputs:
             seed_corporate_actions(inputs, market)
             daily_rows = {}

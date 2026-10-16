@@ -824,8 +824,19 @@ function hunterDailyCommitState_(market) {
   var rank = JSON.parse(rankFile.getBlob().getDataAsString('UTF-8'));
   if (rank.market !== market || rank.as_of !== date ||
       !Array.isArray(rank.rows) || !rank.rows.length ||
-      typeof rank.detail_parts !== 'number' || rank.detail_parts < 1)
+      !Number.isInteger(rank.detail_parts) ||
+      rank.detail_parts !== Math.ceil(rank.rows.length / 250))
     return {complete:false, reason:'RANK_NOT_VERIFIED', checkpoint:date};
+  var dated = bridgeFolder_(root, market + '/DERIVED/' + date, false);
+  for (var part = 1; part <= rank.detail_parts; part++) {
+    var name = 'batch-' + ('0000' + part).slice(-4) + '.json';
+    var matching = dated.getFilesByName(name);
+    if (!matching.hasNext())
+      return {complete:false, reason:'RANK_DETAIL_MISSING', checkpoint:date};
+    matching.next();
+    if (matching.hasNext())
+      throw new Error('WATCHDOG_RANK_DETAIL_DUPLICATE');
+  }
   // A newer DAILY receipt means that rank/checkpoint closeout is still owed,
   // even if a prior Cloud Run invocation returned success.
   var control = bridgeFolder_(root, market + '/CONTROL', false);

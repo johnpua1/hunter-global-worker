@@ -81,3 +81,21 @@ class PutCommitRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'WRITE_SHA_MISMATCH'):
             drive.put(self.path,self.payload,expected_sha='old')
         drive.file.assert_not_called();drive.read.assert_not_called()
+
+    def test_fast_cache_put_retains_immutable_or_cas_and_server_sha_gate(self):
+        path = 'US/CONTROL/INCREMENTAL_CACHE/MANIFEST.json'
+        for kwargs in ({'immutable': True}, {'expected_sha': 'old-sha'}):
+            with self.subTest(kwargs=kwargs):
+                drive = runner.Drive.__new__(runner.Drive)
+                drive._call = Mock(return_value={'file': {'id': 'cache-file'},
+                                                 'sha256': runner.digest(self.payload)})
+                drive.read = Mock(side_effect=AssertionError('recursive Drive read'))
+                self.assertEqual(drive.put_fast(path, self.payload, **kwargs),
+                                 {'id': 'cache-file'})
+                fields = drive._call.call_args.kwargs
+                self.assertEqual(fields['immutable'], kwargs.get('immutable', False))
+                self.assertEqual(fields.get('expected_sha256'), kwargs.get('expected_sha'))
+                drive.read.assert_not_called()
+        drive._call.return_value = {'file': {}, 'sha256': 'wrong'}
+        with self.assertRaisesRegex(RuntimeError, 'BRIDGE_WRITE_SHA_MISMATCH'):
+            drive.put_fast(path, self.payload, expected_sha='old-sha')

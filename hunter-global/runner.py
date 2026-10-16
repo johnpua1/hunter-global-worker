@@ -1028,6 +1028,7 @@ def recover_auto_committed(drive, market):
             continue
         if (cp.get("phase2_completed_date") == date and
                 cp.get("phase2_completed_at_myt")):
+            validate_phase2_resume(drive, market, date)
             LOG.info("AUTO_COMMITTED_COMPLETE market=%s date=%s", market, date)
             return True
         if not drive.file(f"{market}/DERIVED/{date}/RANK.json"):

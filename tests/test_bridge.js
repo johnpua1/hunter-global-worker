@@ -191,6 +191,87 @@ assert.throws(
   () => context.bridgePut_(root, queuePath, jsonFields(qUsForbidden), 'put', 'US'),
   /SCOPE_FOREIGN_QUEUE_MUTATION/
 );
+// The existing watchdog must not stop on Cloud Run success while dated
+// DAILY/Phase 2 evidence is still incomplete.
+context.PropertiesService = {getScriptProperties: () => ({
+  getProperty: key => key === 'HUNTER_GLOBAL_FOLDER_ID' ? 'test-root' : null
+})};
+context.DriveApp = {getFolderById: id => {
+  assert.equal(id, 'test-root');
+  return root;
+}};
+const controlFolder = context.bridgeFolder_(root, 'US/CONTROL', true);
+const committedDate = '2026-10-14';
+const createJson = (where, name, doc) => where.createFile(blob(
+  JSON.stringify(doc), 'application/json', name));
+const checkpointFile = createJson(controlFolder, 'DAILY_CHECKPOINT.json',
+  {market:'US',last_completed_date:committedDate,
+   phase2_completed_date:committedDate,
+   phase2_completed_at_myt:'2026-10-15T08:00:00+08:00'});
+const rankFolder = context.bridgeFolder_(root, 'US/DERIVED/' + committedDate, true);
+createJson(rankFolder, 'RANK.json',
+  {market:'US',as_of:committedDate,rows:[{security_id:'US-000001'}],detail_parts:1});
+createJson(rankFolder, 'batch-0001.json',
+  {market:'US',as_of:committedDate,rows:[{security_id:'US-000001'}]});
+assert.equal(context.hunterDailyCommitState_('US').complete, true);
+const pending = createJson(controlFolder, 'DAILY_RUN_2026-10-15.json',
+  {market:'US',trade_date:'2026-10-15',status:'COMPLETE'});
+let state = context.hunterDailyCommitState_('US');
+assert.equal(state.complete, false);
+assert.equal(state.reason, 'NEWER_DAILY_RECEIPT');
+assert.equal(state.pending, '2026-10-15');
+pending.setTrashed(true);
+checkpointFile.setTrashed(true);
+createJson(controlFolder, 'DAILY_CHECKPOINT.json',
+  {market:'US',last_completed_date:committedDate});
+state = context.hunterDailyCommitState_('US');
+assert.equal(state.complete, false);
+assert.equal(state.reason, 'PHASE2_NOT_COMMITTED');
+assert.equal(source.includes("if (committed.complete && latestToday && latestToday.status === 'SUCCEEDED')"), true);
+// Exercise the actual watchdog decision: a successful Cloud Run status with
+// missing Phase 2 receipt must dispatch bounded recovery, never declare done.
+context.hunterDailyWindowClosed_ = () => true;
+context.hunterDailyMytDate_ = () => '2026-10-16';
+context.hunterDailyLoadState_ = () => ({
+  market:'US',myt_date:'2026-10-16',watchdog_attempts:0
+});
+context.hunterDailySaveState_ = () => {};
+context.status = () => ({job:'hunter-us-daily',running:false,executions:[]});
+context.hunterRecoverStaleExecutions_ = (_market, cloud) => ({
+  ready:true,status:cloud
+});
+context.hunterDailyLatestToday_ = () => ({
+  status:'SUCCEEDED',name:'hunter-us-daily-test'
+});
+let dispatched = 0;
+context.runHunterJob_ = () => {
+  dispatched++;
+  return {skipped:false,operation:'test-op'};
+};
+context.Utilities.formatDate = () => '2026-10-16T08:00:00+08:00';
+let decision = context.hunterDailyWatchdogMarket_('US');
+assert.equal(decision.action, 'DISPATCHED');
+assert.equal(dispatched, 1);
+// A fully committed receipt may suppress dispatch, but only with a matching
+// successful current execution, not a prior day's checkpoint alone.
+const incomplete = context.bridgeFile_(root,'US/CONTROL/DAILY_CHECKPOINT.json');
+incomplete.setTrashed(true);
+createJson(controlFolder, 'DAILY_CHECKPOINT.json',
+  {market:'US',last_completed_date:committedDate,
+   phase2_completed_date:committedDate,
+   phase2_completed_at_myt:'2026-10-15T08:00:00+08:00'});
+decision = context.hunterDailyWatchdogMarket_('US');
+assert.equal(decision.action, 'DAILY_AND_PHASE2_COMMITTED');
+assert.equal(dispatched, 1);
+context.hunterDailyLatestToday_ = () => ({
+  status:'FAILED',name:'hunter-us-daily-failed'
+});
+decision = context.hunterDailyWatchdogMarket_('US');
+assert.equal(decision.action, 'DISPATCHED');
+assert.equal(dispatched, 2);
+
+console.log('Hunter watchdog committed-data gate and newer-receipt detection PASS');
+
 console.log('bridge sealed path, scoped auth, queue isolation and row dedup PASS');
 
 require("./test_monthly_schedule.js");

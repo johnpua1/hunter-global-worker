@@ -802,6 +802,62 @@ function hunterDailyPrimary_(market) {
 function dailyUS() { return hunterDailyPrimary_('US'); }
 function dailyHK() { return hunterDailyPrimary_('HK'); }
 
+// Completion is established by committed market artifacts, not job exit code.
+// This is read-only and runs inside the existing hourly Apps Script watchdog.
+function hunterDailyCommitState_(market) {
+  var props = PropertiesService.getScriptProperties();
+  var rootId = props.getProperty('HUNTER_GLOBAL_FOLDER_ID');
+  if (!rootId) throw new Error('ROOT_NOT_CONFIGURED');
+  var root = DriveApp.getFolderById(rootId);
+  if (root.getName() !== 'HUNTER_GLOBAL') throw new Error('ROOT_ID_MISMATCH');
+  var cpFile = bridgeFile_(root, market + '/CONTROL/DAILY_CHECKPOINT.json');
+  if (!cpFile) return {complete:false, reason:'CHECKPOINT_MISSING'};
+  var cp = JSON.parse(cpFile.getBlob().getDataAsString('UTF-8'));
+  var date = cp.last_completed_date;
+  if (cp.market !== market || typeof date !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(date))
+    throw new Error('WATCHDOG_CHECKPOINT_IDENTITY_INVALID:' + market);
+  if (cp.phase2_completed_date !== date || !cp.phase2_completed_at_myt)
+    return {complete:false, reason:'PHASE2_NOT_COMMITTED', checkpoint:date};
+  var rankFile = bridgeFile_(root, market + '/DERIVED/' + date + '/RANK.json');
+  if (!rankFile) return {complete:false, reason:'RANK_MISSING', checkpoint:date};
+  var rank = JSON.parse(rankFile.getBlob().getDataAsString('UTF-8'));
+  if (rank.market !== market || rank.as_of !== date ||
+      !Array.isArray(rank.rows) || !rank.rows.length ||
+      !Number.isInteger(rank.detail_parts) ||
+      rank.detail_parts !== Math.ceil(rank.rows.length / 250))
+    return {complete:false, reason:'RANK_NOT_VERIFIED', checkpoint:date};
+  var dated = bridgeFolder_(root, market + '/DERIVED/' + date, false);
+  for (var part = 1; part <= rank.detail_parts; part++) {
+    var name = 'batch-' + ('0000' + part).slice(-4) + '.json';
+    var matching = dated.getFilesByName(name);
+    if (!matching.hasNext())
+      return {complete:false, reason:'RANK_DETAIL_MISSING', checkpoint:date};
+    matching.next();
+    if (matching.hasNext())
+      throw new Error('WATCHDOG_RANK_DETAIL_DUPLICATE');
+  }
+  // A newer DAILY receipt means that rank/checkpoint closeout is still owed,
+  // even if a prior Cloud Run invocation returned success.
+  var control = bridgeFolder_(root, market + '/CONTROL', false);
+  var files = control.getFiles();
+  var examined = 0;
+  while (files.hasNext()) {
+    var item = files.next();
+    examined++;
+    if (examined > 1500) throw new Error('WATCHDOG_CONTROL_LIST_BOUND');
+    var m = /^DAILY_RUN_(\d{4}-\d{2}-\d{2})\.json$/.exec(item.getName());
+    if (m && m[1] > date) {
+      var receipt = JSON.parse(item.getBlob().getDataAsString('UTF-8'));
+      if (receipt.market !== market || receipt.trade_date !== m[1])
+        throw new Error('WATCHDOG_DAILY_RECEIPT_IDENTITY_MISMATCH');
+      return {complete:false, reason:'NEWER_DAILY_RECEIPT', checkpoint:date,
+              pending:receipt.trade_date, status:receipt.status};
+    }
+  }
+  return {complete:true, checkpoint:date};
+}
+
 function hunterDailyWatchdogMarket_(market) {
   var now = new Date();
   var dateText = hunterDailyMytDate_(now);
@@ -841,11 +897,27 @@ function hunterDailyWatchdogMarket_(market) {
     }
 
     var latestToday = hunterDailyLatestToday_(cloud, dateText);
-    if (latestToday && latestToday.status === 'SUCCEEDED') {
-      state.watchdog_last_result = 'TODAY_EXECUTION_SUCCEEDED';
-      state.last_success_execution = latestToday.name || null;
+    var committed;
+    try {
+      committed = hunterDailyCommitState_(market);
+    } catch (err3) {
+      committed = {complete:false, reason:'DATA_STATUS_UNVERIFIED'};
+      state.watchdog_data_error = String(err3.message || err3).slice(0, 160);
+    }
+    // A completed *old* checkpoint cannot excuse a failed or missing
+    // execution for the current MYT day when no new receipt was produced.
+    if (committed.complete && latestToday && latestToday.status === 'SUCCEEDED') {
+      state.watchdog_last_result = 'DAILY_AND_PHASE2_COMMITTED';
+      state.last_success_execution = latestToday && latestToday.status === 'SUCCEEDED' ?
+          latestToday.name || null : null;
       hunterDailySaveState_(props, state);
-      return {market: market, action: 'TODAY_EXECUTION_SUCCEEDED'};
+      return {market: market, action: 'DAILY_AND_PHASE2_COMMITTED',
+              checkpoint: committed.checkpoint};
+    }
+    if (latestToday && latestToday.status === 'SUCCEEDED') {
+      // An execution success alone can conceal missing derived/Phase 2 work.
+      state.watchdog_last_result = 'TODAY_EXECUTION_SUCCEEDED_DATA_INCOMPLETE';
+      state.watchdog_incomplete_reason = committed.reason;
     }
 
     if (state.watchdog_attempts >= HUNTER_DAILY_WATCHDOG_MAX_ATTEMPTS) {

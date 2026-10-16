@@ -58,6 +58,12 @@ function doPost(e) {
       if (scope !== 'LEGACY') throw new Error('DAILY_WATCHDOG_LEGACY_ONLY');
       return bridgeJson_({ok:true, watchdog:hunterDailyWatchdog()});
     }
+    if (op === 'daily_commit_status') {
+      if (scope !== 'LEGACY') throw new Error('DAILY_STATUS_LEGACY_ONLY');
+      return bridgeJson_({ok:true, release:'HUNTER_DAILY_CLOSED_LOOP_20261016',
+                          US:hunterDailyCommitState_('US'),
+                          HK:hunterDailyCommitState_('HK')});
+    }
     if (op === 'enforce_topology_triggers') {
       if (scope !== 'LEGACY') throw new Error('TOPOLOGY_ENFORCE_LEGACY_ONLY');
       var daily = installHunterDailyTriggers();
@@ -819,13 +825,23 @@ function hunterDailyCommitState_(market) {
     throw new Error('WATCHDOG_CHECKPOINT_IDENTITY_INVALID:' + market);
   if (cp.phase2_completed_date !== date || !cp.phase2_completed_at_myt)
     return {complete:false, reason:'PHASE2_NOT_COMMITTED', checkpoint:date};
+  var receiptFile = bridgeFile_(root, market + '/CONTROL/DAILY_RUN_' + date + '.json');
+  if (!receiptFile)
+    return {complete:false, reason:'DAILY_RECEIPT_MISSING', checkpoint:date};
+  var run = JSON.parse(receiptFile.getBlob().getDataAsString('UTF-8'));
+  if (run.market !== market || run.trade_date !== date || run.status !== 'COMPLETE' ||
+      !Number.isInteger(run.active) || run.active <= 0 ||
+      !Number.isInteger(run.available) || run.available <= 0 ||
+      run.available > run.active)
+    return {complete:false, reason:'DAILY_RECEIPT_INVALID', checkpoint:date};
   var rankFile = bridgeFile_(root, market + '/DERIVED/' + date + '/RANK.json');
   if (!rankFile) return {complete:false, reason:'RANK_MISSING', checkpoint:date};
   var rank = JSON.parse(rankFile.getBlob().getDataAsString('UTF-8'));
   if (rank.market !== market || rank.as_of !== date ||
       !Array.isArray(rank.rows) || !rank.rows.length ||
       !Number.isInteger(rank.detail_parts) ||
-      rank.detail_parts !== Math.ceil(rank.rows.length / 250))
+      rank.detail_parts !== Math.ceil(rank.rows.length / 250) ||
+      rank.rows.length < run.available || rank.rows.length > run.active)
     return {complete:false, reason:'RANK_NOT_VERIFIED', checkpoint:date};
   var dated = bridgeFolder_(root, market + '/DERIVED/' + date, false);
   for (var part = 1; part <= rank.detail_parts; part++) {

@@ -999,6 +999,8 @@ def recover_auto_committed(drive, market):
         return False
     for _ in range(10):
         cp = drive.json(cp_path)
+        if not isinstance(cp, dict):
+            return False
         date = cp.get("last_completed_date")
         if cp.get("market") != market or not isinstance(date, str):
             raise RuntimeError("AUTO_RECOVERY_CHECKPOINT_IDENTITY_MISMATCH")

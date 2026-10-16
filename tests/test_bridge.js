@@ -227,7 +227,7 @@ createJson(controlFolder, 'DAILY_CHECKPOINT.json',
 state = context.hunterDailyCommitState_('US');
 assert.equal(state.complete, false);
 assert.equal(state.reason, 'PHASE2_NOT_COMMITTED');
-assert.equal(source.includes("if (committed.complete)"), true);
+assert.equal(source.includes("if (committed.complete && latestToday && latestToday.status === 'SUCCEEDED')"), true);
 console.log('Hunter watchdog committed-data gate and newer-receipt detection PASS');
 
 console.log('bridge sealed path, scoped auth, queue isolation and row dedup PASS');

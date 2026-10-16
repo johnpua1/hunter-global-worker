@@ -10,7 +10,6 @@ cd "$ROOT"
 SHA="$1"
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "PINNED_SHA_REQUIRED" >&2; exit 1; }
 [[ "$(git rev-parse HEAD)" == "$SHA" ]] || { echo "PINNED_CHECKOUT_REQUIRED" >&2; exit 1; }
-[[ "$(git branch --show-current)" == "main" ]] || { echo "MAIN_BRANCH_REQUIRED" >&2; exit 1; }
 git merge-base --is-ancestor 31fd1bb8cf930c2749207993bc4451f0120dcc39 "$SHA" || {
   echo "CLOSED_LOOP_COMMIT_MISSING" >&2; exit 1;
 }

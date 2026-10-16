@@ -122,6 +122,84 @@ class DailyResumeProgressTests(unittest.TestCase):
             daily.assert_called_once()
         self.assertEqual(drive.json(path)['phase2_completed_date'], '2026-10-06')
 
+    def test_auto_fast_path_commits_phase2_without_loading_foundation(self):
+        drive = MemoryDrive()
+        date = '2026-10-15'
+        cp = 'US/CONTROL/DAILY_CHECKPOINT.json'
+        drive.data[cp] = runner.compact({'market': 'US', 'last_completed_date': date})
+        drive.data[f'US/DERIVED/{date}/RANK.json'] = runner.compact({
+            'market': 'US', 'as_of': date, 'detail_parts': 1,
+            'rows': [{'security_id': 'US-000001'}]})
+        drive.data[f'US/DERIVED/{date}/batch-0001.json'] = b'{}'
+        with patch.dict(os.environ, {'APPS_SCRIPT_WEBAPP_URL': 'test',
+                                     'APPS_SCRIPT_SHARED_KEY': 'test',
+                                     'HUNTER_ACTIONS_CUTOVER': 'CONFIRMED',
+                                     'HUNTER_INCREMENTAL_INPUTS': '0'}), \
+             patch.object(sys, 'argv', ['runner', '--mode', 'auto', '--market', 'US']), \
+             patch('runner._enforce_cloud_run_topology'), patch('production_guard.check_at_start'), \
+             patch('runner.closed_dates_since', return_value=[]), \
+             patch('runner.Drive', return_value=drive), \
+             patch('foundation.seed_corporate_actions') as seed, \
+             patch('foundation.run_daily') as foundation_daily, \
+             patch('phase2_runtime.daily', return_value={'market': 'US'}) as phase2:
+            runner.main()
+            phase2.assert_called_once()
+            foundation_daily.assert_not_called()
+            seed.assert_not_called()
+        self.assertEqual(drive.json(cp)['phase2_completed_date'], date)
+        self.assertTrue(drive.json(cp)['phase2_completed_at_myt'])
+
+    def test_auto_fast_path_done_receipt_exits_without_history_scan(self):
+        drive = MemoryDrive()
+        date = '2026-10-15'
+        drive.data['US/CONTROL/DAILY_CHECKPOINT.json'] = runner.compact({
+            'market': 'US', 'last_completed_date': date,
+            'phase2_completed_date': date,
+            'phase2_completed_at_myt': '2026-10-16T07:00:00+08:00'})
+        with patch.dict(os.environ, {'APPS_SCRIPT_WEBAPP_URL': 'test',
+                                     'APPS_SCRIPT_SHARED_KEY': 'test',
+                                     'HUNTER_ACTIONS_CUTOVER': 'CONFIRMED',
+                                     'HUNTER_INCREMENTAL_INPUTS': '0'}), \
+             patch.object(sys, 'argv', ['runner', '--mode', 'auto', '--market', 'US']), \
+             patch('runner._enforce_cloud_run_topology'), patch('production_guard.check_at_start'), \
+             patch('runner.closed_dates_since', return_value=[]), \
+             patch('runner.Drive', return_value=drive), \
+             patch('foundation.seed_corporate_actions') as seed, \
+             patch('foundation.run_daily') as foundation_daily, \
+             patch('runner.finish_phase2_daily') as phase2:
+            runner.main()
+            phase2.assert_not_called()
+            foundation_daily.assert_not_called()
+            seed.assert_not_called()
+
+    def test_auto_fast_path_prioritizes_newer_complete_receipt(self):
+        drive = MemoryDrive()
+        earlier, date = '2026-10-14', '2026-10-15'
+        cp_path = 'US/CONTROL/DAILY_CHECKPOINT.json'
+        drive.data[cp_path] = runner.compact({
+            'market': 'US', 'last_completed_date': earlier,
+            'phase2_completed_date': earlier,
+            'phase2_completed_at_myt': '2026-10-15T08:00:00+08:00'})
+        drive.data[f'US/CONTROL/DAILY_RUN_{date}.json'] = runner.compact({
+            'market': 'US', 'trade_date': date, 'status': 'COMPLETE', 'active': 1, 'available': 1})
+        def finish_rank(_drive, _market):
+            cp = _drive.json(cp_path)
+            cp.update(last_completed_date=date)
+            _drive.put(cp_path, runner.compact(cp))
+            _drive.data[f'US/DERIVED/{date}/RANK.json'] = runner.compact({
+                'market': 'US', 'as_of': date, 'detail_parts': 1,
+                'rows': [{'security_id': 'US-000001'}]})
+            _drive.data[f'US/DERIVED/{date}/batch-0001.json'] = b'{}'
+            return f'CLOSED market=US date={date}'
+        with patch('runner.closed_dates_since',
+                   side_effect=lambda market, last: [date] if last == earlier else []), \
+             patch('daily_rank_autoclose.close_one', side_effect=finish_rank) as rank, \
+             patch('phase2_runtime.daily', return_value={'market': 'US'}):
+            self.assertTrue(runner.recover_auto_committed(drive, 'US'))
+            rank.assert_called_once()
+        self.assertEqual(drive.json(cp_path)['last_completed_date'], date)
+        self.assertEqual(drive.json(cp_path)['phase2_completed_date'], date)
+
     def test_no_new_session_still_resumes_phase2(self):
         drive = MemoryDrive()
         date = '2026-10-06'

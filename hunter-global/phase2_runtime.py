@@ -101,30 +101,131 @@ def future_us_days(today):
     return [today+dt.timedelta(days=n) for n in range(96)
             if (today+dt.timedelta(days=n)).weekday()<5 and today+dt.timedelta(days=n) not in banned]
 
-def us_calendar(active,index,today):
-    now=dt.datetime.now(MYT).isoformat(timespec='seconds');events=[];errors=[];ambiguous=[]
-    for day in future_us_days(today):
-        try:rows=nasdaq_rows(str(day))
-        except Exception as exc:errors.append({'date':str(day),'reason':str(exc)});continue
+def us_calendar(active,index,today,drive=None):
+    """Fetch real Nasdaq evidence by date with bounded, durable resumability.
+
+    A provider failure NEVER becomes a successful/no-earnings day. Successful
+    date-scoped responses, including genuine empty responses, may be reused
+    for at most one MYT day in the near 14-day window and seven MYT days
+    farther out. The checkpoint remains unchanged until all dates are sourced.
+    """
+    now=dt.datetime.now(MYT).isoformat(timespec='seconds')
+    events=[];errors=[];ambiguous=[]
+    dates=future_us_days(today)
+    cache_path='US/PHASE2/EARNINGS_CALENDAR_PROVIDER_CACHE_V1.json'
+    cached={}
+    prior_bytes=None
+    if drive is not None and drive.file(cache_path):
+        prior_bytes=drive.read(cache_path)
+        prior=json.loads(prior_bytes)
+        if (prior.get('schema')!='HUNTER_US_EARNINGS_CALENDAR_DAY_CACHE_V1'
+                or prior.get('market')!='US' or not isinstance(prior.get('days'),dict)):
+            raise RuntimeError('PHASE2_US_CALENDAR_CACHE_SCHEMA_CONFLICT')
+        cached=prior['days']
+    wanted={str(d) for d in dates}
+    cached={k:v for k,v in cached.items() if k in wanted}
+    successes_since_flush=0
+    reused=0
+    fetched=0
+    consecutive_failures=0
+
+    def save_successes():
+        nonlocal prior_bytes, successes_since_flush
+        if drive is None or not successes_since_flush:
+            return
+        data=compact({'schema':'HUNTER_US_EARNINGS_CALENDAR_DAY_CACHE_V1',
+                      'market':'US','days':cached})
+        if prior_bytes is not None:
+            drive.put(cache_path,data,expected_sha=digest(prior_bytes))
+        else:
+            drive.put(cache_path,data)
+        prior_bytes=data
+        successes_since_flush=0
+
+    for day in dates:
+        key=str(day)
+        item=cached.get(key)
+        rows=None
+        if (isinstance(item,dict) and item.get('status')=='SOURCE_OK'
+                and isinstance(item.get('rows'),list)):
+            try:
+                age=(today-dt.date.fromisoformat(item['fetched_on'])).days
+            except (KeyError,TypeError,ValueError):
+                age=9999
+            # Near-term reports can change quickly; distant reports have
+            # a bounded seven-day reuse horizon, never indefinite.
+            allowed_age=0 if (day-today).days<=14 else 7
+            if 0<=age<=allowed_age:
+                rows=item['rows']
+                reused+=1
+        if rows is None:
+            try:
+                raw_rows=nasdaq_rows(key)
+                if not isinstance(raw_rows,list) or len(raw_rows)>5000:
+                    raise RuntimeError('NASDAQ_DAY_ROWS_INVALID_OR_OVERSIZED')
+                # Keep only provider fields actually used for issuer mapping;
+                # never cache unmatched identifiers, headers or secrets.
+                rows=[{'symbol':str(row.get('symbol') or ''),
+                       'time':str(row.get('time') or ''),
+                       'epsForecast':row.get('epsForecast')}
+                      for row in raw_rows if isinstance(row,dict)]
+                cached[key]={'status':'SOURCE_OK','fetched_on':str(today),'rows':rows}
+                fetched+=1
+                successes_since_flush+=1
+                consecutive_failures=0
+                if successes_since_flush>=12:
+                    save_successes()
+            except Exception as exc:
+                # Source failures are never treated as empty calendars.
+                errors.append({'date':key,'reason':str(exc)[:210]})
+                consecutive_failures+=1
+                if consecutive_failures>=3:
+                    LOG.warning('PHASE2_US_CALENDAR_BOUNDED_STOP failed_dates=%d '
+                                'successful_dates_persisted=%d',
+                                len(errors),fetched)
+                    break
+                continue
         for raw in rows:
             ticker=raw.get('symbol','');ids=index.get(normalize('US',ticker),set())
-            if len(ids)>1:ambiguous.append({'ticker':ticker,'date':str(day)});continue
+            if len(ids)>1:ambiguous.append({'ticker':ticker,'date':key});continue
             if not ids:continue
-            sid=next(iter(ids));session={'time-pre-market':'BMO','time-after-hours':'AMC','time-not-supplied':'UNKNOWN'}.get(raw.get('time'),'UNKNOWN')
-            row={'security_id':sid,'ticker':active[sid]['ticker'],'report_date':str(day),'session':session,
-                 'eps_forecast':numeric(raw.get('epsForecast')),'source':'NASDAQ','fetched_at':now}
-            if session=='UNKNOWN':row.update(report_date_myt=str(day),report_time_myt=None,time_reason='UNKNOWN_SOURCE_TIME')
+            sid=next(iter(ids))
+            session={'time-pre-market':'BMO','time-after-hours':'AMC',
+                     'time-not-supplied':'UNKNOWN'}.get(raw.get('time'),'UNKNOWN')
+            row={'security_id':sid,'ticker':active[sid]['ticker'],
+                 'report_date':key,'session':session,
+                 'eps_forecast':numeric(raw.get('epsForecast')),
+                 'source':'NASDAQ','fetched_at':now}
+            if session=='UNKNOWN':
+                row.update(report_date_myt=key,report_time_myt=None,
+                           time_reason='UNKNOWN_SOURCE_TIME')
             else:
-                boundary=dt.datetime(day.year,day.month,day.day,9 if session=='BMO' else 16,30 if session=='BMO' else 0,tzinfo=ET).astimezone(MYT)
-                row.update(report_date_myt=boundary.date().isoformat(),report_time_myt={'window':'BEFORE_OPEN' if session=='BMO' else 'AFTER_CLOSE','boundary_myt':boundary.isoformat(timespec='minutes'),'precision':'SESSION_WINDOW_ONLY'})
+                boundary=dt.datetime(day.year,day.month,day.day,
+                                     9 if session=='BMO' else 16,
+                                     30 if session=='BMO' else 0,
+                                     tzinfo=ET).astimezone(MYT)
+                row.update(report_date_myt=boundary.date().isoformat(),
+                           report_time_myt={'window':'BEFORE_OPEN' if session=='BMO'
+                                            else 'AFTER_CLOSE',
+                                            'boundary_myt':boundary.isoformat(timespec='minutes'),
+                                            'precision':'SESSION_WINDOW_ONLY'})
             events.append(row)
+    save_successes()
     unique={}
     for row in events:unique.setdefault(row['security_id']+':'+row['report_date'],row)
     events=sorted(unique.values(),key=lambda row:(row['report_date_myt'],row['ticker']))
     ids={row['security_id'] for row in events}
-    return {'market':'US','window_start':str(today),'window_end':str(today+dt.timedelta(days=95)),
-            'fetched_at':now,'events':events,'security_status':[{'security_id':sid,'status':'NO_DATE_IN_WINDOW' if not errors else 'DATE_UNKNOWN_SOURCE_FAILURE'} for sid in active if sid not in ids],
-            'source_errors':errors,'identity_ambiguous':ambiguous}
+    return {'market':'US','window_start':str(today),
+            'window_end':str(today+dt.timedelta(days=95)),
+            'fetched_at':now,'events':events,
+            'security_status':[{'security_id':sid,
+                                'status':'NO_DATE_IN_WINDOW' if not errors
+                                else 'DATE_UNKNOWN_SOURCE_FAILURE'}
+                               for sid in active if sid not in ids],
+            'source_errors':errors,'identity_ambiguous':ambiguous,
+            'calendar_provider_fetched_days':fetched,
+            'calendar_provider_reused_verified_days':reused,
+            'calendar_provider_complete':len(errors)==0 and fetched+reused==len(dates)}
 
 class TableRows(HTMLParser):
     def __init__(self,target_table=None):
@@ -464,7 +565,7 @@ def daily(drive:Drive,market:str,daily_rows=None,patch_snapshot=None):
         drive.put(sector_path,compact(prior),expected_sha=digest(sector_raw))
     LOG.info('PHASE2_STAGE market=%s stage=calendar',market)
     calendar_raw=drive.read(calendar_path);old_calendar=json.loads(calendar_raw)
-    new_calendar=us_calendar(active,index,today) if market=='US' else hk_calendar(active,index,today)
+    new_calendar=us_calendar(active,index,today,drive=drive) if market=='US' else hk_calendar(active,index,today)
     # Do not replace the last usable calendar/history with an empty failed
     # source response, or publish a successful Phase 2 receipt for that attempt.
     if new_calendar.get('source_errors'):

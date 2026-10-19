@@ -38,19 +38,19 @@ def _series(values: list[dict], columns: list[str]) -> pd.DataFrame:
     return frame
 
 
-def _risk(returns: pd.Series) -> dict[str, float]:
+def _risk(returns: pd.Series, periods_per_year: int) -> dict[str, float]:
     import quantstats as qs
 
     r = returns.dropna().astype(float)
     if len(r) < 20 or not r.map(math.isfinite).all() or (r <= -1.0).any():
         raise InvalidEvaluationInput("Missing valid risk-return series")
-    sharpe = float(qs.stats.sharpe(r, rf=0))
+    sharpe = float(qs.stats.sharpe(r, rf=0, periods=periods_per_year))
     mdd = float(qs.stats.max_drawdown(r))
-    volatility = float(r.std(ddof=1) * math.sqrt(252 if r.index.freqstr == "B" else 1))
-    if not all(math.isfinite(v) for v in (sharpe, mdd, volatility)):
+    if not all(math.isfinite(v) for v in (sharpe, mdd)):
         raise InvalidEvaluationInput("Risk engine produced invalid output")
     return {
         "sharpe_rf0": round(sharpe, 6),
+        "periods_per_year_assumption": periods_per_year,
         "max_drawdown_pct": round(100.0 * mdd, 6),
         "positive_period_pct": round(100.0 * (r > 0).mean(), 4),
     }
@@ -89,7 +89,9 @@ def evaluate_qqqm(case: dict[str, Any]) -> dict[str, Any]:
         raise InvalidEvaluationInput("Conflicting entry and exit on the same bar")
     if frame[["Enter", "Exit"]].iloc[:240].to_numpy().any():
         raise InvalidEvaluationInput("Signals in 240-bar warmup")
-    costs = float(case.get("commission_per_side", 0.001))
+    if "commission_per_side" not in case:
+        raise InvalidEvaluationInput("Commission must be explicitly provided; no guessed default")
+    costs = float(case["commission_per_side"])
     if not (0 <= costs < 0.025):
         raise InvalidEvaluationInput("Invalid transaction commission")
     class NextOpenStrategy(Strategy):
@@ -123,7 +125,7 @@ def evaluate_qqqm(case: dict[str, Any]) -> dict[str, Any]:
         "commission_per_side": costs,
         "candidate_exit": "First confirmed non-green hourly MACD, next-bar open",
         "live_exit_rule_approved": False,
-        "risk": _risk(eq_returns),
+        "risk": _risk(eq_returns, periods_per_year=252 * 7),
     }
     return result
 
@@ -175,7 +177,7 @@ def evaluate_allocation(case: dict[str, Any]) -> dict[str, Any]:
         "portfolio": "QQQI/TQQQ/SGOV",
         "observations": len(index),
         "portfolio_return_pct": round(100 * (index.iloc[-1] / index.iloc[0] - 1), 6),
-        "risk": _risk(rets),
+        "risk": _risk(rets, periods_per_year=252),
         "causal_allocation_prevalidated_by_caller": True,
         "exec_mark": "Supplied single-count total-return index",
     }

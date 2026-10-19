@@ -1,0 +1,28 @@
+name: investment-research-smoke
+on:
+  push:
+    branches:
+      - research/investment-toolchain-20261019
+    paths:
+      - 'research/investment/**'
+      - '.github/workflows/investment-research-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-isolated-toolchain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install 3 research packages only
+        run: python -m pip install -r research/investment/requirements.txt
+      - name: Verify imports and executable engines
+        run: python research/investment/smoke_test.py

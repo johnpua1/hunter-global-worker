@@ -26,3 +26,5 @@ jobs:
         run: python -m pip install -r research/investment/requirements.txt
       - name: Verify imports and executable engines
         run: python research/investment/smoke_test.py
+      - name: Verify evaluation-only adapter on three installed engines
+        run: python -m unittest discover -s research/investment -p 'test_evaluation_adapter.py' -v

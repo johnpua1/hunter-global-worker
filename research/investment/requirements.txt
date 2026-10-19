@@ -1,0 +1,5 @@
+# Research-only. Do NOT add to hunter-global/requirements.txt or production Dockerfile.
+# PyPI releases verified on 2026-10-19; Python 3.12.
+backtesting==0.6.6
+bt==1.2.3
+quantstats==0.0.86

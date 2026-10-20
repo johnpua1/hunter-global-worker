@@ -51,6 +51,8 @@ class V3AblationSyntheticTests(unittest.TestCase):
         panel=result["result"]["evaluations"]["HK.01196:NEXT_CLOSE"]
         self.assertEqual(panel["status"],"RETROSPECTIVE_DEVELOPMENT_ONLY")
         self.assertEqual(set(panel["arms"]),{"A","B","C","D"})
+        self.assertEqual(panel["arms"]["A"]["candidate"],panel["arms"]["A"]["same_sample_frozen_v3"])
+        self.assertEqual(panel["arms"]["A"]["paired_gain_vs_original_v3_pct_points"],0.0)
         self.assertTrue(all(not arm["promoted_to_v3"] for arm in panel["arms"].values()))
 
     def test_no_input_no_fake_results(self):

@@ -1,0 +1,105 @@
+name: Hunter HK one-off bridge backfill 20261020
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/hunter-hk-oneoff-bridge-backfill-20261020.yml'
+permissions:
+  contents: read
+concurrency:
+  group: hunter-hk-oneoff-bridge-backfill-20261020
+  cancel-in-progress: false
+jobs:
+  hk-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+      APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+      HUNTER_ACTIONS_CUTOVER: CONFIRMED
+      FETCH_WORKERS: '6'
+      HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '90'
+      HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS: '180'
+      HUNTER_BRIDGE_ATTEMPTS: '4'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Preflight ensure original Cloud Run HK job not running; never enable second scheduler
+        run: |
+          python - <<'PY'
+          import base64,datetime,importlib.util,json,os,pathlib
+          from zoneinfo import ZoneInfo
+          now=datetime.datetime.now(ZoneInfo("Asia/Kuala_Lumpur"))
+          # A one-shot recovery must end before the next HK primary / hourly watchdog window.
+          deadline=datetime.datetime(2026,10,21,12,0,tzinfo=ZoneInfo("Asia/Kuala_Lumpur"))
+          if not now<deadline:raise RuntimeError("RECOVERY_WINDOW_EXPIRED_NO_WRITER_STARTED")
+          p=pathlib.Path("cloudrun/apps-script-post.py")
+          spec=importlib.util.spec_from_file_location("bridge",p);m=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(m)
+          def send(op,path=None):
+              q={"op":op,"key":os.environ["APPS_SCRIPT_SHARED_KEY"]}
+              if path:q["path"]=path
+              ans=m.post_json(os.environ["APPS_SCRIPT_WEBAPP_URL"],q)
+              if not ans.get("ok"):raise RuntimeError("EXISTING_BRIDGE_NOT_HEALTHY:"+op)
+              return ans
+          # Existing Apps Script single-writer watchdog first checks actual Cloud Run
+          # RUNNING/stale executions. Only exhausted-and-idle may safely reach this fallback.
+          watchdog=send("daily_watchdog_once")
+          action=(watchdog.get("watchdog") or {}).get("HK",{}).get("action")
+          if action!="ATTEMPTS_EXHAUSTED":
+              print("HK_ORIGINAL_WRITER_NOT_PROVEN_IDLE="+str(action))
+              raise RuntimeError("NO_CONCURRENT_SECOND_WRITER")
+          cp=json.loads(base64.b64decode(send("read","HK/CONTROL/DAILY_CHECKPOINT.json")["data_base64"]))
+          if cp.get("market")!="HK" or not ("2026-10-16"<=cp.get("last_completed_date","")<="2026-10-20"):
+              raise RuntimeError("UNEXPECTED_HK_CHECKPOINT_REFUSE_WRITE")
+          print("ONEOFF_HK_BRIDGE_AUTHORITATIVE_SINGLE_ACTIVE_WRITER_PREFLIGHT=PASS")
+          print("START_CHECKPOINT="+cp["last_completed_date"])
+          print("NO_US_WRITES_NO_NEW_CRON_NO_CONFIG_REWRITE")
+          PY
+      - name: Install original existing Hunter dependencies
+        run: python -m pip install -r hunter-global/requirements.txt
+      - name: Resume only missing HK daily sessions via existing authenticated Bridge
+        working-directory: hunter-global
+        run: |
+          set -euo pipefail
+          # 3 bounded attempts only; production CAS/append semantics prevent
+          # overwriting verified old records. Never fake a checkpoint.
+          for attempt in 1 2 3; do
+            echo "HK_RESUMABLE_ATTEMPT=$attempt"
+            if timeout --signal=TERM --kill-after=30s 103m python -u runner.py --mode auto --market HK; then
+              echo "HK_AUTO_EXIT=0"
+              break
+            fi
+            echo "HK_ATTEMPT_INTERRUPTED_OR_FAILED=$attempt;REUSE_DURABLE_NEXT_CHECKPOINT"
+            if [ "$attempt" = 3 ]; then
+              echo "HK_SAFE_CATCHUP_NOT_COMPLETED" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+      - name: Verify 19th and 20th daily receipts, ranks, and Phase2 checkpoint
+        run: |
+          python - <<'PY'
+          import base64,importlib.util,json,os,pathlib
+          src=pathlib.Path("cloudrun/apps-script-post.py")
+          spec=importlib.util.spec_from_file_location("bridge",src);m=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(m)
+          def query(op,path):
+              r=m.post_json(os.environ["APPS_SCRIPT_WEBAPP_URL"],{"op":op,"path":path,"key":os.environ["APPS_SCRIPT_SHARED_KEY"]})
+              if r.get("ok") is not True:raise RuntimeError("READBACK_BRIDGE_FAILED:"+path)
+              return r
+          cp=json.loads(base64.b64decode(query("read","HK/CONTROL/DAILY_CHECKPOINT.json")["data_base64"]))
+          if cp.get("last_completed_date")!="2026-10-20" or cp.get("phase2_completed_date")!="2026-10-20" or not cp.get("phase2_completed_at_myt"):
+              print("HK_VERIFIED_FINAL_CHECKPOINT="+json.dumps(cp,sort_keys=True))
+              raise RuntimeError("HK_MISSING_DAILY_OR_PHASE2_FINAL_COMMIT")
+          for day in ("2026-10-19","2026-10-20"):
+              for file in (f"HK/CONTROL/DAILY_RUN_{day}.json",f"HK/DERIVED/{day}/RANK.json"):
+                  if not query("file",file).get("file"):raise RuntimeError("DATE_SOURCE_MISSING:"+file)
+              run=json.loads(base64.b64decode(query("read",f"HK/CONTROL/DAILY_RUN_{day}.json")["data_base64"]))
+              rank=json.loads(base64.b64decode(query("read",f"HK/DERIVED/{day}/RANK.json")["data_base64"]))
+              if run.get("market")!="HK" or run.get("trade_date")!=day or run.get("status")!="COMPLETE" or rank.get("market")!="HK" or rank.get("as_of")!=day or not rank.get("rows"):
+                  raise RuntimeError("HK_DATE_RECEIPT_NOT_VERIFIED:"+day)
+          print("HK_DAILY_RANK_PHASE2_20261019_20261020=VERIFIED_COMPLETE")
+          PY

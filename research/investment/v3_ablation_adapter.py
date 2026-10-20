@@ -187,24 +187,32 @@ def _evaluate_group(rows,role):
         tep=np.stack([r["p"] for r in te]);tey=np.array([r["y"] for r in te],int)
         tx=np.asarray([[r["feat"][k] for k in names] for r in tr],float).reshape(len(tr),len(names))
         ex=np.asarray([[r["feat"][k] for k in names] for r in te],float).reshape(len(te),len(names))
-        cand=_apply(tep,ex,_fit(trp,try_,tx))
         control=_apply(tep,np.empty((len(te),0)),_fit(trp,try_,np.empty((len(tr),0))))
+        # A is the ORIGINAL unchanged frozen V3. Separate calibration-only
+        # control prevents counting an intercept re-fit as Hunter/Phase2 alpha.
+        cand=tep if arm=="A" else _apply(tep,ex,_fit(trp,try_,tx))
         scored=_score(cand,tey);control_scored=_score(control,tey)
+        frozen_scored=_score(tep,tey)
         ci=_cluster_ci(cand,control,tey,[r["date"] for r in te])
+        frozen_ci=_cluster_ci(cand,tep,tey,[r["date"] for r in te])
         simple_matched=float((tey==simple).mean())
         m.update({"status":"RESEARCH_ONLY_EVALUATED","candidate":scored,
                   "same_sample_calibration_only_control":control_scored,
-                  "same_sample_frozen_v3":_score(tep,tey),
+                  "same_sample_frozen_v3":frozen_scored,
                   "matched_simple_baseline_accuracy_pct":round(100*simple_matched,4),
                   "paired_gain_vs_calibration_control_pct_points":
                      round(scored["accuracy_pct"]-control_scored["accuracy_pct"],4),
+                  "paired_gain_vs_original_v3_pct_points":
+                     round(scored["accuracy_pct"]-frozen_scored["accuracy_pct"],4),
                   "paired_cluster_gain_95_pct_points":ci,
+                  "paired_cluster_gain_vs_original_v3_95_pct_points":frozen_ci,
+                  "brier_better_than_original_v3":scored["brier"]<frozen_scored["brier"],
                   "brier_better_than_control":scored["brier"]<control_scored["brier"]})
         # RESEARCH gate, not automatic deployment; no fitting/tuning on holdout.
         m["research_gate_passed"]=bool(
-            role=="NEW_PROSPECTIVE" and len(te)>=300 and scored["accuracy_pct"]>=55
-            and scored["accuracy_pct"]-100*simple_matched>=5 and ci[0]>0
-            and scored["brier"]<control_scored["brier"] and all(
+            arm!="A" and role=="NEW_PROSPECTIVE" and len(te)>=300 and scored["accuracy_pct"]>=55
+            and scored["accuracy_pct"]-100*simple_matched>=5 and ci[0]>0 and frozen_ci[0]>0
+            and scored["brier"]<control_scored["brier"] and scored["brier"]<frozen_scored["brier"] and all(
               float((cand[s].argmax(axis=1)==tey[s]).mean())>=
               float((control[s].argmax(axis=1)==tey[s]).mean())
               for s in (slice(0,len(te)//2),slice(len(te)//2,None))

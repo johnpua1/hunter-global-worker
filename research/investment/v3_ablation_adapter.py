@@ -18,6 +18,7 @@ SYMBOLS={"US.QQQM","HK.01196","HK.02225"}
 HORIZONS={"NEXT_HOUR","NEXT_OPEN","NEXT_CLOSE"}
 ARMS={"A":(),"B":("hunter",),"C":("phase2",),"D":("hunter","phase2")}
 LABELS=("UP","DOWN","FLAT")
+BINARY_LABELS=("UP","DOWN")
 SOURCE_NAMES={"hunter":"HUNTER_MARKET_BREADTH","phase2":"PHASE2_EVENT_RISK"}
 PRICE_BASIS="FORWARD_EXCLUDE_CASH_DIVIDEND"
 
@@ -83,7 +84,8 @@ def _validate(payload):
             raise InvalidAblationInput("Frozen V3 model required")
         if row.get("hour_feature_certified") is not True:
             raise InvalidAblationInput("Incomplete hourly data cannot be scored as V3")
-        if row.get("trade_permission")!="WAIT" or row.get("actual_direction") not in LABELS:
+        class_labels=BINARY_LABELS if row["horizon"]=="NEXT_CLOSE" else LABELS
+        if row.get("trade_permission")!="WAIT" or row.get("actual_direction") not in class_labels:
             raise InvalidAblationInput("Invalid research-only outcome")
         issued=_utc(row.get("issued_at"),"issued_at")
         start=_utc(row.get("target_start_at"),"target_start_at")
@@ -92,14 +94,14 @@ def _validate(payload):
         if not issued<start<end<=finalized:
             raise InvalidAblationInput("Forecast not issued before event or outcome not finalized")
         probs=row.get("frozen_v3_probs")
-        if not isinstance(probs,dict) or set(probs)!=set(LABELS):
-            raise InvalidAblationInput("UP/DOWN/FLAT frozen probabilities required")
-        p=np.asarray([probs[z] for z in LABELS],dtype=float)
+        if not isinstance(probs,dict) or set(probs)!=set(class_labels):
+            raise InvalidAblationInput("Frozen probabilities must exactly match original horizon classes; no synthetic FLAT")
+        p=np.asarray([probs[z] for z in class_labels],dtype=float)
         if not np.isfinite(p).all() or (p<=0).any() or (p>=1).any() or abs(float(p.sum())-1)>1e-5:
             raise InvalidAblationInput("Invalid frozen probabilities")
         feat={s:_feature(row.get(s),s,issued) for s in SOURCE_NAMES}
         prepared.append({"key":key,"at":start,"date":start.date().isoformat(),
-                         "p":p,"y":LABELS.index(row["actual_direction"]),"feat":feat})
+                         "p":p,"y":class_labels.index(row["actual_direction"]),"feat":feat})
     return prepared,case["evidence_role"]
 
 def _softmax(z):
@@ -113,8 +115,8 @@ def _fit(p,y,x):
     sd=np.maximum(x.std(axis=0),.1) if x.shape[1] else np.zeros(0)
     x=(x-mu)/sd if x.shape[1] else x
     design=np.column_stack((np.ones(len(y)),x))
-    beta=np.zeros((design.shape[1],3),float)
-    target=np.eye(3)[y]
+    beta=np.zeros((design.shape[1],p.shape[1]),float)
+    target=np.eye(p.shape[1])[y]
     for _ in range(500):
         pred=_softmax(np.log(p)+design@beta)
         grad=design.T@(pred-target)/len(y)
@@ -131,7 +133,7 @@ def _apply(p,x,fit):
 
 def _score(p,y):
     hit=(p.argmax(axis=1)==y)
-    brier=float(np.square(p-np.eye(3)[y]).sum(axis=1).mean())
+    brier=float(np.square(p-np.eye(p.shape[1])[y]).sum(axis=1).mean())
     return {"n":int(len(y)),"hits":int(hit.sum()),
             "accuracy_pct":round(100*float(hit.mean()),4),
             "brier":round(brier,6)}
@@ -161,7 +163,7 @@ def _evaluate_group(rows,role):
         return out
     train,test=rows[:cut],rows[cut:]
     train_y=np.array([r["y"] for r in train],int)
-    simple=int(np.bincount(train_y,minlength=3).argmax()) # selected before test
+    simple=int(np.bincount(train_y,minlength=train[0]["p"].size).argmax()) # selected before test
     test_y=np.array([r["y"] for r in test],int)
     test_p=np.stack([r["p"] for r in test])
     out.update({"status":"RETROSPECTIVE_DEVELOPMENT_ONLY" if role=="REUSED_DEVELOPMENT"

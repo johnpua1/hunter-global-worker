@@ -289,6 +289,7 @@ def sector_us(active,index,target,prior=None):
         cik={normalize('US',r[2]):r[0] for r in secs['data']}
     except Exception as exc:cik={};errors.append({'source':'SEC_TICKERS','reason':str(exc)})
     sic={}
+    sic_not_published=set()
     for ticker in need:
         number=cik.get(normalize('US',ticker))
         if not number:continue
@@ -296,7 +297,11 @@ def sector_us(active,index,target,prior=None):
         try:
             doc=request(f'https://data.sec.gov/submissions/CIK{number:010d}.json',sec=True).json()
             if doc.get('sic'):sic[normalize('US',ticker)]=doc
-            else:errors.append({'ticker':ticker,'reason':'SEC_SIC_UNAVAILABLE'})
+            else:
+                # SEC submissions can legitimately omit SIC for registered
+                # investment funds. Keep the issuer unclassified without
+                # treating a verified absent field as a transport failure.
+                sic_not_published.add(normalize('US',ticker))
         except Exception as exc:errors.append({'ticker':ticker,'reason':str(exc)})
     for sid in target:
         ticker=active[sid]['ticker'];key=normalize('US',ticker);source_rows=lookup.get(key,[])
@@ -307,7 +312,8 @@ def sector_us(active,index,target,prior=None):
         sic_code=None
         if sec_doc:
             sic_code=str(sec_doc['sic']);industry=sec_doc.get('sicDescription') or industry;source='SEC_SIC'
-        reason=None if source else ('SOURCE_UNAVAILABLE' if errors else 'NO_SOURCE_MATCH')
+        reason=None if source else ('SEC_SIC_NOT_PUBLISHED' if key in sic_not_published
+                                    else 'SOURCE_UNAVAILABLE' if errors else 'NO_SOURCE_MATCH')
         row={'security_id':sid,'ticker':ticker,'sector':sector or 'UNCLASSIFIED','industry':industry or 'UNCLASSIFIED',
              'sic_code':sic_code,'source':source,'reason':reason,'fetched_at':now,'changes':[]}
         old=prior.get(sid)

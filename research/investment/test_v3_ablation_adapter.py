@@ -17,7 +17,7 @@ def fixture(n=130):
         issue=target-timedelta(hours=3)
         h=math.sin(i/3)
         q=math.cos(i/5)
-        direction="UP" if h+q>.3 else "DOWN" if h+q<-.3 else "FLAT"
+        direction="UP" if h+q>=0 else "DOWN"
         def evidence(source,value):
             return {"source":source,"status":"VERIFIED_ASOF",
                     "source_ref":"SYNTHETIC_TEST_ONLY",
@@ -29,7 +29,7 @@ def fixture(n=130):
             "model_version":"TK-V3-SYNTHETIC-NOT_REAL",
             "price_basis":"FORWARD_EXCLUDE_CASH_DIVIDEND",
             "hour_feature_certified":True,"official_outcome_status":"SETTLED_MOOMOO",
-            "trade_permission":"WAIT","frozen_v3_probs":{"UP":.38,"DOWN":.38,"FLAT":.24},
+            "trade_permission":"WAIT","frozen_v3_probs":{"UP":.52,"DOWN":.48},
             "actual_direction":direction,"issued_at":issue.isoformat(),
             "target_start_at":target.isoformat(),
             "target_end_at":(target+timedelta(hours=6)).isoformat(),
@@ -107,10 +107,17 @@ class V3AblationSyntheticTests(unittest.TestCase):
         with self.assertRaises(InvalidAblationInput):
             evaluate_ablation(p)
 
+    def test_binary_close_cannot_fabricate_flat_probability(self):
+        p=fixture()
+        p["case"]["rows"][0]["frozen_v3_probs"]={"UP":.4,"DOWN":.4,"FLAT":.2}
+        with self.assertRaisesRegex(InvalidAblationInput,"no synthetic FLAT"):
+            evaluate_ablation(p)
+
     def test_multiple_horizons_not_pooled(self):
         p=fixture()
         for r in p["case"]["rows"][100:]:
             r["horizon"]="NEXT_OPEN"
+            r["frozen_v3_probs"]={"UP":.40,"DOWN":.40,"FLAT":.20}
         result=evaluate_ablation(p)["evaluations"]
         self.assertEqual(result["HK.01196:NEXT_CLOSE"]["status"],"RETROSPECTIVE_DEVELOPMENT_ONLY")
         self.assertEqual(result["HK.01196:NEXT_OPEN"]["status"],"INSUFFICIENT_PROVEN_MATURED_TICKETS")

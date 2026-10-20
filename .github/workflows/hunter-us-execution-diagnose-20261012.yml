@@ -33,8 +33,18 @@ jobs:
           if not result.get("ok"):
               raise SystemExit("TOPOLOGY_STATUS_FAILED:"+json.dumps(result,sort_keys=True))
           jobs=result.get("jobs") or {}
-          print("US_JOB_STATUS="+json.dumps(jobs.get("hunter-us-daily") or jobs.get("US") or jobs,
-                                             ensure_ascii=False,sort_keys=True))
-          print("DAILY_STATUS="+json.dumps(result.get("daily") or {},
-                                            ensure_ascii=False,sort_keys=True))
+          def project(job):
+              data=jobs.get(job) or {}
+              return {k:data.get(k) for k in ("job","generation","latestCreatedExecution","image","args","updateTime")}
+          print("US_JOB_CONFIG="+json.dumps(project("US"),ensure_ascii=False,sort_keys=True))
+          print("HK_JOB_CONFIG="+json.dumps(project("HK"),ensure_ascii=False,sort_keys=True))
+          print("DAILY_STATUS="+json.dumps(result.get("daily") or {},ensure_ascii=False,sort_keys=True))
+          # 2026-10-20 incident: strictly read-only current HK control-plane receipt checks.
+          # Never dispatch jobs or alter production files in this diagnostic.
+          for date in ("2026-10-19","2026-10-20"):
+              doc=mod.post_json(os.environ["APPS_SCRIPT_WEBAPP_URL"],{
+                 "op":"file","key":os.environ["APPS_SCRIPT_SHARED_KEY"],
+                 "path":f"HK/CONTROL/DAILY_RUN_{date}.json"
+              })
+              print(f"HK_{date}_DAILY_RUN_EXISTS="+str(bool(doc.get("ok") and doc.get("file"))))
           PY

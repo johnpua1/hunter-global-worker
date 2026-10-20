@@ -296,7 +296,10 @@ class CachedDrive:
         return result
 
     def put_fast(self, path, content, mime='application/json', **kwargs):
-        result = self.raw.put_fast(path, content, mime=mime, **kwargs)
+        # Production Bridge has a SHA-verified fast writer. Older in-memory
+        # readers may only implement put; retain the same CAS contract there.
+        writer = getattr(self.raw, 'put_fast', self.raw.put)
+        result = writer(path, content, mime=mime, **kwargs)
         if self.cache.source(path):
             self.cache.written(path, content, mime)
             self.cache.checkpoint()

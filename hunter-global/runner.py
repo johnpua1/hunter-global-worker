@@ -307,10 +307,14 @@ class Drive:
         # range reads for any non-trivial file instead of one giant response.
         chunk_threshold = max(64_000, int(os.getenv("HUNTER_BRIDGE_CHUNK_THRESHOLD_BYTES", "262144")))
         expected = int(info.get("size") or 0) if info else 0
+        # Immutable Phase 2 staging blobs are content-addressed and verified on
+        # consumption. Avoid READ_CACHE writes for each 128KB blob chunk.
         if (os.getenv('HUNTER_READ_CHECKPOINTS') == '1' and expected > 262144
                 and clean.startswith(('US/', 'HK/'))
                 and ('/PHASE2/' in clean or '/CONTROL/INCREMENTAL_CACHE/' in clean
-                     or '/CONTROL/PHASE2_RESUME/' in clean or clean.endswith('/CURRENT_UNIVERSE.json'))):
+                     or ('/CONTROL/PHASE2_RESUME/' in clean
+                         and '/CONTROL/PHASE2_RESUME/blob-' not in clean)
+                     or clean.endswith('/CURRENT_UNIVERSE.json'))):
             from durable_reads import read_large
             try:
                 return read_large(self, clean, info)
@@ -983,7 +987,11 @@ def finish_phase2_daily(drive, market, daily_rows=None, force=False, expected_da
         raise RuntimeError("PHASE2_INITIAL_SNAPSHOT_PENDING:" + market)
     checkpoint["phase2_completed_date"] = date
     checkpoint["phase2_completed_at_myt"] = now_myt()
-    drive.put(path, compact(checkpoint), expected_sha=digest(raw))
+    from execution_budget import saving
+    # Commit the small final receipt using reserved checkpoint budget.
+    # This never claims Phase 2 completion before the result publish succeeds.
+    with saving():
+        drive.put(path, compact(checkpoint), expected_sha=digest(raw))
     LOG.info("PHASE2_COMMITTED market=%s date=%s result=%s", market, date, result)
 
 

@@ -80,8 +80,9 @@ def _validate(payload):
         if row.get("price_basis")!=PRICE_BASIS or row.get("official_outcome_status")!="SETTLED_MOOMOO":
             raise InvalidAblationInput("Uncertified actual outcome or mixed price adjustment")
         version=row.get("model_version")
-        if not isinstance(version,str) or not version.startswith("TK-V3-"):
-            raise InvalidAblationInput("Frozen V3 model required")
+        if not isinstance(version,str) or not (version.startswith("TK-V3-") or
+            (row["horizon"]=="NEXT_CLOSE" and version=="TK-DAILY-ONE-ADJUSTED-1H-RIDGE-LOGIT-V3-INDEPENDENT-20261019")):
+            raise InvalidAblationInput("Only exact frozen V3 model families allowed")
         if row.get("hour_feature_certified") is not True:
             raise InvalidAblationInput("Incomplete hourly data cannot be scored as V3")
         class_labels=BINARY_LABELS if row["horizon"]=="NEXT_CLOSE" else LABELS

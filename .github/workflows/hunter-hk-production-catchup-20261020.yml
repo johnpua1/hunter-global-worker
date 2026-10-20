@@ -1,0 +1,132 @@
+name: Hunter HK single-writer production catchup 20261020
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/hunter-hk-production-catchup-20261020.yml'
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: hunter-hk-existing-cloud-run-job-20261020
+  cancel-in-progress: false
+jobs:
+  recover-existing-hk-job:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+      - name: Confirm noninteractive Google Cloud authorization exists
+        id: auth-mode
+        env:
+          WIF: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          SERVICE: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          SAJSON: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          if [[ -n "$WIF" && -n "$SERVICE" ]]; then
+            echo "mode=wif" >> "$GITHUB_OUTPUT"
+            echo "CLOUD_AUTH=EXISTING_WIF"
+          elif [[ -n "$SAJSON" ]]; then
+            echo "mode=json" >> "$GITHUB_OUTPUT"
+            echo "CLOUD_AUTH=EXISTING_SERVICE_ACCOUNT_KEY"
+          else
+            echo "BLOCKED_NO_GCP_EXECUTION_AUTHORITY;NO_JOB_UPDATE_OR_EXECUTION" >&2
+            exit 9
+          fi
+      - name: Authenticate using existing workload identity
+        if: steps.auth-mode.outputs.mode == 'wif'
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      - name: Authenticate using existing Google service account
+        if: steps.auth-mode.outputs.mode == 'json'
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+      - name: Verify sole HK writer and reuse prebuilt US-tested image if required
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,subprocess
+          PROJECT="rgs-hunter-global";REGION="us-central1"
+          def g(*args):
+              return subprocess.check_output(["gcloud",*args,"--project="+PROJECT,"--region="+REGION,"--format=json"],text=True)
+          def container(job):
+              found=[]
+              def walk(doc):
+                  if isinstance(doc,dict):
+                      if "containers" in doc and isinstance(doc["containers"],list):
+                          for c in doc["containers"]:
+                              if isinstance(c,dict) and "image" in c:found.append(c)
+                      for val in doc.values():walk(val)
+                  elif isinstance(doc,list):
+                      for val in doc:walk(val)
+              walk(job)
+              if len(found)!=1:raise RuntimeError("JOB_CONTAINER_IDENTITY_MISMATCH")
+              return found[0]
+          us=json.loads(g("run","jobs","describe","hunter-us-daily"))
+          hk=json.loads(g("run","jobs","describe","hunter-hk-daily"))
+          uc,hc=container(us),container(hk)
+          if uc.get("args")!=["--mode","auto","--market","US"] or hc.get("args")!=["--mode","auto","--market","HK"]:
+              raise RuntimeError("PRODUCTION_JOB_ARGS_MISMATCH")
+          us_image=uc["image"];hk_image=hc["image"]
+          prefix="us-central1-docker.pkg.dev/rgs-hunter-global/hunter-worker/runner:"
+          if not us_image.startswith(prefix):raise RuntimeError("UNEXPECTED_SOURCE_IMAGE")
+          sha=us_image[len(prefix):]
+          if len(sha)!=40 or any(c not in "0123456789abcdef" for c in sha):
+              raise RuntimeError("PINNED_SOURCE_SHA_NOT_VALID")
+          executions=json.loads(g("run","jobs","executions","list","--job=hunter-hk-daily","--limit=8"))
+          for ex in executions:
+              d=ex.get("status") or ex
+              conditions=d.get("conditions") or []
+              finished=bool(d.get("completionTime"))
+              if not finished:
+                  finished=any(c.get("type")=="Completed" and c.get("status")=="True" for c in conditions)
+              if not finished:
+                  name=ex.get("metadata",{}).get("name") or ex.get("name")
+                  print("ACTIVE_OR_INDETERMINATE_EXECUTION="+str(name))
+                  raise RuntimeError("HK_EXECUTION_NOT_PROVEN_TERMINAL_ABORT_TO_AVOID_DUAL_WRITERS")
+          print("HK_CLOUD_RUN_NO_ACTIVE_EXECUTION=VERIFIED")
+          if hk_image!=us_image:
+              # Same existing job, HK-scoped credentials and args stay unchanged.
+              subprocess.run(["gcloud","run","jobs","update","hunter-hk-daily",
+                              "--image="+us_image,"--update-env-vars=HUNTER_SOURCE_SHA="+sha,
+                              "--project="+PROJECT,"--region="+REGION,"--quiet"],check=True)
+              newer=json.loads(g("run","jobs","describe","hunter-hk-daily"))
+              if container(newer).get("image")!=us_image:
+                  raise RuntimeError("HK_IMAGE_REBIND_READBACK_FAILED")
+              print("HK_EXISTING_IMAGE_REBOUND_TO_ALREADY_DEPLOYED_US_IMAGE=PASS")
+          else:print("HK_EXISTING_IMAGE_ALREADY_MATCHES_CURRENT=PASS")
+          PY
+      - name: Run original guarded HK Cloud Run job only
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud run jobs execute hunter-hk-daily --project=rgs-hunter-global --region=us-central1 --wait --quiet
+          echo "HK_JOB_EXECUTION_EXITED_SUCCESSFULLY"
+      - name: Independently validate both daily dates and Phase 2
+        env:
+          BRIDGE_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+          LEGACY_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+        run: |
+          python - <<'PY'
+          import base64,importlib.util,json,os,pathlib
+          sp=importlib.util.spec_from_file_location("bridge",pathlib.Path("cloudrun/apps-script-post.py"))
+          mod=importlib.util.module_from_spec(sp);sp.loader.exec_module(mod)
+          def call(op,path):
+              r=mod.post_json(os.environ["BRIDGE_URL"],{"op":op,"path":path,"key":os.environ["LEGACY_KEY"]})
+              if not r.get("ok"):raise RuntimeError("BRIDGE_READ_FAILED:"+path)
+              return r
+          doc=call("read","HK/CONTROL/DAILY_CHECKPOINT.json")
+          cp=json.loads(base64.b64decode(doc["data_base64"]))
+          if cp.get("market")!="HK" or cp.get("last_completed_date")!="2026-10-20" or cp.get("phase2_completed_date")!="2026-10-20" or not cp.get("phase2_completed_at_myt"):
+              raise RuntimeError("HK_CHECKPOINT_NOT_CAUGHT_UP__NO_FALSE_SUCCESS")
+          for date in ("2026-10-19","2026-10-20"):
+              for path in (f"HK/CONTROL/DAILY_RUN_{date}.json",f"HK/DERIVED/{date}/RANK.json"):
+                  if not call("file",path).get("file"):raise RuntimeError("HK_MISSING_PRODUCTION_ARTIFACT:"+path)
+          print("HK_DAILY_1019_1020_RANK_PHASE2_AND_CHECKPOINT=FULLY_VERIFIED")
+          PY

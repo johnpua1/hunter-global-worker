@@ -184,7 +184,7 @@ def evaluate_allocation(case: dict[str, Any]) -> dict[str, Any]:
 
 
 def evaluate(payload: dict[str, Any]) -> dict[str, Any]:
-    if payload.get("mode") not in ("QQQM_RESEARCH", "QQQI_RESEARCH"):
+    if payload.get("mode") not in ("QQQM_RESEARCH", "QQQI_RESEARCH", "V3_TOOL_ABLATION"):
         raise InvalidEvaluationInput("Unknown evaluation mode; cannot alter live predictions")
     if payload.get("data_provenance") != "CONFIRMED_MOOMOO":
         raise InvalidEvaluationInput("Research-only data must have confirmed moomoo provenance")
@@ -193,7 +193,10 @@ def evaluate(payload: dict[str, Any]) -> dict[str, Any]:
     case = payload.get("case")
     if not isinstance(case, dict):
         raise InvalidEvaluationInput("No evaluation input data")
-    if payload["mode"] == "QQQM_RESEARCH":
+    if payload["mode"] == "V3_TOOL_ABLATION":
+        from v3_ablation_adapter import evaluate_ablation
+        result = evaluate_ablation(payload)
+    elif payload["mode"] == "QQQM_RESEARCH":
         result = evaluate_qqqm(case)
     else:
         result = evaluate_allocation(case)

@@ -76,6 +76,66 @@ class HKImageRebindTests(unittest.TestCase):
             self.assertNotIn("--args", args)
             self.assertNotIn("--service-account", args)
 
+    def test_v1_completed_condition_true_or_false_is_terminal(self):
+        for finished in ("True", "False"):
+            with self.subTest(finished=finished):
+                self.assertTrue(rebind.execution_terminal({
+                    "metadata": {"name": "hunter-hk-daily-old"},
+                    "status": {"conditions": [
+                        {"type": "Completed", "status": finished},
+                    ]},
+                }))
+
+    def test_v2_completed_condition_and_completion_enum_are_terminal(self):
+        for state in ("CONDITION_SUCCEEDED", "CONDITION_FAILED"):
+            self.assertTrue(rebind.execution_terminal({
+                "conditions": [{"type": "Completed", "state": state}],
+            }))
+        for state in ("EXECUTION_SUCCEEDED", "EXECUTION_FAILED", "EXECUTION_CANCELLED"):
+            self.assertTrue(rebind.execution_terminal({"completionStatus": state}))
+
+    def test_pending_list_may_be_resolved_by_fresh_terminal_describe(self):
+        before = job("HK", OLD)
+        expected = job("HK", SHA)
+        pending = [{"name": "hunter-hk-daily-kw9vv",
+                    "completionStatus": "EXECUTION_PENDING"}]
+        terminal_detail = {
+            "metadata": {"name": "hunter-hk-daily-kw9vv"},
+            "status": {"conditions": [
+                {"type": "Completed", "status": "False"}]},
+        }
+        calls = []
+        def response(*args):
+            calls.append(args)
+            if "list" in args:
+                return __import__("json").dumps(pending)
+            self.assertEqual(args[:4], ("run", "jobs", "executions", "describe"))
+            self.assertEqual(args[4], "hunter-hk-daily-kw9vv")
+            return __import__("json").dumps(terminal_detail)
+
+        with patch.object(rebind, "describe", side_effect=[
+                job("US", SHA), before, copy.deepcopy(before), expected]), \
+             patch.object(rebind, "gcloud", side_effect=response), \
+             patch.object(rebind.subprocess, "run") as update:
+            rebind.main(SHA)
+            update.assert_called_once()
+            self.assertEqual(len([a for a in calls if "describe" in a]), 2)
+
+    def test_pending_execution_detail_never_allows_update(self):
+        pending = [{"name": "hunter-hk-daily-kw9vv",
+                    "completionStatus": "EXECUTION_PENDING"}]
+        def response(*args):
+            if "list" in args:
+                return __import__("json").dumps(pending)
+            return __import__("json").dumps(pending[0])
+        with patch.object(rebind, "describe", side_effect=[
+                job("US", SHA), job("HK", OLD)]), \
+             patch.object(rebind, "gcloud", side_effect=response), \
+             patch.object(rebind.subprocess, "run") as update:
+            with self.assertRaisesRegex(RuntimeError, "NOT_PROVEN_TERMINAL"):
+                rebind.main(SHA)
+            update.assert_not_called()
+
     def test_already_aligned_skips_update_and_new_execution(self):
         aligned = job("HK", SHA)
         with patch.object(rebind, "describe", side_effect=[job("US", SHA), aligned]), \

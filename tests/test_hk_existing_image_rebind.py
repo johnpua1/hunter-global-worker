@@ -45,8 +45,8 @@ def job(market: str, sha: str) -> dict:
 class HKImageRebindTests(unittest.TestCase):
     def test_active_or_indeterminate_execution_blocks_all_mutation(self):
         for row in (
-            {"name": "hk-active", "completionStatus": "EXECUTION_PENDING"},
-            {"name": "hk-unknown", "conditions": [{"type": "Completed", "state": "UNKNOWN"}]},
+            {"name": "hunter-hk-daily-active", "completionStatus": "EXECUTION_PENDING"},
+            {"name": "hunter-hk-daily-unknown", "conditions": [{"type": "Completed", "state": "UNKNOWN"}]},
         ):
             with self.subTest(row=row):
                 with patch.object(rebind, "describe", side_effect=[job("US", SHA), job("HK", OLD)]), \

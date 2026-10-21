@@ -88,6 +88,45 @@ def expected(before: dict, image: str, sha: str) -> dict:
     return spec
 
 
+# Both Cloud Run v1 ("status.conditions[].status" = True/False) and v2
+# ("conditions[].state" = CONDITION_SUCCEEDED/FAILED) are in active use.
+# The executions.list response may also lag a final executions.describe.
+_TERMINAL = {"EXECUTION_SUCCEEDED", "EXECUTION_FAILED", "EXECUTION_CANCELLED"}
+_NONTERMINAL = {"EXECUTION_PENDING", "EXECUTION_RUNNING"}
+
+
+def execution_terminal(doc: dict) -> bool:
+    """Only affirmative Cloud Run completion evidence qualifies as terminal."""
+    if not isinstance(doc, dict):
+        return False
+    state = doc.get("status") if isinstance(doc.get("status"), dict) else doc
+    for item in (doc, state):
+        status = item.get("completionStatus")
+        if status in _NONTERMINAL:
+            return False  # Contradictory/stale state: demand fresh detail.
+        if status in _TERMINAL:
+            return True
+    if state.get("completionTime") or doc.get("completionTime"):
+        return True
+    for condition in state.get("conditions") or []:
+        if not isinstance(condition, dict) or condition.get("type") != "Completed":
+            continue
+        if condition.get("state") in ("CONDITION_SUCCEEDED", "CONDITION_FAILED"):
+            return True
+        # Cloud Run v1: a failed Completed condition is also terminal.
+        if condition.get("status") in ("True", "False", True, False):
+            return True
+    return False
+
+
+def execution_name(row: dict) -> str:
+    name = row.get("name") or (row.get("metadata") or {}).get("name")
+    if not isinstance(name, str) or not re.fullmatch(
+            r"hunter-hk-daily-[a-z0-9-]+", name.rsplit("/", 1)[-1]):
+        raise RuntimeError("HK_DEPLOY_EXECUTION_IDENTITY_UNVERIFIED")
+    return name.rsplit("/", 1)[-1]
+
+
 def require_no_active_hk_execution() -> None:
     rows = json.loads(gcloud(
         "run", "jobs", "executions", "list",
@@ -96,18 +135,17 @@ def require_no_active_hk_execution() -> None:
     if not isinstance(rows, list):
         raise RuntimeError("HK_DEPLOY_EXECUTION_STATUS_UNREADABLE")
     for row in rows:
-        state = row.get("status") if isinstance(row.get("status"), dict) else row
-        conditions = state.get("conditions") or []
-        terminal = bool(state.get("completionTime") or row.get("completionTime"))
-        terminal = terminal or any(
-            c.get("type") == "Completed" and
-            c.get("state") in ("CONDITION_SUCCEEDED", "CONDITION_FAILED")
-            for c in conditions
-        )
-        if not terminal:
+        if execution_terminal(row):
+            continue
+        # A list entry without terminal proof must be checked individually.
+        # Never assume a missing completion field proves that it is running.
+        name = execution_name(row)
+        detail = json.loads(gcloud(
+            "run", "jobs", "executions", "describe", name
+        ))
+        if not execution_terminal(detail):
             raise RuntimeError(
-                "HK_DEPLOY_EXECUTION_NOT_PROVEN_TERMINAL:" +
-                str(row.get("name") or row.get("metadata", {}).get("name"))
+                "HK_DEPLOY_EXECUTION_NOT_PROVEN_TERMINAL:" + name
             )
 
 

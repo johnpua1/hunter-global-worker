@@ -12,9 +12,11 @@ git diff --cached --quiet
 SHA="$(git rev-parse HEAD)"
 export GCP_PROJECT_ID=rgs-hunter-global
 
-# Update only the existing US daily worker image after a pinned checkout,
-# retaining its original runtime identity, args, limits and time budget.
+# Release the same pinned image to the existing US and HK DAILY jobs.
+# Each image-only update preserves runtime identity, args, limits and budget;
+# HK changes fail closed unless every prior execution is proven terminal.
 python cloudrun/deploy-us-phase2-fix-20261015.py "$SHA"
+python cloudrun/rebind-hk-existing-image.py "$SHA"
 
 # Update the existing versioned Apps Script bridge in place. Existing primary
 # and hourly watchdog trigger counts are read back; monthly deploy is skipped.

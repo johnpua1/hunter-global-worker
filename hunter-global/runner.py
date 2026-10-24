@@ -1027,6 +1027,21 @@ def recover_auto_committed(drive, market):
             try:
                 outcome = close_one(drive, market)
             except NotReady as exc:
+                # A COMPLETE market-data receipt may predate its current-session
+                # indicator cache. Without a cache, the normal foundation path
+                # redundantly reloads the market and can exhaust the task budget
+                # before publishing RANK. Close only this already-committed date
+                # directly from durable Drive inputs; do not fetch prices again.
+                # Incomplete *existing* shards remain NotReady and are not
+                # overwritten by the historical derived builder.
+                if str(exc) == "CURRENT_DATE_DERIVED_SNAPSHOT_NOT_READY":
+                    from daily_closeout import closeout_committed_receipts
+                    closed = closeout_committed_receipts(drive, market, max_sessions=1)
+                    if closed != [next_date]:
+                        raise RuntimeError("AUTO_COMMITTED_DERIVED_CLOSEOUT_MISSING")
+                    LOG.info("AUTO_RANK_RECEIPT_CLOSEOUT market=%s date=%s",
+                             market, next_date)
+                    continue
                 LOG.info("AUTO_RANK_CURRENT_SHARDS_NOT_READY market=%s date=%s reason=%s",
                          market, next_date, str(exc))
                 return False

@@ -5,3 +5,7 @@ reason=user-requested-direct-sync-after-bounded-read-deployment
 run=2026-10-20T23:07+08:00
 scope=existing-apps-script-watchdog-single-writer-only
 reason=explicit-user-authorized-hk-missing-2026-10-19-and-2026-10-20-immediate-catchup
+
+run=2026-10-25
+scope=existing-apps-script-watchdog-single-writer-only
+reason=explicit-user-authorized-US-2026-10-22-2026-10-23-daily-phase2-checkpoint-catchup

@@ -204,6 +204,69 @@ class DailyResumeProgressTests(unittest.TestCase):
         self.assertEqual(drive.json(cp_path)['last_completed_date'], date)
         self.assertEqual(drive.json(cp_path)['phase2_completed_date'], date)
 
+    def test_auto_missing_shards_closes_receipt_for_both_markets(self):
+        from daily_rank_autoclose import NotReady
+        for market, earlier, date in (
+                ('US', '2026-10-21', '2026-10-22'),
+                ('HK', '2026-10-22', '2026-10-23')):
+            with self.subTest(market=market):
+                drive = MemoryDrive()
+                cp_path = f'{market}/CONTROL/DAILY_CHECKPOINT.json'
+                drive.data[cp_path] = runner.compact({
+                    'market': market, 'last_completed_date': earlier,
+                    'phase2_completed_date': earlier,
+                    'phase2_completed_at_myt': '2026-10-23T07:00:00+08:00'})
+                drive.data[f'{market}/CONTROL/DAILY_RUN_{date}.json'] = runner.compact({
+                    'market': market, 'trade_date': date,
+                    'status': 'COMPLETE', 'active': 2, 'available': 2})
+
+                def closeout(_drive, _market, max_sessions=None):
+                    self.assertIs(_drive, drive)
+                    self.assertEqual(_market, market)
+                    self.assertEqual(max_sessions, 1)
+                    self.assertEqual(_drive.json(cp_path)['last_completed_date'], earlier)
+                    _drive.data[f'{market}/DERIVED/{date}/RANK.json'] = runner.compact({
+                        'market': market, 'as_of': date, 'detail_parts': 1,
+                        'rows': [{'security_id': f'{market}-000001'},
+                                 {'security_id': f'{market}-000002'}]})
+                    _drive.data[f'{market}/DERIVED/{date}/batch-0001.json'] = b'{}'
+                    updated = dict(_drive.json(cp_path), last_completed_date=date)
+                    _drive.put(cp_path, runner.compact(updated))
+                    return [date]
+
+                with patch('runner.closed_dates_since',
+                           side_effect=lambda m, last: [date] if last == earlier else []), \
+                     patch('daily_rank_autoclose.close_one',
+                           side_effect=NotReady('CURRENT_DATE_DERIVED_SNAPSHOT_NOT_READY')), \
+                     patch('daily_closeout.closeout_committed_receipts',
+                           side_effect=closeout) as rebuild, \
+                     patch('phase2_runtime.daily',
+                           return_value={'market': market}) as phase2:
+                    self.assertTrue(runner.recover_auto_committed(drive, market))
+                    rebuild.assert_called_once()
+                    phase2.assert_called_once()
+                final = drive.json(cp_path)
+                self.assertEqual(final['last_completed_date'], date)
+                self.assertEqual(final['phase2_completed_date'], date)
+                self.assertTrue(final['phase2_completed_at_myt'])
+
+    def test_auto_partial_current_shards_do_not_trigger_full_rebuild(self):
+        from daily_rank_autoclose import NotReady
+        drive = MemoryDrive()
+        cp_path = 'US/CONTROL/DAILY_CHECKPOINT.json'
+        drive.data[cp_path] = runner.compact({
+            'market': 'US', 'last_completed_date': '2026-10-21'})
+        drive.data['US/CONTROL/DAILY_RUN_2026-10-22.json'] = runner.compact({
+            'market': 'US', 'trade_date': '2026-10-22', 'status': 'COMPLETE',
+            'active': 5358, 'available': 5307})
+        with patch('runner.closed_dates_since', return_value=['2026-10-22']), \
+             patch('daily_rank_autoclose.close_one',
+                   side_effect=NotReady('CURRENT_DATE_BATCHES_INCOMPLETE:20/54')), \
+             patch('daily_closeout.closeout_committed_receipts') as rebuild:
+            self.assertFalse(runner.recover_auto_committed(drive, 'US'))
+            rebuild.assert_not_called()
+        self.assertEqual(drive.json(cp_path)['last_completed_date'], '2026-10-21')
+
     def test_no_new_session_still_resumes_phase2(self):
         drive = MemoryDrive()
         date = '2026-10-06'

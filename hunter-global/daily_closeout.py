@@ -40,12 +40,18 @@ def _validate_rank(drive, market: str, date: str, run: dict) -> dict:
     return rank
 
 
-def closeout_committed_receipts(drive, market: str) -> list[str]:
-    """Close contiguous COMPLETE receipts without re-fetching market data."""
+def closeout_committed_receipts(drive, market: str, max_sessions: int | None = None) -> list[str]:
+    """Close contiguous COMPLETE receipts without re-fetching market data.
+
+    max_sessions=1 lets automatic recovery close exactly one pending receipt
+    before independently completing its Phase 2 stage.
+    """
     checkpoint_path = f"{market}/CONTROL/DAILY_CHECKPOINT.json"
     closed: list[str] = []
 
     while True:
+        if max_sessions is not None and len(closed) >= max_sessions:
+            return closed
         raw = drive.read(checkpoint_path)
         checkpoint = json.loads(raw)
         last = checkpoint.get("last_completed_date")

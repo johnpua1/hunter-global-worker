@@ -116,12 +116,62 @@ def update_job(image: str, sha: str) -> None:
     )
 
 
+# Keep deployment fail-closed while either DAILY job has an unproven
+# terminal execution. The image update affects later runs; do not race a
+# producer that may still be committing DAILY / RANK / Phase 2 receipts.
+def _terminal_execution(doc: dict) -> bool:
+    if not isinstance(doc, dict):
+        return False
+    status = doc.get("status") if isinstance(doc.get("status"), dict) else doc
+    for state in (doc, status):
+        completion = state.get("completionStatus")
+        if completion in ("EXECUTION_PENDING", "EXECUTION_RUNNING"):
+            return False
+        if completion in ("EXECUTION_SUCCEEDED", "EXECUTION_FAILED",
+                          "EXECUTION_CANCELLED"):
+            return True
+    if status.get("completionTime") or doc.get("completionTime"):
+        return True
+    for condition in status.get("conditions") or []:
+        if condition.get("type") != "Completed":
+            continue
+        if condition.get("state") in ("CONDITION_SUCCEEDED", "CONDITION_FAILED"):
+            return True
+        if condition.get("status") in ("True", "False", True, False):
+            return True
+    return False
+
+
+def require_no_active_us_execution() -> None:
+    rows = json.loads(subprocess.check_output(
+        ["gcloud", "run", "jobs", "executions", "list",
+         "--job=" + JOB, "--limit=100", f"--project={PROJECT}",
+         f"--region={REGION}", "--format=json"], text=True))
+    if not isinstance(rows, list):
+        raise RuntimeError("US_DEPLOY_EXECUTION_STATUS_UNREADABLE")
+    for row in rows:
+        if _terminal_execution(row):
+            continue
+        name = row.get("name") or (row.get("metadata") or {}).get("name")
+        if not isinstance(name, str) or not re.fullmatch(
+                r"hunter-us-daily-[a-z0-9-]+", name.rsplit("/", 1)[-1]):
+            raise RuntimeError("US_DEPLOY_EXECUTION_IDENTITY_UNVERIFIED")
+        name = name.rsplit("/", 1)[-1]
+        detail = json.loads(subprocess.check_output(
+            ["gcloud", "run", "jobs", "executions", "describe", name,
+             f"--project={PROJECT}", f"--region={REGION}",
+             "--format=json"], text=True))
+        if not _terminal_execution(detail):
+            raise RuntimeError("US_DEPLOY_EXECUTION_NOT_PROVEN_TERMINAL:" + name)
+
+
 def main(sha: str) -> None:
     os.umask(0o077)
     verify_checkout(sha)
     image = IMAGE_ROOT + ":" + sha
     before = read_job()
     verify_existing_job(before)
+    require_no_active_us_execution()
     if normalized_spec(before) == expected_spec(before, image, sha):
         print("US_PHASE2_IMAGE_ALREADY_VERIFIED;NO_EXECUTION_STARTED")
         return
@@ -130,6 +180,7 @@ def main(sha: str) -> None:
     current = read_job()
     if normalized_spec(current) != normalized_spec(before):
         raise RuntimeError("US_JOB_CHANGED_DURING_BUILD")
+    require_no_active_us_execution()
     update_job(image, sha)
     after = read_job()
     if normalized_spec(after) != expected_spec(before, image, sha):

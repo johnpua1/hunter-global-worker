@@ -25,7 +25,7 @@ def job(sha="b" * 40):
 
 class DeployTests(unittest.TestCase):
     def test_no_change_skips_deploy(self):
-        with patch.object(mod, "verify_checkout"), patch.object(mod, "read_job", return_value=job(SHA)), \
+        with patch.object(mod, "require_no_active_us_execution"), patch.object(mod, "verify_checkout"), patch.object(mod, "read_job", return_value=job(SHA)), \
              patch.object(mod, "build") as build, patch.object(mod, "update_job") as update:
             mod.main(SHA)
             build.assert_not_called()
@@ -34,7 +34,7 @@ class DeployTests(unittest.TestCase):
     def test_update_only_image_and_source_sha(self):
         before = job()
         after = job(SHA)
-        with patch.object(mod, "verify_checkout"), \
+        with patch.object(mod, "require_no_active_us_execution"), patch.object(mod, "verify_checkout"), \
              patch.object(mod, "read_job", side_effect=[before, before, after]), \
              patch.object(mod, "build") as build, patch.object(mod, "update_job") as update:
             mod.main(SHA)
@@ -47,7 +47,7 @@ class DeployTests(unittest.TestCase):
         before = job()
         drift = copy.deepcopy(before)
         mod.only_container(drift)["resources"]["limits"]["cpu"] = "2"
-        with patch.object(mod, "verify_checkout"), \
+        with patch.object(mod, "require_no_active_us_execution"), patch.object(mod, "verify_checkout"), \
              patch.object(mod, "read_job", side_effect=[before, drift]), \
              patch.object(mod, "build"), patch.object(mod, "update_job") as update:
             with self.assertRaisesRegex(RuntimeError, "US_JOB_CHANGED_DURING_BUILD"):
@@ -55,7 +55,7 @@ class DeployTests(unittest.TestCase):
             update.assert_not_called()
 
     def test_build_failure_does_not_touch_cloud_run(self):
-        with patch.object(mod, "verify_checkout"), \
+        with patch.object(mod, "require_no_active_us_execution"), patch.object(mod, "verify_checkout"), \
              patch.object(mod, "read_job", return_value=job()), \
              patch.object(mod, "build", side_effect=RuntimeError("BUILD_FAILED")), \
              patch.object(mod, "update_job") as update:
@@ -66,7 +66,7 @@ class DeployTests(unittest.TestCase):
     def test_entrypoint_mismatch_aborts(self):
         bad = job()
         mod.only_container(bad)["args"] += ["--phase2-only"]
-        with patch.object(mod, "verify_checkout"), \
+        with patch.object(mod, "require_no_active_us_execution"), patch.object(mod, "verify_checkout"), \
              patch.object(mod, "read_job", return_value=bad), \
              patch.object(mod, "update_job") as update:
             with self.assertRaisesRegex(RuntimeError, "UNEXPECTED_US_JOB_CONFIGURATION"):

@@ -1,4 +1,5 @@
 import copy
+import contextlib
 import datetime as dt
 import json
 import os
@@ -220,8 +221,20 @@ class DailyResumeProgressTests(unittest.TestCase):
                     'market': market, 'trade_date': date,
                     'status': 'COMPLETE', 'active': 2, 'available': 2})
 
+                class CachedProxy:
+                    def __getattr__(self, name):
+                        return getattr(drive, name)
+
+                cached = CachedProxy()
+
+                @contextlib.contextmanager
+                def cached_inputs(raw, requested_market):
+                    self.assertIs(raw, drive)
+                    self.assertEqual(requested_market, market)
+                    yield cached
+
                 def closeout(_drive, _market, max_sessions=None):
-                    self.assertIs(_drive, drive)
+                    self.assertIs(_drive, cached)
                     self.assertEqual(_market, market)
                     self.assertEqual(max_sessions, 1)
                     self.assertEqual(_drive.json(cp_path)['last_completed_date'], earlier)
@@ -238,11 +251,16 @@ class DailyResumeProgressTests(unittest.TestCase):
                            side_effect=lambda m, last: [date] if last == earlier else []), \
                      patch('daily_rank_autoclose.close_one',
                            side_effect=NotReady('CURRENT_DATE_DERIVED_SNAPSHOT_NOT_READY')), \
+                     patch('incremental_inputs.incremental_inputs',
+                           side_effect=cached_inputs) as incremental, \
                      patch('daily_closeout.closeout_committed_receipts',
                            side_effect=closeout) as rebuild, \
                      patch('phase2_runtime.daily',
                            return_value={'market': market}) as phase2:
                     self.assertTrue(runner.recover_auto_committed(drive, market))
+                    self.assertEqual(incremental.call_count, 2)
+                    self.assertTrue(all(call.args == (drive, market)
+                                        for call in incremental.call_args_list))
                     rebuild.assert_called_once()
                     phase2.assert_called_once()
                 final = drive.json(cp_path)

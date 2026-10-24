@@ -1036,7 +1036,15 @@ def recover_auto_committed(drive, market):
                 # overwritten by the historical derived builder.
                 if str(exc) == "CURRENT_DATE_DERIVED_SNAPSHOT_NOT_READY":
                     from daily_closeout import closeout_committed_receipts
-                    closed = closeout_committed_receipts(drive, market, max_sessions=1)
+                    from incremental_inputs import incremental_inputs
+                    # The recovery path runs before the normal foundation cache
+                    # context below.  Keep the historical DERIVED fallback on
+                    # the same verified input packs; otherwise it lists and
+                    # rereads every DAILY partition even when a warm cache is
+                    # already present.
+                    with incremental_inputs(drive, market) as inputs:
+                        closed = closeout_committed_receipts(
+                            inputs, market, max_sessions=1)
                     if closed != [next_date]:
                         raise RuntimeError("AUTO_COMMITTED_DERIVED_CLOSEOUT_MISSING")
                     LOG.info("AUTO_RANK_RECEIPT_CLOSEOUT market=%s date=%s",

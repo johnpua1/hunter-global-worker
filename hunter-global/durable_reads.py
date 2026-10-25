@@ -3,6 +3,7 @@ import base64
 import gzip
 import json
 import logging
+import os
 import re
 import threading
 
@@ -48,14 +49,36 @@ def read_large(drive, path, info):
         doc = json.loads(prior) if prior is not None else {}
         if doc.get('schema') != 1 or any(doc.get(k) != v for k, v in identity.items()):
             doc = {'schema': 1, **identity, 'file_sha256': None, 'next_offset': 0, 'pieces': []}
+        # Validate the entire saved layout *before* any remote reads.
+        # A prior run may have checkpointed hundreds of small parts; loading
+        # them serially adds minutes of needless Bridge latency on recovery.
+        # Only saved immutable parts are read concurrently; the checkpoint
+        # writer below remains strictly serial and SHA-verified.
         chunks, offset = [], 0
         for piece in doc['pieces']:
             if (piece['offset'] != offset or not 0 < piece['length'] <= CHUNK
-                    or not re.fullmatch('[a-f0-9]{64}', piece['compressed_sha256'])):
+                    or not re.fullmatch('[a-f0-9]{64}', piece['compressed_sha256'])
+                    or not re.fullmatch('[a-f0-9]{64}', piece.get('sha256', ''))):
                 raise RuntimeError('LARGE_READ_MANIFEST_INVALID')
-            data = _decode(drive.read(root + 'part-' + piece['compressed_sha256'] + '.gz'), piece)
-            chunks.append(data); offset += len(data)
+            offset += piece['length']
         if offset != doc['next_offset'] or offset > identity['size']:
+            raise RuntimeError('LARGE_READ_MANIFEST_OFFSET_INVALID')
+
+        def restore_part(reader, piece):
+            raw = reader.read(root + 'part-' + piece['compressed_sha256'] + '.gz')
+            return _decode(raw, piece)
+
+        saved_parts = doc['pieces']
+        if len(saved_parts) > 1 and hasattr(drive, 'fork_reader'):
+            from runner import map_drive_reads
+            # Cap nested readers to 2: outer DERIVED reads may already be
+            # parallel, and Apps Script has finite request capacity.
+            workers = max(1, min(2, int(os.getenv('HUNTER_CACHE_RESTORE_WORKERS', '2'))))
+            chunks.extend(map_drive_reads(drive, restore_part, saved_parts, workers))
+        else:
+            chunks.extend(restore_part(drive, piece) for piece in saved_parts)
+
+        if sum(map(len, chunks)) != offset:
             raise RuntimeError('LARGE_READ_MANIFEST_OFFSET_INVALID')
         LOG.info('LARGE_READ_RESUME path=%s bytes_saved=%d total=%d', path, offset, identity['size'])
         while offset < identity['size']:

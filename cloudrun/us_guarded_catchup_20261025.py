@@ -49,21 +49,39 @@ def gcloud(*args: str) -> str:
     return shell("gcloud", *args, f"--project={PROJECT}")
 
 
-def log_failure() -> None:
+def log_failure(execution: str = FAILED) -> None:
+    """Read only actual error records, never cache INFO noise or credentials."""
+    if not re.fullmatch(r"hunter-us-daily-[a-z0-9]+", execution):
+        raise RuntimeError("US_DIAGNOSTIC_EXECUTION_ID_INVALID")
     query = ('resource.type="cloud_run_job" AND '
              'resource.labels.job_name="' + JOB + '" AND '
-             'labels."run.googleapis.com/execution_name"="' + FAILED + '" AND '
+             'labels."run.googleapis.com/execution_name"="' + execution + '" AND '
              '(severity>=ERROR OR '
-             'textPayload=~"HUNTER_EXECUTION_FAILED|Traceback|Exception|RuntimeError|ValueError|WORK_BUDGET|Killed")')
-    raw = gcloud("logging", "read", query, "--limit=35", "--order=desc", "--format=json")
+             'textPayload=~"HUNTER_EXECUTION_FAILED|Traceback|Exception|RuntimeError|ValueError|WorkBudgetExceeded|MemoryError|Terminating task|Killed"))')
+    raw = gcloud("logging", "read", query, "--limit=60", "--order=desc", "--format=json")
     rows = json.loads(raw)
-    print("FAILED_EXECUTION_LOG_MATCHES=", len(rows), flush=True)
-    for row in reversed(rows[-20:]):
+    print("US_FAILURE_LOG_EXECUTION", execution, "MATCHES", len(rows), flush=True)
+    for row in reversed(rows[-35:]):
         msg = row.get("textPayload") or (row.get("jsonPayload") or {}).get("message") or ""
         msg = re.sub(r"https?://\S+", "[URL]", str(msg))
-        msg = re.sub(r"(?i)((?:password|token|secret|key)\s*[:=]\s*)\S+", r"\1[REDACTED]", msg)
+        msg = re.sub(r"(?i)((?:password|token|secret|key)\s*[:=]\s*)\S+",
+                     r"\1[REDACTED]", msg)
         if msg.strip():
-            print("ERROR_LOG", row.get("timestamp"), msg[:900], flush=True)
+            print("US_FAILURE_LOG", row.get("timestamp"), msg[:1800], flush=True)
+
+
+def newest_failed_execution() -> str | None:
+    raw = gcloud("run", "jobs", "executions", "list", "--job=" + JOB,
+                 "--region=" + REGION, "--limit=5", "--format=json")
+    for item in json.loads(raw):
+        name = (item.get("metadata") or {}).get("name") or item.get("name") or ""
+        name = name.rsplit("/", 1)[-1]
+        status = item.get("status") or item
+        completed = status.get("completionStatus") or item.get("completionStatus")
+        if (re.fullmatch(r"hunter-us-daily-[a-z0-9]+", name)
+                and completed in ("EXECUTION_FAILED", "CONDITION_FAILED")):
+            return name
+    return None
 
 
 def bridge():
@@ -119,12 +137,31 @@ def do_execute(deploy) -> None:
     deploy.require_no_active_us_execution()
     # One explicitly requested manual execution of the EXISTING US worker.
     # No new schedule or parallel HK execution.
-    shell("gcloud", "run", "jobs", "execute", JOB,
-          f"--region={REGION}", f"--project={PROJECT}",
-          "--wait", "--quiet", capture=False)
+    try:
+        shell("gcloud", "run", "jobs", "execute", JOB,
+              f"--region={REGION}", f"--project={PROJECT}",
+              "--wait", "--quiet", capture=False)
+    except subprocess.CalledProcessError:
+        # A failed Cloud Run operation is NOT a successful catchup. Read the
+        # newest failed execution, print its actual error and stop immediately.
+        try:
+            failed = newest_failed_execution()
+            if failed:
+                log_failure(failed)
+            else:
+                print("US_EXECUTION_FAILED_LOG_ID_UNVERIFIED", flush=True)
+        except Exception as diag_exc:
+            print("US_EXECUTION_DIAGNOSTICS_UNAVAILABLE",
+                  type(diag_exc).__name__, flush=True)
+        raise
 
 
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == "--diagnose-only":
+        log_failure(sys.argv[2])
+        return  # Read-only: no auth secrets, deployment, lock change or job run.
+    if len(sys.argv) != 1:
+        raise RuntimeError("US_RECOVERY_ARGUMENTS_INVALID")
     if dt.datetime.now(MYT).date().isoformat() != "2026-10-25":
         raise RuntimeError("DATE_BOUND_ONE_OFF_ONLY_NO_LATE_RUN")
     if shell("git", "branch", "--show-current").strip() != "main":

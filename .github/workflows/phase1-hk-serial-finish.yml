@@ -5,7 +5,6 @@ on:
     branches: [main]
     paths:
       - .github/workflows/phase1-hk-serial-finish.yml
-      - hunter-global/analytics.py
   workflow_dispatch:
 
 permissions:
@@ -28,6 +27,9 @@ env:
 
 jobs:
   repair-hk:
+    # Legacy Phase 1 is never auto-launched by source maintenance.
+    # Requires an explicit operator workflow_dispatch request.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 330
     steps:

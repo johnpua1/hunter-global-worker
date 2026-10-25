@@ -83,14 +83,30 @@ def indicators(rows: list[dict], benchmark: list[dict] | None = None) -> dict:
     low = [float(r["low"]) for r in rows]
     volume = [float(r["volume"]) for r in rows]
     last = close[-1]
+    # A zero/non-finite/negative OHLC bar is invalid market data, NOT a
+    # mathematical zero-distance bottom. Keep the row for audit, but never
+    # allow it to qualify for today's ranking or bottom confirmation.
+    relevant = rows[-252:]
+    price_data_valid = all(
+        math.isfinite(float(r[field])) and float(r[field]) > 0
+        for r in relevant for field in ("open", "high", "low", "close")
+    )
     ma = {n: statistics.mean(close[-n:]) if len(close) >= n else None
           for n in (20, 50, 200)}
-    slope = {n: (ma[n] / statistics.mean(close[-n-5:-5]) - 1)
-             if len(close) >= n + 5 else None for n in ma}
-    low_distance = {n: last / min(low[-n:]) - 1 if len(low) >= n else None
-                    for n in (20, 60, 120, 252)}
-    high52 = max(float(r["high"]) for r in rows[-252:])
-    low52 = min(float(r["low"]) for r in rows[-252:])
+    def safe_slope(n):
+        if len(close) < n + 5:
+            return None
+        prior = statistics.mean(close[-n-5:-5])
+        return ma[n] / prior - 1 if prior > 0 and math.isfinite(prior) else None
+    slope = {n: safe_slope(n) for n in ma}
+    def safe_low_distance(n):
+        if len(low) < n or not math.isfinite(last) or last <= 0:
+            return None
+        floor = min(low[-n:])
+        return last / floor - 1 if floor > 0 and math.isfinite(floor) else None
+    low_distance = {n: safe_low_distance(n) for n in (20, 60, 120, 252)}
+    high52 = max(float(r["high"]) for r in relevant)
+    low52 = min(float(r["low"]) for r in relevant)
     e12, e26 = ema(close, 12), ema(close, 26)
     macd_values = [a - b for a, b in zip(e12, e26) if a is not None and b is not None]
     macd = macd_values[-1] if macd_values else None
@@ -99,7 +115,7 @@ def indicators(rows: list[dict], benchmark: list[dict] | None = None) -> dict:
     # lows, and the current close must have reclaimed the 20-day MA.
     no_new_low = (len(close) >= 3 and close[-2] >= min(close[:-2]) and
                   close[-1] >= min(close[:-1]))
-    bottom_confirmed = bool(no_new_low and ma[20] is not None and last > ma[20])
+    bottom_confirmed = bool(price_data_valid and no_new_low and ma[20] is not None and last > ma[20])
     low_zone = low_distance[60] is not None and low_distance[60] <= .10
     typical_dollar_volume = [float(r["close"]) * v for r, v in zip(rows, volume)]
     def change(n, series):
@@ -110,17 +126,22 @@ def indicators(rows: list[dict], benchmark: list[dict] | None = None) -> dict:
         aligned = [(r, bm[r.get("trade_date", r["date"])]) for r in rows
                    if r.get("trade_date", r["date"]) in bm]
         if len(aligned) > 20:
-            relative = change(20, [float(r["close"]) for r, _ in aligned]) - change(
-                20, [v for _, v in aligned])
+            stock_change = change(20, [float(r["close"]) for r, _ in aligned])
+            benchmark_change = change(20, [v for _, v in aligned])
+            if stock_change is not None and benchmark_change is not None:
+                relative = stock_change - benchmark_change
     return {
         "security_id": rows[-1]["security_id"], "trade_date": rows[-1].get("trade_date", rows[-1]["date"]),
         "close": last, "ma": ma, "slope_5d": slope,
+        "price_data_valid": price_data_valid,
         "alignment": "BULL" if all(ma.values()) and ma[20] > ma[50] > ma[200] else
                      "BEAR" if all(ma.values()) and ma[20] < ma[50] < ma[200] else "MIXED_OR_SHORT",
         "price_vs_ma": {n: last / value - 1 if value else None for n, value in ma.items()},
         "low_distance": low_distance, "percentile_52w":
-            (last - low52) / (high52 - low52) if high52 > low52 else None,
-        "drawdown_52w": last / high52 - 1 if high52 else None,
+            (last - low52) / (high52 - low52)
+            if price_data_valid and high52 > low52 else None,
+        "drawdown_52w": last / high52 - 1
+                        if price_data_valid and high52 > 0 else None,
         "bottom_structure": "STAGE_LOW" if low_zone else "NONE",
         "bottom_confirmation": bottom_confirmed,
         "bottom_label": "阶段低位，收盘确认" if low_zone and bottom_confirmed else

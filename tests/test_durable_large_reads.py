@@ -1,6 +1,8 @@
 import base64
 import gzip
 import json
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -56,6 +58,27 @@ class DurableLargeReadTests(unittest.TestCase):
             store.calls.clear()
             self.assertEqual(read_large(store, store.path, store.file(store.path)), raw)
             self.assertEqual(store.calls, [])
+
+    def test_saved_cache_parts_replay_with_bounded_parallel_reads(self):
+        raw = b'part-check' * (CHUNK * 18 // 10)
+        store = LargeStore(raw)
+        self.assertEqual(read_large(store, store.path, store.file(store.path)), raw)
+        store.new_process()
+        threads = set()
+        guard = threading.Lock()
+        original_read = store.read
+
+        def tracked(path):
+            if '/READ_CACHE/' in path and '/part-' in path:
+                with guard:
+                    threads.add(threading.current_thread().name)
+                time.sleep(0.01)
+            return original_read(path)
+
+        with patch.object(store, 'read', side_effect=tracked):
+            self.assertEqual(read_large(store, store.path, store.file(store.path)), raw)
+        self.assertGreaterEqual(len(threads), 2)
+        self.assertEqual(store.calls, [], 'complete cache must not refetch source chunks')
 
     def test_same_size_revision_change_restarts_and_never_splices_versions(self):
         store = LargeStore(b'a' * (CHUNK * 3)); store.stop_at = CHUNK

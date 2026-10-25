@@ -165,10 +165,16 @@ def build(drive: Drive, market: str, date: str, daily_rows=None, patch_snapshot=
         if row["return_20d"] is not None and len(returns) > 1:
             import bisect
             row["relative_strength_20d"] = bisect.bisect_right(returns, row["return_20d"]) / len(returns)
-        row["filter_pass"] = (row["ma"][20] is not None and
+        row["filter_pass"] = (row["price_data_valid"] and
+                              row["ma"][20] is not None and
                               row["dollar_volume_20d"] is not None and
                               row["trade_date"] == date)
-        row["filter_reason"] = None if row["filter_pass"] else "SHORT_OR_STALE_HISTORY"
+        row["filter_reason"] = (None if row["filter_pass"] else
+                                "INVALID_NONPOSITIVE_OHLC" if not row["price_data_valid"]
+                                else "SHORT_OR_STALE_HISTORY")
+        if not row["price_data_valid"]:
+            LOG.warning("DERIVED_PRICE_DATA_REJECTED market=%s security_id=%s date=%s reason=%s",
+                        market, row["security_id"], date, row["filter_reason"])
         liquidity = row["dollar_volume_20d"] or 0
         row["rank_score"] = (int(row["alignment"] == "BULL") * 2 +
                              int(row["bottom_confirmation"]) +

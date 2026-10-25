@@ -239,11 +239,20 @@ class Drive:
                     self.http = requests.Session()
                     raise ValueError("BRIDGE_POST_RETURNED_HEALTH:" + op)
                 if not result.get("ok"):
-                    if op == "source_inventory" and str(result.get("error", "")) in {
+                    error = str(result.get("error", "UNKNOWN"))
+                    if op == "source_inventory" and error in {
                             "INVENTORY_HTTP_429", "INVENTORY_HTTP_500", "INVENTORY_HTTP_502",
                             "INVENTORY_HTTP_503", "INVENTORY_HTTP_504"}:
                         raise ValueError("INVENTORY_TRANSIENT_FAILURE")
-                    raise RuntimeError("BRIDGE_" + str(result.get("error", "UNKNOWN")))
+                    # Apps Script sometimes reports transient Drive backend
+                    # failures as a JSON error with HTTP 200. Previous code
+                    # aborted immediately despite existing bounded read-only
+                    # transport retries. Retry ONLY this exact service error
+                    # for read operations; NEVER retry writes/authorization or
+                    # missing-file errors through this exception classification.
+                    if reading and error == "Service error: Drive":
+                        raise ValueError("BRIDGE_READ_TRANSIENT_DRIVE_SERVICE")
+                    raise RuntimeError("BRIDGE_" + error)
                 required = {"read": ("data_base64", "sha256"),
                             "source_inventory": ("data_base64", "sha256"),
                             "read_chunk": ("data_base64", "sha256", "offset", "length", "size", "eof"),

@@ -17,7 +17,7 @@ jobs:
   catchup-us:
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
-    timeout-minutes: 330
+    timeout-minutes: 180
     env:
       APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
       APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
@@ -83,45 +83,24 @@ jobs:
           print('US_GUARD_PASS;CLOUD_RUN_LAST_TERMINAL='+str(state)+';CHECKPOINT='+str(current), flush=True)
           PY
 
-      - name: Resume exactly US committed 2026-10-22, without HK or history reset
-        working-directory: hunter-global
-        run: python -u runner.py --mode auto --market US
-
-      - name: Verify US 10-22 fully committed before 10-23
+      - name: Resume ONLY US Phase 2 for already committed 2026-10-23
         working-directory: hunter-global
         run: |
           python - <<'PY'
-          from runner import Drive
+          import subprocess, sys
+          from runner import Drive, validate_phase2_resume
           d=Drive()
           cp=d.json('US/CONTROL/DAILY_CHECKPOINT.json')
-          day=cp.get('last_completed_date')
-          phase=cp.get('phase2_completed_date')
-          if cp.get('market')!='US' or day not in ('2026-10-22','2026-10-23'):
-              raise SystemExit('US_22_CATCHUP_INCOMPLETE:'+str(day))
-          if phase!=day or not cp.get('phase2_completed_at_myt'):
-              raise SystemExit('US_PHASE2_22_NOT_COMPLETE')
-          for date in ('2026-10-22',):
-              receipt=d.json('US/CONTROL/DAILY_RUN_'+date+'.json')
-              rank=d.json('US/DERIVED/'+date+'/RANK.json')
-              if (receipt.get('status')!='COMPLETE' or receipt.get('trade_date')!=date
-                  or rank.get('market')!='US' or rank.get('as_of')!=date
-                  or not rank.get('rows')):
-                  raise SystemExit('US_22_RANK_OR_RECEIPT_INVALID')
-          print('US_2026_10_22_DAILY_RANK_PHASE2=VERIFIED;CHECKPOINT='+str(day),flush=True)
-          PY
-
-      - name: Resume US 2026-10-23 only if still missing
-        working-directory: hunter-global
-        run: |
-          python - <<'PY'
-          import subprocess,sys
-          from runner import Drive
-          cp=Drive().json('US/CONTROL/DAILY_CHECKPOINT.json')
-          if (cp.get('last_completed_date')=='2026-10-23' and
-                  cp.get('phase2_completed_date')=='2026-10-23'):
-              print('US_2026_10_23_ALREADY_COMPLETE',flush=True)
+          if cp.get('market')!='US' or cp.get('last_completed_date')!='2026-10-23':
+              raise SystemExit('US_PHASE2_23_REQUIRES_COMMITTED_CHECKPOINT')
+          validate_phase2_resume(d,'US','2026-10-23')
+          if (cp.get('phase2_completed_date')=='2026-10-23' and
+                  cp.get('phase2_completed_at_myt')):
+              print('US_PHASE2_23_ALREADY_COMPLETED_NO_REPLAY',flush=True)
           else:
-              subprocess.run([sys.executable,'-u','runner.py','--mode','auto','--market','US'],
+              print('US_PHASE2_23_ONLY;NO_DAILY_FETCH;NO_RANK_BUILD',flush=True)
+              subprocess.run([sys.executable,'-u','runner.py','--mode','auto',
+                              '--market','US','--phase2-only','--as-of','2026-10-23'],
                              check=True)
           PY
 

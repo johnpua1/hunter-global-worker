@@ -1,0 +1,149 @@
+name: Hunter US 2026-10-22-23 one-time catchup
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/hunter-us-catchup-once-20261025.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hunter-global-US
+  cancel-in-progress: false
+
+jobs:
+  catchup-us:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      APPS_SCRIPT_WEBAPP_URL: ${{ secrets.APPS_SCRIPT_WEBAPP_URL }}
+      APPS_SCRIPT_SHARED_KEY: ${{ secrets.APPS_SCRIPT_SHARED_KEY }}
+      HUNTER_ACTIONS_CUTOVER: CONFIRMED
+      HUNTER_RESUMABLE_RUN: '1'
+      HUNTER_READ_CHECKPOINTS: '1'
+      HUNTER_INCREMENTAL_INPUTS: '1'
+      HUNTER_CONTINUE_ONLY: '1'
+      HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '90'
+      HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS: '180'
+      HUNTER_BRIDGE_ATTEMPTS: '4'
+      DERIVED_READ_WORKERS: '2'
+      DAILY_READ_WORKERS: '2'
+      FETCH_WORKERS: '3'
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r hunter-global/requirements.txt
+
+      - name: Guard sole US writer and already COMPLETE input receipt
+        run: |
+          python - <<'PY'
+          import importlib.util
+          import os
+          import pathlib
+          import sys
+
+          p = pathlib.Path('cloudrun/apps-script-post.py')
+          spec = importlib.util.spec_from_file_location('hunterbridge', p)
+          m = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(m)
+          url, key = os.environ['APPS_SCRIPT_WEBAPP_URL'], os.environ['APPS_SCRIPT_SHARED_KEY']
+          control = m.post_json(url, {'op':'topology_status','key':key})
+          if control.get('ok') is not True:
+              raise SystemExit('US_GUARD_TOPOLOGY_UNAVAILABLE')
+          us = ((control.get('jobs') or {}).get('US') or {})
+          execution = us.get('latestCreatedExecution') or {}
+          state = execution.get('completionStatus')
+          if us.get('args') != ['--mode','auto','--market','US']:
+              raise SystemExit('US_GUARD_PRODUCTION_MODE_CHANGED')
+          if state not in ('EXECUTION_SUCCEEDED','EXECUTION_FAILED','EXECUTION_CANCELLED'):
+              raise SystemExit('US_GUARD_ACTIVE_OR_UNVERIFIED_CLOUD_RUN_EXECUTION:' + str(state))
+          sys.path.insert(0,'hunter-global')
+          from runner import Drive
+          drive = Drive()
+          cp = drive.json('US/CONTROL/DAILY_CHECKPOINT.json')
+          current = cp.get('last_completed_date')
+          if cp.get('market') != 'US' or current not in ('2026-10-21','2026-10-22','2026-10-23'):
+              raise SystemExit('US_GUARD_CHECKPOINT_CHANGED:' + str(current))
+          if current == '2026-10-21':
+              receipt = drive.json('US/CONTROL/DAILY_RUN_2026-10-22.json')
+              if any((receipt.get('market') != 'US',
+                      receipt.get('trade_date') != '2026-10-22',
+                      receipt.get('status') != 'COMPLETE')):
+                  raise SystemExit('US_GUARD_22_RECEIPT_NOT_COMPLETE')
+          print('US_GUARD_PASS;CLOUD_RUN_LAST_TERMINAL='+str(state)+';CHECKPOINT='+str(current), flush=True)
+          PY
+
+      - name: Resume exactly US committed 2026-10-22, without HK or history reset
+        working-directory: hunter-global
+        run: python -u runner.py --mode auto --market US
+
+      - name: Verify US 10-22 fully committed before 10-23
+        working-directory: hunter-global
+        run: |
+          python - <<'PY'
+          from runner import Drive
+          d=Drive()
+          cp=d.json('US/CONTROL/DAILY_CHECKPOINT.json')
+          day=cp.get('last_completed_date')
+          phase=cp.get('phase2_completed_date')
+          if cp.get('market')!='US' or day not in ('2026-10-22','2026-10-23'):
+              raise SystemExit('US_22_CATCHUP_INCOMPLETE:'+str(day))
+          if phase!=day or not cp.get('phase2_completed_at_myt'):
+              raise SystemExit('US_PHASE2_22_NOT_COMPLETE')
+          for date in ('2026-10-22',):
+              receipt=d.json('US/CONTROL/DAILY_RUN_'+date+'.json')
+              rank=d.json('US/DERIVED/'+date+'/RANK.json')
+              if (receipt.get('status')!='COMPLETE' or receipt.get('trade_date')!=date
+                  or rank.get('market')!='US' or rank.get('as_of')!=date
+                  or not rank.get('rows')):
+                  raise SystemExit('US_22_RANK_OR_RECEIPT_INVALID')
+          print('US_2026_10_22_DAILY_RANK_PHASE2=VERIFIED;CHECKPOINT='+str(day),flush=True)
+          PY
+
+      - name: Resume US 2026-10-23 only if still missing
+        working-directory: hunter-global
+        run: |
+          python - <<'PY'
+          import subprocess,sys
+          from runner import Drive
+          cp=Drive().json('US/CONTROL/DAILY_CHECKPOINT.json')
+          if (cp.get('last_completed_date')=='2026-10-23' and
+                  cp.get('phase2_completed_date')=='2026-10-23'):
+              print('US_2026_10_23_ALREADY_COMPLETE',flush=True)
+          else:
+              subprocess.run([sys.executable,'-u','runner.py','--mode','auto','--market','US'],
+                             check=True)
+          PY
+
+      - name: Final authority readback of US 10-22 and 10-23
+        working-directory: hunter-global
+        run: |
+          python - <<'PY'
+          from runner import Drive
+          d=Drive()
+          cp=d.json('US/CONTROL/DAILY_CHECKPOINT.json')
+          if not (cp.get('market')=='US' and
+                  cp.get('last_completed_date')=='2026-10-23' and
+                  cp.get('phase2_completed_date')=='2026-10-23' and
+                  cp.get('phase2_completed_at_myt')):
+              raise SystemExit('US_TARGET_CHECKPOINT_PHASE2_NOT_COMMITTED')
+          for date in ('2026-10-22','2026-10-23'):
+              receipt=d.json('US/CONTROL/DAILY_RUN_'+date+'.json')
+              rank=d.json('US/DERIVED/'+date+'/RANK.json')
+              if (receipt.get('market')!='US' or receipt.get('trade_date')!=date or
+                  receipt.get('status')!='COMPLETE' or rank.get('market')!='US' or
+                  rank.get('as_of')!=date or not rank.get('rows') or
+                  rank.get('detail_parts')!=(len(rank['rows'])+249)//250):
+                  raise SystemExit('US_DAILY_RANK_INVALID:'+date)
+              for idx in range(1,rank['detail_parts']+1):
+                  if not d.file('US/DERIVED/'+date+'/batch-'+format(idx,'04d')+'.json'):
+                      raise SystemExit('US_RANK_DETAIL_MISSING:'+date+':'+str(idx))
+              print('US_VERIFIED='+date+';RANK_PARTS='+str(rank['detail_parts']),flush=True)
+          print('US_CATCHUP_2026_10_23_PASS;NO_HK_WRITES;NO_BASE_REWRITE',flush=True)
+          PY

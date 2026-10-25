@@ -35,7 +35,7 @@ jobs:
           jobs=result.get("jobs") or {}
           def project(job):
               data=jobs.get(job) or {}
-              return {k:data.get(k) for k in ("job","generation","latestCreatedExecution","image","args","updateTime")}
+              return {k:data.get(k) for k in ("job","generation","latestCreatedExecution","image","args","envNames","updateTime")}
           print("US_JOB_CONFIG="+json.dumps(project("US"),ensure_ascii=False,sort_keys=True))
           print("HK_JOB_CONFIG="+json.dumps(project("HK"),ensure_ascii=False,sort_keys=True))
           print("DAILY_STATUS="+json.dumps(result.get("daily") or {},ensure_ascii=False,sort_keys=True))

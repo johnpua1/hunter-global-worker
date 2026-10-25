@@ -28,7 +28,11 @@ jobs:
       HUNTER_CONTINUE_ONLY: '1'
       HUNTER_BRIDGE_READ_TIMEOUT_SECONDS: '90'
       HUNTER_BRIDGE_WRITE_TIMEOUT_SECONDS: '180'
-      HUNTER_BRIDGE_ATTEMPTS: '4'
+      HUNTER_BRIDGE_ATTEMPTS: '5'
+      # Apps Script Drive service returned a transient failure while
+      # fetching a saved part with concurrent readers. Keep verified cached
+      # part restoration serial on this one-off US recovery only.
+      HUNTER_CACHE_RESTORE_WORKERS: '1'
       DERIVED_READ_WORKERS: '2'
       DAILY_READ_WORKERS: '2'
       FETCH_WORKERS: '3'

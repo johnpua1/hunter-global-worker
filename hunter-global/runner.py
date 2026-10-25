@@ -1021,6 +1021,27 @@ def recover_auto_committed(drive, market):
         date = cp.get("last_completed_date")
         if cp.get("market") != market or not isinstance(date, str):
             raise RuntimeError("AUTO_RECOVERY_CHECKPOINT_IDENTITY_MISMATCH")
+        # First settle Phase 2 for the ALREADY committed checkpoint.
+        # The next trading day's DAILY receipt may not exist yet. Looking
+        # for it first used to send an unfinished Phase 2 checkpoint into
+        # the expensive full foundation path, re-reading all history.
+        if (cp.get("phase2_completed_date") != date or
+                not cp.get("phase2_completed_at_myt")):
+            LOG.info("AUTO_PHASE2_RESUME_BEFORE_NEXT_DAILY market=%s date=%s",
+                     market, date)
+            if not drive.file(f"{market}/DERIVED/{date}/RANK.json"):
+                return False
+            validate_phase2_resume(drive, market, date)
+            from incremental_inputs import incremental_inputs
+            with incremental_inputs(drive, market) as inputs:
+                finish_phase2_daily(inputs, market, expected_date=date)
+            final = drive.json(cp_path)
+            if (final.get("market") != market or
+                    final.get("last_completed_date") != date or
+                    final.get("phase2_completed_date") != date or
+                    not final.get("phase2_completed_at_myt")):
+                raise RuntimeError("AUTO_PHASE2_COMPLETION_READBACK_MISMATCH")
+            return True
         pending = closed_dates_since(market, date)
         if pending:
             next_date = pending[0]
@@ -1071,19 +1092,6 @@ def recover_auto_committed(drive, market):
             validate_phase2_resume(drive, market, date)
             LOG.info("AUTO_COMMITTED_COMPLETE market=%s date=%s", market, date)
             return True
-        if not drive.file(f"{market}/DERIVED/{date}/RANK.json"):
-            return False
-        validate_phase2_resume(drive, market, date)
-        from incremental_inputs import incremental_inputs
-        with incremental_inputs(drive, market) as inputs:
-            finish_phase2_daily(inputs, market, expected_date=date)
-        final = drive.json(cp_path)
-        if (final.get("market") != market or
-                final.get("last_completed_date") != date or
-                final.get("phase2_completed_date") != date or
-                not final.get("phase2_completed_at_myt")):
-            raise RuntimeError("AUTO_PHASE2_COMPLETION_READBACK_MISMATCH")
-        return True
     LOG.info("AUTO_RECOVERY_BATCH_LIMIT market=%s", market)
     return False
 

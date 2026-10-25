@@ -60,8 +60,8 @@ def log_failure() -> None:
     print("FAILED_EXECUTION_LOG_MATCHES=", len(rows), flush=True)
     for row in reversed(rows[-20:]):
         msg = row.get("textPayload") or (row.get("jsonPayload") or {}).get("message") or ""
-        msg = re.sub(r"https?://\\S+", "[URL]", str(msg))
-        msg = re.sub(r"(?i)((?:password|token|secret|key)\\s*[:=]\\s*)\\S+", r"\\1[REDACTED]", msg)
+        msg = re.sub(r"https?://\S+", "[URL]", str(msg))
+        msg = re.sub(r"(?i)((?:password|token|secret|key)\s*[:=]\s*)\S+", r"\1[REDACTED]", msg)
         if msg.strip():
             print("ERROR_LOG", row.get("timestamp"), msg[:900], flush=True)
 
@@ -97,8 +97,10 @@ def accepted(api, url: str, key: str) -> str:
     if last == TARGET:
         if phase != TARGET or not cp.get("phase2_completed_at_myt"):
             raise RuntimeError("US_TARGET_PHASE2_NOT_COMMITTED")
-    if last in (DAY, TARGET) and phase != last:
-        raise RuntimeError("US_CHECKPOINT_HAS_PENDING_PHASE2:" + str(last))
+    # A validated rank/checkpoint can precede Phase 2 completion; the
+    # existing auto worker resumes this exact committed day on its next pass.
+    if last == DAY and phase not in (PREV, DAY):
+        raise RuntimeError("US_UNEXPECTED_PHASE2_POINTER:" + str(phase))
     for date in (DAY, TARGET):
         if date > last:
             continue

@@ -294,12 +294,20 @@ class DailyResumeProgressTests(unittest.TestCase):
             'market': 'US', 'as_of': date, 'detail_parts': 1,
             'rows': [{'security_id': 'US-000001'}]})
         drive.data[f'US/DERIVED/{date}/batch-0001.json'] = b'{}'
+        def commit_phase2(inputs, market, expected_date=None):
+            self.assertEqual(expected_date, date)
+            cp_path = 'US/CONTROL/DAILY_CHECKPOINT.json'
+            cp = drive.json(cp_path)
+            cp.update(phase2_completed_date=date,
+                      phase2_completed_at_myt='2026-10-07T08:00:00+08:00')
+            drive.put(cp_path, runner.compact(cp))
         with patch.dict(os.environ, {'APPS_SCRIPT_WEBAPP_URL': 'test', 'APPS_SCRIPT_SHARED_KEY': 'test',
                                     'HUNTER_ACTIONS_CUTOVER': 'CONFIRMED', 'HUNTER_INCREMENTAL_INPUTS': '0'}), \
              patch.object(sys, 'argv', ['runner', '--mode', 'auto', '--market', 'US']), \
              patch('runner._enforce_cloud_run_topology'), patch('production_guard.check_at_start'), \
              patch('runner.Drive', return_value=drive), patch('foundation.seed_corporate_actions'), \
-             patch('foundation.run_daily', return_value=[]), patch('runner.finish_phase2_daily') as finish:
+             patch('foundation.run_daily', return_value=[]), \
+             patch('runner.finish_phase2_daily', side_effect=commit_phase2) as finish:
             runner.main()
             finish.assert_called_once_with(drive, 'US', expected_date=date)
 

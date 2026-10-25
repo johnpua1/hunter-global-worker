@@ -57,7 +57,7 @@ def log_failure(execution: str = FAILED) -> None:
              'resource.labels.job_name="' + JOB + '" AND '
              'labels."run.googleapis.com/execution_name"="' + execution + '" AND '
              '(severity>=ERROR OR '
-             'textPayload=~"HUNTER_EXECUTION_FAILED|Traceback|Exception|RuntimeError|ValueError|WorkBudgetExceeded|MemoryError|Terminating task|Killed"))')
+             'textPayload=~"HUNTER_EXECUTION_FAILED|Traceback|Exception|RuntimeError|ValueError|WorkBudgetExceeded|MemoryError|Terminating task|Killed")')
     raw = gcloud("logging", "read", query, "--limit=60", "--order=desc", "--format=json")
     rows = json.loads(raw)
     print("US_FAILURE_LOG_EXECUTION", execution, "MATCHES", len(rows), flush=True)
@@ -182,7 +182,6 @@ def main() -> None:
     if initial == TARGET:
         print("US_TARGET_ALREADY_COMPLETED_NO_NEW_JOB")
         return
-    log_failure()
     print("TESTING_BEFORE_DEPLOY", flush=True)
     shell(sys.executable, "-m", "unittest", "discover", "-s", "tests",
           "-p", "test_*.py", capture=False)

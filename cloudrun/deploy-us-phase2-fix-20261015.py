@@ -31,10 +31,33 @@ def verify_checkout(sha: str) -> None:
     ).strip()
     if head != sha:
         raise RuntimeError("PINNED_CHECKOUT_REQUIRED")
-    subprocess.run(
+    # The one-time Cloud Shell recovery may clone with --depth 1.
+    # History absence is not evidence that the required Phase 2 fix is missing.
+    # Fetch ancestry from origin only when shallow, then verify the same
+    # immutable pinned SHA; never bypass the ancestor safety gate.
+    shallow = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "--is-shallow-repository"],
+        text=True,
+    ).strip()
+    if shallow == "true":
+        print("US_DEPLOY_FETCH_SHALLOW_HISTORY_FOR_ANCESTRY", flush=True)
+        subprocess.run(
+            ["git", "-C", str(ROOT), "fetch", "--unshallow", "--no-tags", "origin", "main"],
+            check=True,
+        )
+        head_after = subprocess.check_output(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True
+        ).strip()
+        if head_after != sha:
+            raise RuntimeError("US_DEPLOY_HEAD_CHANGED_DURING_FETCH")
+    elif shallow != "false":
+        raise RuntimeError("US_DEPLOY_SHALLOW_STATE_UNVERIFIED")
+    result = subprocess.run(
         ["git", "-C", str(ROOT), "merge-base", "--is-ancestor", REQUIRED_FIX, sha],
-        check=True, stdout=subprocess.DEVNULL,
+        check=False, stdout=subprocess.DEVNULL,
     )
+    if result.returncode != 0:
+        raise RuntimeError("REQUIRED_PHASE2_FIX_ANCESTRY_UNVERIFIED")
 
 
 def read_job() -> dict:

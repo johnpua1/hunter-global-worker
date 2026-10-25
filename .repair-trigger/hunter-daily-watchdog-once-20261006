@@ -13,3 +13,7 @@ reason=explicit-user-authorized-US-2026-10-22-2026-10-23-daily-phase2-checkpoint
 run=2026-10-25T07:27+08:00
 scope=US-catchup-existing-apps-script-watchdog-single-writer
 reason=post-US-07:00-window-verified-stale-checkpoint-2026-10-21-and-user-authorized-recovery
+
+run=2026-10-25-user-explicit-retry
+scope=US-2026-10-22-and-2026-10-23-only-via-existing-apps-script-single-writer-watchdog
+reason=verify-previous-cloudrun-dispatch-and-resume-only-when-production-lock-cooldown-allows;HK-healthy-no-op
